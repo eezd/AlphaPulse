@@ -26,6 +26,8 @@ logger = logging.getLogger("alphapulse.market.worker")
 PAGES_PER_TURN = 20
 CATCHUP_SECONDS = 3600
 SYMBOL_CHECK_SECONDS = 10
+# miniTicker 约每秒推送，这么久没消息视为连接卡死
+STALL_SECONDS = 60
 ACTIVE_STATUSES = ("pending", "backfilling", "ready")
 
 client = BinanceClient()
@@ -209,8 +211,19 @@ async def stream_loop(market: str) -> None:
                 logger.info("%s WS 已连接：%d 个交易对，%d 个流", market, len(symbols), len(streams))
                 catchup_needed.set()
                 next_check = time.monotonic() + SYMBOL_CHECK_SECONDS
-                async for raw in ws:
-                    await handle_message(market, raw)
+                last_message = time.monotonic()
+                while True:
+                    # 带超时接收：没有消息时也要按时检查交易对变化和连接是否卡死
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=SYMBOL_CHECK_SECONDS)
+                    except TimeoutError:
+                        pass
+                    else:
+                        last_message = time.monotonic()
+                        await handle_message(market, raw)
+                    if time.monotonic() - last_message >= STALL_SECONDS:
+                        logger.warning("%s WS %ds 未收到消息，重连", market, STALL_SECONDS)
+                        break
                     if time.monotonic() >= next_check:
                         next_check = time.monotonic() + SYMBOL_CHECK_SECONDS
                         if await active_symbols(market) != symbols:

@@ -15,7 +15,8 @@ REST = {
     "um": {"base": "https://fapi.binance.com", "klines": "/fapi/v1/klines", "exchange_info": "/fapi/v1/exchangeInfo",
            "ticker": "/fapi/v1/ticker/24hr", "weight_limit": 2400, "kline_limit": 1500},
 }
-WS = {"spot": "wss://stream.binance.com:9443/stream", "um": "wss://fstream.binance.com/stream"}
+# 合约旧路由 fstream.binance.com/stream 能连上但不推送数据，K 线/行情流在 /market 路由下
+WS = {"spot": "wss://stream.binance.com:9443/stream", "um": "wss://fstream.binance.com/market/stream"}
 
 # 权重用量超过上限的这个比例就等到下一分钟
 WEIGHT_RATIO = 0.5
