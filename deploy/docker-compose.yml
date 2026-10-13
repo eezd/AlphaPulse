@@ -1,0 +1,39 @@
+name: alphapulse
+
+x-backend: &backend
+  build:
+    context: ../backend
+    dockerfile: ../deploy/Dockerfile.backend
+  image: alphapulse-backend
+  env_file: ../.env
+  restart: unless-stopped
+  networks: [dev_default]
+
+services:
+  api:
+    <<: *backend
+    command: [uvicorn, alphapulse.api.main:app, --host, 0.0.0.0, --port, "8000", --proxy-headers, --forwarded-allow-ips, "*"]
+
+  crawler:
+    <<: *backend
+    command: [python, -m, alphapulse.crawler.manager]
+    # 留时间给 scrapy 子进程优雅退出并刷完日志
+    stop_grace_period: 30s
+
+  market:
+    <<: *backend
+    command: [python, -m, alphapulse.market.worker]
+
+  web:
+    build:
+      context: ../web
+      dockerfile: ../deploy/Dockerfile.web
+    restart: unless-stopped
+    depends_on: [api]
+    ports:
+      - 127.0.0.1:21030:80
+    networks: [dev_default]
+
+networks:
+  dev_default:
+    external: true

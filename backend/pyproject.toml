@@ -1,0 +1,26 @@
+[project]
+name = "alphapulse"
+version = "0.1.0"
+description = "AlphaPulse：新闻与行情信号研究"
+authors = [
+    { name = "eezd", email = "eezd@outlook.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "alembic>=1.20.0",
+    "argon2-cffi>=25.1.0",
+    "asyncpg>=0.32.0",
+    "fastapi>=0.143.0",
+    "httpx>=0.28.1",
+    "pydantic-settings>=2.15.0",
+    "pyjwt>=2.15.1",
+    "redis>=8.1.0",
+    "scrapy>=2.19.0",
+    "scrapy-redis>=0.9.1",
+    "sqlalchemy[asyncio]>=2.1.4",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.23,<0.13.0"]
+build-backend = "uv_build"

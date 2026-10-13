@@ -1,0 +1,5 @@
+.env
+CONTEXT.md
+backups/
+.venv/
+__pycache__/
