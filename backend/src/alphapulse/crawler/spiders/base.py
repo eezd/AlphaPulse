@@ -2,11 +2,13 @@ import asyncio
 import json
 import logging
 import re
+import time
 import uuid
 from collections.abc import Callable, Coroutine, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from scrapy import Request, signals
 from scrapy.crawler import Crawler
@@ -24,10 +26,14 @@ from alphapulse.models import CrawlRun, NewsItem, Source
 
 # 日志落库失败时只输出到 stdout，避免被自己的处理器再次捕获
 sink_logger = logging.getLogger("alphapulse.logsink")
+# 日志里的时间按北京时间显示
+LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 
 MAX_PAGES = 200
 BACKOFF_BASE_SECONDS = 30
 BACKOFF_MAX_SECONDS = 15 * 60
+# 每轮用于历史回补的时长上限：回补和实时采集共用一个子进程，不能拖住实时轮次
+HISTORY_RUN_SECONDS = 20
 
 
 def ts(epoch: int) -> datetime:
@@ -54,6 +60,11 @@ class RunState:
     errors: list[str] = field(default_factory=list)
     # 遇到 403/429 后本轮不再发新请求
     blocked: bool = False
+    # 历史回补：本轮推进到的最早时间；仅在本轮成功结束时写回 sources
+    history_target: datetime | None = None
+    history_position: datetime | None = None
+    history_done: bool = False
+    history_deadline: float = 0
 
     @property
     def full_scan(self) -> bool:
@@ -91,6 +102,8 @@ class NewsSpider(RedisSpider):
         self.run: RunState | None = None
         self.log_buffer: list[tuple[str, uuid.UUID | None, str, str]] = []
         self._tasks: set[asyncio.Task] = set()
+        # 上一轮成功后的回补进度 (目标, 断点, 是否结束)。写库是异步的，管理进程推来的下一条触发可能还带着旧断点
+        self.history_checkpoint: tuple[datetime, datetime, bool] | None = None
 
     @classmethod
     def from_crawler(cls, crawler: Crawler, *args: Any, **kwargs: Any) -> "NewsSpider":
@@ -104,6 +117,10 @@ class NewsSpider(RedisSpider):
     # ---------- 子类实现 ----------
 
     def first_requests(self) -> Iterable[Request]:
+        raise NotImplementedError
+
+    def history_request(self, before: datetime) -> Request:
+        """早于 before 的第一页列表请求，meta 需带 history=True；仅 HISTORY_SOURCES 中的来源实现"""
         raise NotImplementedError
 
     # ---------- 运行生命周期 ----------
@@ -123,8 +140,26 @@ class NewsSpider(RedisSpider):
         now = datetime.now(UTC)
         self.run = RunState(uuid.uuid4(), tick["trigger"], now, now - timedelta(hours=tick["backfill_hours"]))
         self._spawn(self._insert_run(self.run))
-        self.logger.info("开始采集（触发方式：%s）", tick["trigger"])
-        return list(self.first_requests())
+        requests = list(self.first_requests())
+        history = tick.get("history")
+        if history:
+            target = datetime.fromisoformat(history["target"])
+            # 断点为空表示首次回补：从现在开始往前翻，顺带补上中间可能的缺口
+            position = datetime.fromisoformat(history["position"]) if history["position"] else now
+            checkpoint = self.history_checkpoint
+            if checkpoint and checkpoint[0] == target and checkpoint[1] <= position:
+                position = checkpoint[1]
+                if checkpoint[2]:
+                    history = None
+        if history:
+            self.run.history_target = target
+            self.run.history_position = position
+            self.run.history_deadline = time.monotonic() + HISTORY_RUN_SECONDS
+            requests.append(self.history_request(position))
+            self.logger.info("开始采集（触发方式：%s，历史回补自 %s 往前）", tick["trigger"], position.astimezone(LOCAL_TZ).strftime("%Y-%m-%d %H:%M"))
+        else:
+            self.logger.info("开始采集（触发方式：%s）", tick["trigger"])
+        return requests
 
     def _on_opened(self) -> None:
         logging.getLogger().addHandler(DbLogHandler(self))
@@ -139,6 +174,8 @@ class NewsSpider(RedisSpider):
 
     def _close_run(self) -> None:
         run, self.run = self.run, None
+        if run.history_target is not None and not run.errors:
+            self.history_checkpoint = (run.history_target, run.history_position, run.history_done)
         self._spawn(self._finish_run(run))
 
     def _on_error(self, failure: Failure, response: Response) -> None:
@@ -183,6 +220,11 @@ class NewsSpider(RedisSpider):
                 .on_conflict_do_update(index_elements=[CrawlRun.id], set_=values)
             )
             source = await session.get(Source, self.name, with_for_update=True)
+            # 本轮失败不推进断点，下一轮从原位置重做（写入幂等）；目标期间被修改或取消时丢弃本轮进度
+            history_saved = not failed and run.history_target is not None and source.history_target == run.history_target
+            if history_saved:
+                source.history_position = run.history_position
+                source.history_done = run.history_done
             if failed:
                 source.consecutive_failures += 1
                 delay = min(BACKOFF_BASE_SECONDS * 2 ** (source.consecutive_failures - 1), BACKOFF_MAX_SECONDS)
@@ -201,6 +243,14 @@ class NewsSpider(RedisSpider):
             self.logger.error("本轮失败：%s；错误 %d 个，暂停 %ds", summary, len(run.errors), delay)
         else:
             self.logger.info("本轮完成：%s", summary)
+        if history_saved:
+            position = run.history_position.astimezone(LOCAL_TZ).strftime("%Y-%m-%d %H:%M")
+            if not run.history_done:
+                self.logger.info("历史回补已到 %s", position)
+            elif run.history_position <= run.history_target:
+                self.logger.info("历史回补完成，已到 %s", position)
+            else:
+                self.logger.warning("历史回补结束：来源最早只能翻到 %s", position)
 
     async def _flush_logs(self) -> None:
         rows, self.log_buffer = self.log_buffer, []
@@ -252,6 +302,19 @@ class NewsSpider(RedisSpider):
             and oldest > self.run.cutoff
             and (self.run.full_scan or any(external_id not in known for external_id in external_ids))
         )
+
+    def history_step(self, oldest: datetime | None) -> bool:
+        """处理完一页回补列表后调用：推进本轮断点，返回是否继续翻下一页。oldest 为本页最早时间，空页传 None"""
+        run = self.run
+        if oldest is None or oldest >= run.history_position:
+            # 空页或没有更早的数据（部分接口越过下限会返回最新数据）：来源已经翻到底
+            run.history_done = True
+            return False
+        run.history_position = oldest
+        if oldest <= run.history_target:
+            run.history_done = True
+            return False
+        return not run.blocked and time.monotonic() < run.history_deadline
 
     def item(
         self,

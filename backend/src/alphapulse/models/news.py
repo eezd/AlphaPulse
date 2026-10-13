@@ -21,6 +21,10 @@ class Source(Base):
     last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
     paused_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # 历史回补：目标时间（为空表示不回补）、已回补到的最早时间（断点）、是否已结束（到达目标或来源无更早数据）
+    history_target: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    history_position: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    history_done: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
 
 
 class NewsItem(Base):

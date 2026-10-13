@@ -7,14 +7,14 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.sse import EventSourceResponse, ServerSentEvent
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from alphapulse.core.auth import require_admin
 from alphapulse.core.db import get_session
 from alphapulse.core.redis import redis
-from alphapulse.crawler.events import CONTROL_CHANNEL, LOG_CHANNEL, STATUS_KEY
+from alphapulse.crawler.events import CONTROL_CHANNEL, HISTORY_SOURCES, LOG_CHANNEL, STATUS_KEY
 from alphapulse.models import CrawlLog, CrawlRun, NewsItem, Source
 
 router = APIRouter(prefix="/api/crawler", tags=["crawler"], dependencies=[Depends(require_admin)])
@@ -41,6 +41,10 @@ class SourceOut(BaseModel):
     last_success_at: datetime | None
     last_error: str | None
     paused_until: datetime | None
+    supports_history: bool
+    history_target: datetime | None
+    history_position: datetime | None
+    history_done: bool
     # 管理进程未运行时为 None
     process: ProcessStatus | None
     today_new: int
@@ -57,6 +61,8 @@ class SourcesOut(BaseModel):
 class SourcePatch(BaseModel):
     enabled: bool | None = None
     interval_seconds: Annotated[int | None, Field(ge=5, le=86400)] = None
+    # 设为时间表示开始或继续回补到该时间；显式传 null 表示取消
+    history_target: AwareDatetime | None = None
 
 
 class RunOut(BaseModel):
@@ -110,6 +116,7 @@ async def list_sources(session: Annotated[AsyncSession, Depends(get_session)]) -
         sources=[
             SourceOut.model_validate({
                 **s.__dict__,
+                "supports_history": s.code in HISTORY_SOURCES,
                 "process": json.loads(statuses[s.code]) if s.code in statuses else None,
                 "today_new": today_counts.get(s.code, (0, 0))[0],
                 "today_revised": today_counts.get(s.code, (0, 0))[1],
@@ -125,8 +132,16 @@ async def patch_source(code: str, body: SourcePatch, session: Annotated[AsyncSes
     source = await session.get(Source, code)
     if source is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "来源不存在")
-    for field, value in body.model_dump(exclude_none=True).items():
+    for field, value in body.model_dump(exclude_none=True, exclude={"history_target"}).items():
         setattr(source, field, value)
+    if "history_target" in body.model_fields_set:
+        if code not in HISTORY_SOURCES:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "该来源的接口不支持历史翻页，无法回补")
+        if body.history_target is not None and body.history_target >= datetime.now(LOCAL_TZ):
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "回补目标时间必须早于现在")
+        # 保留断点：改目标或重新开始时从已回补的位置继续
+        source.history_target = body.history_target
+        source.history_done = False
     await session.commit()
 
 

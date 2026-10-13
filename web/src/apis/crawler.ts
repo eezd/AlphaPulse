@@ -18,6 +18,10 @@ export interface SourceInfo {
   last_success_at: string | null
   last_error: string | null
   paused_until: string | null
+  supports_history: boolean
+  history_target: string | null
+  history_position: string | null
+  history_done: boolean
   process: ProcessStatus | null
   today_new: number
   today_revised: number
@@ -43,7 +47,14 @@ export function listSources(): Promise<SourcesInfo> {
   return http.get("/crawler/sources")
 }
 
-export function patchSource(code: string, body: { enabled?: boolean, interval_seconds?: number }): Promise<void> {
+export interface SourcePatch {
+  enabled?: boolean
+  interval_seconds?: number
+  /** ISO 时间表示回补到该时间；null 表示取消回补 */
+  history_target?: string | null
+}
+
+export function patchSource(code: string, body: SourcePatch): Promise<void> {
   return http.patch(`/crawler/sources/${code}`, body)
 }
 

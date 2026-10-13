@@ -1,6 +1,7 @@
 <script lang="ts" setup>
 import type { CrawlLog, SourceInfo } from "@/apis/crawler"
 import type { NewsBrief } from "@/apis/news"
+import dayjs from "dayjs"
 import { patchSource } from "@/apis/crawler"
 import { listNews } from "@/apis/news"
 import { formatTime } from "@/utils/text"
@@ -51,6 +52,39 @@ async function saveInterval() {
     return
   await patchSource(props.source.code, { interval_seconds: interval.value })
   ElMessage.success("已保存，下一轮起生效")
+  emit("changed")
+}
+
+// 默认回补到 2026 年初；已设置过目标时沿用
+const DEFAULT_HISTORY_TARGET = "2026-01-01"
+const historyDate = ref(props.source.history_target ? dayjs(props.source.history_target).format("YYYY-MM-DD") : DEFAULT_HISTORY_TARGET)
+
+const history = computed(() => {
+  const { history_target: target, history_position: position, history_done: done } = props.source
+  if (!target)
+    return { text: position ? `未在回补，已回补到 ${formatTime(position, "YYYY-MM-DD HH:mm")}` : "未开始", percent: 0, status: undefined }
+  const now = Date.now()
+  const span = now - new Date(target).getTime()
+  const covered = position ? now - new Date(position).getTime() : 0
+  const percent = Math.min(100, Math.max(0, Math.round(covered / span * 1000) / 10))
+  const reached = formatTime(position, "YYYY-MM-DD HH:mm")
+  if (done && position && new Date(position) <= new Date(target))
+    return { text: `已完成，已到 ${reached}`, percent: 100, status: "success" } as const
+  if (done)
+    return { text: `来源最早只能翻到 ${reached}，更早的数据接口不提供`, percent, status: "warning" } as const
+  return { text: position ? `进行中，已到 ${reached}` : "等待下一轮开始", percent, status: undefined }
+})
+
+async function startHistory() {
+  // 按北京时间当天 0 点
+  await patchSource(props.source.code, { history_target: dayjs(`${historyDate.value}T00:00:00+08:00`).toISOString() })
+  ElMessage.success("已开始，下一轮起分段回补")
+  emit("changed")
+}
+
+async function cancelHistory() {
+  await patchSource(props.source.code, { history_target: null })
+  ElMessage.success("已取消，断点保留")
   emit("changed")
 }
 
@@ -107,6 +141,20 @@ loadLatest()
       <el-descriptions-item label="采集间隔">
         <el-input-number v-model="interval" :min="5" :max="86400" size="small" controls-position="right" class="w-28" @change="saveInterval" />
         秒
+      </el-descriptions-item>
+      <el-descriptions-item label="历史回补" :span="4">
+        <span v-if="!source.supports_history" class="text-xs text-[var(--el-text-color-secondary)]">该来源的列表接口只能翻最近几页，无法回补历史</span>
+        <div v-else class="flex items-center gap-3">
+          <el-date-picker v-model="historyDate" type="date" value-format="YYYY-MM-DD" :clearable="false" size="small" class="!w-36" />
+          <el-button size="small" type="primary" @click="startHistory">
+            {{ source.history_position ? "继续回补" : "开始回补" }}
+          </el-button>
+          <el-button v-if="source.history_target" size="small" @click="cancelHistory">
+            取消
+          </el-button>
+          <el-progress :percentage="history.percent" :status="history.status" class="w-60" />
+          <span class="text-xs">{{ history.text }}</span>
+        </div>
       </el-descriptions-item>
       <el-descriptions-item v-if="source.last_error" label="最近错误" :span="4">
         <span class="whitespace-pre-wrap text-xs text-red-500">{{ source.last_error }}</span>

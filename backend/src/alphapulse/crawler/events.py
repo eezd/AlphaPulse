@@ -11,6 +11,8 @@ LOG_CHANNEL = f"{KEY_PREFIX}pub:logs"
 NEWS_CHANNEL = f"{KEY_PREFIX}pub:news"
 CONTROL_CHANNEL = f"{KEY_PREFIX}ctl:crawler"
 STATUS_KEY = f"{KEY_PREFIX}crawler:status"
+# 列表接口支持按时间点往前翻的来源；cls_depth 列表只能翻约 3 页，无法回补历史
+HISTORY_SOURCES = ("cls_telegraph", "wscn_live", "wscn_news")
 
 
 def start_urls_key(source_code: str) -> str:

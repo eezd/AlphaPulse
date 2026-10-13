@@ -2,6 +2,7 @@ import hashlib
 import html
 import json
 import re
+from datetime import datetime
 from urllib.parse import urlencode
 
 from scrapy import Request
@@ -26,6 +27,13 @@ class ClsTelegraphSpider(NewsSpider):
     def first_requests(self) -> list[Request]:
         return [self.request(signed_url("/v1/roll/get_roll_list", {"category": "", "last_time": "", "rn": "20"}), self.parse_list, page=1)]
 
+    def list_request(self, last_time: int, page: int, **meta) -> Request:
+        params = {"category": "", "last_time": str(last_time), "refresh_type": "1", "rn": "20"}
+        return self.request(signed_url("/v1/roll/get_roll_list", params), self.parse_list, page=page, **meta)
+
+    def history_request(self, before: datetime) -> Request:
+        return self.list_request(int(before.timestamp()), 1, history=True)
+
     async def parse_list(self, response: Response):
         body = response.json()
         if body["errno"] != 0:
@@ -49,10 +57,13 @@ class ClsTelegraphSpider(NewsSpider):
                 extra={"level": x.get("level"), "stock_list": x.get("stock_list")},
             )
         page = response.meta["page"]
-        if rows and self.should_continue(ids, known, ts(min(x["ctime"] for x in rows)), page):
-            last_time = str(min(x["ctime"] for x in rows))
-            params = {"category": "", "last_time": last_time, "refresh_type": "1", "rn": "20"}
-            yield self.request(signed_url("/v1/roll/get_roll_list", params), self.parse_list, page=page + 1)
+        last_time = min(x["ctime"] for x in rows) if rows else None
+        oldest = ts(last_time) if rows else None
+        if response.meta.get("history"):
+            if self.history_step(oldest):
+                yield self.list_request(last_time, page + 1, history=True)
+        elif rows and self.should_continue(ids, known, oldest, page):
+            yield self.list_request(last_time, page + 1)
 
 
 class ClsDepthSpider(NewsSpider):

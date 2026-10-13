@@ -159,7 +159,12 @@ class Manager:
                 continue
             # 子进程还没取走上一条触发时不再堆积
             if await redis.llen(start_urls_key(s.code)) == 0:
-                await redis.lpush(start_urls_key(s.code), json.dumps({"trigger": w.trigger, "backfill_hours": s.backfill_hours}))
+                tick = {"trigger": w.trigger, "backfill_hours": s.backfill_hours}
+                if s.history_target and not s.history_done:
+                    # 回补分段夹在常规轮次里执行，进度由子进程在本轮成功后写回
+                    position = s.history_position.isoformat() if s.history_position else None
+                    tick["history"] = {"target": s.history_target.isoformat(), "position": position}
+                await redis.lpush(start_urls_key(s.code), json.dumps(tick))
                 w.trigger = "schedule"
             w.next_run_at = now + timedelta(seconds=s.interval_seconds)
 

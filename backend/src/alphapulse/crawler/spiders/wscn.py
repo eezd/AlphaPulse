@@ -1,3 +1,7 @@
+import base64
+import json
+from datetime import datetime
+
 from scrapy import Request
 from scrapy.http import Response
 
@@ -14,8 +18,13 @@ class WscnNewsSpider(NewsSpider):
     def first_requests(self) -> list[Request]:
         return [self.list_request("", 1)]
 
-    def list_request(self, cursor: str, page: int) -> Request:
-        return self.request(f"{API}/information-flow?channel=global&accept=article&limit=20&cursor={cursor}", self.parse_list, page=page)
+    def list_request(self, cursor: str, page: int, **meta) -> Request:
+        return self.request(f"{API}/information-flow?channel=global&accept=article&limit=20&cursor={cursor}", self.parse_list, page=page, **meta)
+
+    def history_request(self, before: datetime) -> Request:
+        # 信息流 cursor 是 base64 的 JSON，ArticleLe 为文章时间上界（秒）
+        cursor = json.dumps({"SlotOffset": 0, "TotalCount": 0, "ArticleLe": int(before.timestamp())}, separators=(",", ":"))
+        return self.list_request(base64.b64encode(cursor.encode()).decode(), 1, history=True)
 
     async def parse_list(self, response: Response):
         data = response.json()["data"]
@@ -27,7 +36,11 @@ class WscnNewsSpider(NewsSpider):
             if known.get(str(r["id"])) != (r["title"], r["content_short"]):
                 yield self.request(f"{API}/articles/{r['id']}?extract=0", self.parse_detail, summary=r["content_short"])
         page = response.meta["page"]
-        if rows and self.should_continue(ids, known, ts(min(r["display_time"] for r in rows)), page):
+        oldest = ts(min(r["display_time"] for r in rows)) if rows else None
+        if response.meta.get("history"):
+            if self.history_step(oldest):
+                yield self.list_request(data["next_cursor"], page + 1, history=True)
+        elif rows and self.should_continue(ids, known, oldest, page):
             yield self.list_request(data["next_cursor"], page + 1)
 
     async def parse_detail(self, response: Response):
@@ -54,8 +67,12 @@ class WscnLiveSpider(NewsSpider):
     def first_requests(self) -> list[Request]:
         return [self.list_request("", 1)]
 
-    def list_request(self, cursor: str, page: int) -> Request:
-        return self.request(f"{API}/lives?channel=global-channel&limit=50&cursor={cursor}", self.parse_list, page=page)
+    def list_request(self, cursor: str, page: int, **meta) -> Request:
+        return self.request(f"{API}/lives?channel=global-channel&limit=50&cursor={cursor}", self.parse_list, page=page, **meta)
+
+    def history_request(self, before: datetime) -> Request:
+        # cursor 为时间上界（秒）；接口只保留约最近 180 天，更早返回空
+        return self.list_request(str(int(before.timestamp())), 1, history=True)
 
     async def parse_list(self, response: Response):
         data = response.json()["data"]
@@ -77,5 +94,9 @@ class WscnLiveSpider(NewsSpider):
                 extra={"score": x.get("score"), "symbols": x.get("symbols")},
             )
         page = response.meta["page"]
-        if rows and self.should_continue(ids, known, ts(min(x["display_time"] for x in rows)), page):
+        oldest = ts(min(x["display_time"] for x in rows)) if rows else None
+        if response.meta.get("history"):
+            if self.history_step(oldest):
+                yield self.list_request(data["next_cursor"], page + 1, history=True)
+        elif rows and self.should_continue(ids, known, oldest, page):
             yield self.list_request(data["next_cursor"], page + 1)
