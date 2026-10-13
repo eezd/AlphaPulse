@@ -27,8 +27,14 @@ def decimals(step: str) -> int:
     return len(step.rstrip("0").split(".")[1]) if "." in step.rstrip("0") else 0
 
 
+class RateLimited(Exception):
+    """非等待模式下被币安限流"""
+
+
 class BinanceClient:
-    def __init__(self) -> None:
+    def __init__(self, wait: bool = True) -> None:
+        # wait=False 用于 API 请求：被限流时立即抛 RateLimited，不让 HTTP 请求挂起等待
+        self.wait = wait
         self.http = httpx.AsyncClient(timeout=20)
 
     async def get(self, market: str, path_key: str, params: dict[str, Any] | None = None) -> Any:
@@ -45,6 +51,8 @@ class BinanceClient:
             if resp.status_code in (418, 429):
                 # 418 表示 IP 已被临时封禁，必须按 Retry-After 等待
                 wait = int(resp.headers.get("Retry-After", "60"))
+                if not self.wait:
+                    raise RateLimited(f"币安限流 {resp.status_code}，需等待 {wait}s")
                 logger.warning("币安限流 %d，暂停 %ds", resp.status_code, wait)
                 await asyncio.sleep(wait)
                 continue
@@ -53,7 +61,7 @@ class BinanceClient:
                 continue
             resp.raise_for_status()
             used = int(resp.headers.get("X-MBX-USED-WEIGHT-1M", "0"))
-            if used > conf["weight_limit"] * WEIGHT_RATIO:
+            if self.wait and used > conf["weight_limit"] * WEIGHT_RATIO:
                 wait = 61 - time.time() % 60
                 logger.info("%s 权重已用 %d，等待 %.0fs 到下一分钟", market, used, wait)
                 await asyncio.sleep(wait)

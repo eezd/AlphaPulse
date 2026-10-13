@@ -1,11 +1,15 @@
 import asyncio
 import json
+import logging
 import time
+from collections.abc import Awaitable
 from datetime import datetime
 from typing import Annotated, Literal
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, ValidationError, field_validator
+from starlette.websockets import WebSocketState
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from alphapulse.core.auth import require_admin, websocket_admin
 from alphapulse.core.db import get_session
 from alphapulse.core.redis import KEY_PREFIX, redis
-from alphapulse.market.binance import BinanceClient
+from alphapulse.market.binance import BinanceClient, RateLimited
 from alphapulse.market.channels import kline_channel, ticker_channel
 from alphapulse.models import Kline, KlineSyncState, MarketSymbol
 from alphapulse.models.market import INTERVALS
@@ -26,7 +30,9 @@ Market = Literal["spot", "um"]
 SYMBOLS_CACHE_SECONDS = 3600
 MAX_KLINES = 1500
 
-client = BinanceClient()
+logger = logging.getLogger("alphapulse.api.market")
+# API 请求不等待限流，直接报 503，避免 HTTP 请求被挂起
+client = BinanceClient(wait=False)
 
 
 class IntervalProgress(BaseModel):
@@ -62,11 +68,43 @@ class TradableSymbol(BaseModel):
     volume_precision: int
 
 
+class Subscription(BaseModel):
+    market: Market
+    symbol: str = Field(pattern=r"^[A-Z0-9]{2,30}$")
+    interval: str
+
+    @field_validator("interval")
+    @classmethod
+    def check_interval(cls, value: str) -> str:
+        if value not in (*INTERVALS, "1s"):
+            raise ValueError(f"不支持的周期：{value}")
+        return value
+
+
+async def call_binance[T](request: Awaitable[T]) -> T:
+    """把币安调用的失败转换成明确的 HTTP 错误，而不是 500"""
+    try:
+        return await request
+    except RateLimited as e:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(e)) from None
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"币安返回 {e.response.status_code}：{e.response.text[:200]}") from None
+    except httpx.TransportError as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"无法连接币安：{e!r}") from None
+
+
+async def ensure_symbol(session: AsyncSession, market: str, symbol: str) -> None:
+    """只允许查询已添加的交易对，不把任意 symbol 转发给币安"""
+    exists = await session.scalar(select(MarketSymbol.id).where(MarketSymbol.market == market, MarketSymbol.symbol == symbol))
+    if exists is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"未添加交易对 {market} {symbol}")
+
+
 async def tradable_symbols(market: str) -> list[dict]:
     key = f"{KEY_PREFIX}market:symbols:{market}"
     if cached := await redis.get(key):
         return json.loads(cached)
-    symbols = await client.tradable_symbols(market)
+    symbols = await call_binance(client.tradable_symbols(market))
     await redis.set(key, json.dumps(symbols), ex=SYMBOLS_CACHE_SECONDS)
     return symbols
 
@@ -136,8 +174,9 @@ async def klines(
         # 1s 不落库，直接取币安最近数据
         if market != "spot":
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "合约没有 1s 周期")
+        await ensure_symbol(session, market, symbol)
         params = {"symbol": symbol, "interval": "1s", "limit": limit, **({"endTime": end - 1} if end else {})}
-        rows = await client.get("spot", "klines", params)
+        rows = await call_binance(client.get("spot", "klines", params))
         return [[r[0], float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[5]), float(r[7])] for r in rows]
     if interval not in INTERVALS:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"不支持的周期：{interval}")
@@ -154,8 +193,9 @@ async def klines(
 
 
 @router.get("/ticker")
-async def ticker(market: Market, symbol: str) -> dict:
-    return await client.ticker(market, symbol)
+async def ticker(session: Annotated[AsyncSession, Depends(get_session)], market: Market, symbol: str) -> dict:
+    await ensure_symbol(session, market, symbol)
+    return await call_binance(client.ticker(market, symbol))
 
 
 @ws_router.websocket("/ws")
@@ -167,6 +207,19 @@ async def market_ws(websocket: WebSocket) -> None:
     await websocket.accept()
     pubsub = redis.pubsub()
     subscribed = asyncio.Event()
+
+    async def receive() -> None:
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                sub = Subscription.model_validate_json(raw)
+            except ValidationError as e:
+                await websocket.send_text(json.dumps({"type": "error", "message": f"订阅参数无效：{e.errors()[0]['msg']}"}, ensure_ascii=False))
+                continue
+            if subscribed.is_set():
+                await pubsub.unsubscribe()
+            await pubsub.subscribe(kline_channel(sub.market, sub.symbol, sub.interval), ticker_channel(sub.market, sub.symbol))
+            subscribed.set()
 
     async def forward() -> None:
         await subscribed.wait()
@@ -184,19 +237,18 @@ async def market_ws(websocket: WebSocket) -> None:
                 "data": json.loads(message["data"]),
             }))
 
-    task = asyncio.create_task(forward())
+    # 收、发任一方向结束（客户端断开或出错）就整体收尾；非正常断开时主动关闭，让前端重连，
+    # 避免转发任务已死而连接看起来仍正常
+    tasks = [asyncio.create_task(receive()), asyncio.create_task(forward())]
     try:
-        while True:
-            sub = await websocket.receive_json()
-            if subscribed.is_set():
-                await pubsub.unsubscribe()
-            await pubsub.subscribe(
-                kline_channel(sub["market"], sub["symbol"], sub["interval"]),
-                ticker_channel(sub["market"], sub["symbol"]),
-            )
-            subscribed.set()
-    except WebSocketDisconnect:
-        pass
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            error = task.exception()
+            if error is not None and not isinstance(error, WebSocketDisconnect):
+                logger.warning("行情 WS 连接异常结束：%r", error)
     finally:
-        task.cancel()
+        for task in tasks:
+            task.cancel()
         await pubsub.aclose()
+        if websocket.application_state == WebSocketState.CONNECTED and websocket.client_state == WebSocketState.CONNECTED:
+            await websocket.close(code=1011)

@@ -69,15 +69,23 @@ async def list_news(
     if source:
         stmt = stmt.where(NewsItem.source_code.in_(source))
     if q:
-        pattern = f"%{q}%"
-        stmt = stmt.where(or_(NewsItem.title.ilike(pattern), NewsItem.content_text.ilike(pattern)))
+        # 转义 LIKE 通配符，按字面搜索
+        escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped}%"
+        stmt = stmt.where(or_(NewsItem.title.ilike(pattern, escape="\\"), NewsItem.content_text.ilike(pattern, escape="\\")))
     if start:
         stmt = stmt.where(NewsItem.published_at >= start)
     if end:
         stmt = stmt.where(NewsItem.published_at < end)
     if cursor:
-        published_at, news_id = cursor.rsplit("|", 1)
-        stmt = stmt.where(tuple_(NewsItem.published_at, NewsItem.id) < (datetime.fromisoformat(published_at), int(news_id)))
+        try:
+            published_at, news_id = cursor.rsplit("|", 1)
+            position = (datetime.fromisoformat(published_at), int(news_id))
+            if position[0].tzinfo is None:
+                raise ValueError("cursor 时间缺少时区")
+        except ValueError:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "cursor 格式无效") from None
+        stmt = stmt.where(tuple_(NewsItem.published_at, NewsItem.id) < position)
     rows = (await session.execute(stmt.order_by(NewsItem.published_at.desc(), NewsItem.id.desc()).limit(limit))).all()
 
     items = [NewsBrief.model_validate({**news.__dict__, "excerpt": excerpt}) for news, excerpt in rows]

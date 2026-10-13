@@ -100,6 +100,9 @@ async def next_backfill_task(market: str) -> tuple[MarketSymbol, str] | None:
 async def set_symbol_status(symbol_id: int, status: str, error: str | None = None) -> None:
     async with SessionLocal() as session:
         s = await session.get(MarketSymbol, symbol_id)
+        if s is None:
+            # 补齐过程中交易对被用户删除
+            return
         s.status = status
         s.last_error = error
         await session.commit()
@@ -107,15 +110,20 @@ async def set_symbol_status(symbol_id: int, status: str, error: str | None = Non
 
 async def backfill_loop(market: str) -> None:
     while True:
-        task = await next_backfill_task(market)
+        try:
+            task = await next_backfill_task(market)
+        except Exception:
+            logger.exception("%s 选取补齐任务出错，稍后重试", market)
+            await asyncio.sleep(10)
+            continue
         if task is None:
             await asyncio.sleep(5)
             continue
         s, interval = task
-        if s.status == "pending":
-            await set_symbol_status(s.id, "backfilling")
-            logger.info("%s %s 开始补齐", market, s.symbol)
         try:
+            if s.status == "pending":
+                await set_symbol_status(s.id, "backfilling")
+                logger.info("%s %s 开始补齐", market, s.symbol)
             for _ in range(PAGES_PER_TURN):
                 if await sync_page(market, s.symbol, interval):
                     logger.info("%s %s %s 补齐完成", market, s.symbol, interval)
@@ -141,12 +149,16 @@ async def catchup_loop() -> None:
         except TimeoutError:
             pass
         catchup_needed.clear()
-        async with SessionLocal() as session:
-            states = (await session.execute(
-                select(KlineSyncState.market, KlineSyncState.symbol, KlineSyncState.interval)
-                .join(MarketSymbol, (MarketSymbol.market == KlineSyncState.market) & (MarketSymbol.symbol == KlineSyncState.symbol))
-                .where(KlineSyncState.backfill_done, MarketSymbol.status.in_(ACTIVE_STATUSES))
-            )).all()
+        try:
+            async with SessionLocal() as session:
+                states = (await session.execute(
+                    select(KlineSyncState.market, KlineSyncState.symbol, KlineSyncState.interval)
+                    .join(MarketSymbol, (MarketSymbol.market == KlineSyncState.market) & (MarketSymbol.symbol == KlineSyncState.symbol))
+                    .where(KlineSyncState.backfill_done, MarketSymbol.status.in_(ACTIVE_STATUSES))
+                )).all()
+        except Exception:
+            logger.exception("读取追平列表失败，下次再试")
+            continue
         started = time.monotonic()
         for market, symbol, interval in states:
             try:
@@ -186,13 +198,13 @@ async def handle_message(market: str, raw: str | bytes) -> None:
 
 async def stream_loop(market: str) -> None:
     while True:
-        symbols = await active_symbols(market)
-        if not symbols:
-            await asyncio.sleep(SYMBOL_CHECK_SECONDS)
-            continue
-        intervals = INTERVALS + (["1s"] if market == "spot" else [])
-        streams = [f"{s.lower()}@kline_{i}" for s in symbols for i in intervals] + [f"{s.lower()}@miniTicker" for s in symbols]
         try:
+            symbols = await active_symbols(market)
+            if not symbols:
+                await asyncio.sleep(SYMBOL_CHECK_SECONDS)
+                continue
+            intervals = INTERVALS + (["1s"] if market == "spot" else [])
+            streams = [f"{s.lower()}@kline_{i}" for s in symbols for i in intervals] + [f"{s.lower()}@miniTicker" for s in symbols]
             async with websockets.connect(f"{WS[market]}?streams={'/'.join(streams)}", max_size=2**22) as ws:
                 logger.info("%s WS 已连接：%d 个交易对，%d 个流", market, len(symbols), len(streams))
                 catchup_needed.set()
@@ -205,16 +217,17 @@ async def stream_loop(market: str) -> None:
                             logger.info("%s 交易对列表变化，重新订阅", market)
                             break
         except Exception:
-            logger.exception("%s WS 断开，5s 后重连", market)
+            logger.exception("%s WS 循环出错，5s 后重连", market)
             await asyncio.sleep(5)
 
 
 async def main() -> None:
-    await asyncio.gather(
-        *(backfill_loop(m) for m in MARKETS),
-        *(stream_loop(m) for m in MARKETS),
-        catchup_loop(),
-    )
+    # 各循环自行重试可恢复的错误；仍有异常逃出时整个进程退出，由 docker 重启
+    async with asyncio.TaskGroup() as tg:
+        for m in MARKETS:
+            tg.create_task(backfill_loop(m))
+            tg.create_task(stream_loop(m))
+        tg.create_task(catchup_loop())
 
 
 if __name__ == "__main__":

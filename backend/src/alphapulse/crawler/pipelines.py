@@ -4,6 +4,7 @@ from typing import Any
 
 from scrapy.crawler import Crawler
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from alphapulse.core.db import SessionLocal
 from alphapulse.core.redis import redis
@@ -32,17 +33,26 @@ class NewsPipeline:
         spider = self.crawler.spider
         digest = content_hash(item)
         raw_response_id = item.pop("raw_response_id")
+        locked = (
+            select(NewsItem)
+            .where(NewsItem.source_code == item["source_code"], NewsItem.external_id == item["external_id"])
+            .with_for_update()
+        )
         async with SessionLocal() as session:
-            news = await session.scalar(
-                select(NewsItem)
-                .where(NewsItem.source_code == item["source_code"], NewsItem.external_id == item["external_id"])
-                .with_for_update()
-            )
+            news = await session.scalar(locked)
+            inserted_id = None
             if news is None:
+                # 行不存在时 FOR UPDATE 锁不住任何东西；用 ON CONFLICT 处理同一条目被并发首次写入
+                inserted_id = await session.scalar(
+                    pg_insert(NewsItem)
+                    .values(**item, content_hash=digest, revision_no=1)
+                    .on_conflict_do_nothing(index_elements=[NewsItem.source_code, NewsItem.external_id])
+                    .returning(NewsItem.id)
+                )
+                # 插入成功取新行；冲突说明另一处刚写入，按已存在条目走比较/修订流程
+                news = await session.scalar(locked)
+            if inserted_id is not None:
                 kind = "new"
-                news = NewsItem(**item, content_hash=digest, revision_no=1)
-                session.add(news)
-                await session.flush()
             elif news.content_hash != digest:
                 kind = "revised"
                 for field in UPDATABLE_FIELDS:

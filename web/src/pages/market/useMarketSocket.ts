@@ -36,8 +36,12 @@ export function useMarketSocket(onKline: (k: KlineMessage) => void, onTicker: (t
   let current: Subscription | undefined
   let retryMs = 1000
   let closed = false
+  let retryTimer: ReturnType<typeof setTimeout> | undefined
 
   function connect() {
+    // 组件已卸载时不再建立连接
+    if (closed)
+      return
     socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/market/ws`)
     socket.onopen = () => {
       connected.value = true
@@ -58,7 +62,7 @@ export function useMarketSocket(onKline: (k: KlineMessage) => void, onTicker: (t
       connected.value = false
       if (closed)
         return
-      setTimeout(connect, retryMs)
+      retryTimer = setTimeout(connect, retryMs)
       retryMs = Math.min(retryMs * 2, RETRY_MAX_MS)
     }
   }
@@ -72,6 +76,7 @@ export function useMarketSocket(onKline: (k: KlineMessage) => void, onTicker: (t
   connect()
   onBeforeUnmount(() => {
     closed = true
+    clearTimeout(retryTimer)
     socket?.close()
   })
   return { connected, subscribe }
