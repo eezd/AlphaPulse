@@ -5,7 +5,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 from pydantic import BaseModel
-from sqlalchemy import func, or_, select, tuple_
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from alphapulse.core.auth import require_admin
@@ -36,8 +36,8 @@ class NewsBrief(BaseModel):
 
 class NewsPage(BaseModel):
     items: list[NewsBrief]
-    # 形如 "<published_at ISO>|<id>"，原样传回即可取下一页
-    next_cursor: str | None
+    # 符合筛选条件的总条数，用于分页
+    total: int
 
 
 class NewsDetail(NewsBrief):
@@ -62,35 +62,32 @@ async def list_news(
     q: str | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
-    cursor: str | None = None,
+    page: Annotated[int, Query(ge=1)] = 1,
     limit: Annotated[int, Query(ge=1, le=100)] = 30,
 ) -> NewsPage:
-    stmt = select(NewsItem, func.left(NewsItem.content_text, EXCERPT_LENGTH).label("excerpt"))
+    conditions = []
     if source:
-        stmt = stmt.where(NewsItem.source_code.in_(source))
+        conditions.append(NewsItem.source_code.in_(source))
     if q:
         # 转义 LIKE 通配符，按字面搜索
         escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         pattern = f"%{escaped}%"
-        stmt = stmt.where(or_(NewsItem.title.ilike(pattern, escape="\\"), NewsItem.content_text.ilike(pattern, escape="\\")))
+        conditions.append(or_(NewsItem.title.ilike(pattern, escape="\\"), NewsItem.content_text.ilike(pattern, escape="\\")))
     if start:
-        stmt = stmt.where(NewsItem.published_at >= start)
+        conditions.append(NewsItem.published_at >= start)
     if end:
-        stmt = stmt.where(NewsItem.published_at < end)
-    if cursor:
-        try:
-            published_at, news_id = cursor.rsplit("|", 1)
-            position = (datetime.fromisoformat(published_at), int(news_id))
-            if position[0].tzinfo is None:
-                raise ValueError("cursor 时间缺少时区")
-        except ValueError:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "cursor 格式无效") from None
-        stmt = stmt.where(tuple_(NewsItem.published_at, NewsItem.id) < position)
-    rows = (await session.execute(stmt.order_by(NewsItem.published_at.desc(), NewsItem.id.desc()).limit(limit))).all()
+        conditions.append(NewsItem.published_at < end)
+    total = await session.scalar(select(func.count()).select_from(NewsItem).where(*conditions))
+    rows = (await session.execute(
+        select(NewsItem, func.left(NewsItem.content_text, EXCERPT_LENGTH).label("excerpt"))
+        .where(*conditions)
+        .order_by(NewsItem.published_at.desc(), NewsItem.id.desc())
+        .offset((page - 1) * limit)
+        .limit(limit)
+    )).all()
 
     items = [NewsBrief.model_validate({**news.__dict__, "excerpt": excerpt}) for news, excerpt in rows]
-    next_cursor = f"{items[-1].published_at.isoformat()}|{items[-1].id}" if len(items) == limit else None
-    return NewsPage(items=items, next_cursor=next_cursor)
+    return NewsPage(items=items, total=total)
 
 
 @router.get("/stream", response_class=EventSourceResponse)

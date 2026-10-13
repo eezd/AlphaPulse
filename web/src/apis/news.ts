@@ -35,7 +35,8 @@ export interface NewsQuery {
   q?: string
   start?: string
   end?: string
-  cursor?: string
+  /** 从 1 开始 */
+  page?: number
   limit?: number
 }
 
@@ -45,7 +46,7 @@ export interface NewsEvent {
   kind: "new" | "revised"
 }
 
-export function listNews(params: NewsQuery): Promise<{ items: NewsBrief[], next_cursor: string | null }> {
+export function listNews(params: NewsQuery): Promise<{ items: NewsBrief[], total: number }> {
   // source 需要序列化为重复参数 source=a&source=b
   return http.get("/news", { params, paramsSerializer: { indexes: null } })
 }

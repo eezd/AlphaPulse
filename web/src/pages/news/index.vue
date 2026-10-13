@@ -4,6 +4,7 @@ import { listNews } from "@/apis/news"
 import { useEventSource } from "@/composables/useEventSource"
 import { useSourceNames } from "@/composables/useSourceNames"
 import NewsDrawer from "@/pages/news/components/NewsDrawer.vue"
+import { usePersisted } from "@/utils/storage"
 import { formatTime } from "@/utils/text"
 
 const sourceNames = useSourceNames()
@@ -13,38 +14,50 @@ const filters = reactive({
   range: null as [Date, Date] | null
 })
 const items = ref<NewsBrief[]>([])
-const nextCursor = ref<string | null>(null)
+const total = ref(0)
+const page = ref(1)
+const pageSize = usePersisted("news-page-size", 30)
 const loading = ref(false)
-const finished = ref(false)
 const pendingCount = ref(0)
 const openedId = ref<number | null>(null)
+const listBox = ref<HTMLElement>()
 
-async function load(reset = false) {
-  if (loading.value || (!reset && finished.value))
-    return
+// 多次快速翻页时只采用最后一次请求的结果
+let requestSeq = 0
+
+async function load() {
+  const seq = ++requestSeq
   loading.value = true
   try {
-    const page = await listNews({
+    const result = await listNews({
       source: filters.source.length ? filters.source : undefined,
       q: filters.q || undefined,
       start: filters.range?.[0].toISOString(),
       end: filters.range?.[1].toISOString(),
-      cursor: reset ? undefined : nextCursor.value ?? undefined,
-      limit: 30
+      page: page.value,
+      limit: pageSize.value
     })
-    items.value = reset ? page.items : [...items.value, ...page.items]
-    nextCursor.value = page.next_cursor
-    finished.value = page.next_cursor === null
-    if (reset)
+    if (seq !== requestSeq)
+      return
+    items.value = result.items
+    total.value = result.total
+    if (page.value === 1)
       pendingCount.value = 0
+    listBox.value?.scrollTo({ top: 0 })
   } finally {
-    loading.value = false
+    if (seq === requestSeq)
+      loading.value = false
   }
 }
 
 function search() {
-  finished.value = false
-  load(true)
+  page.value = 1
+  load()
+}
+
+function changePageSize() {
+  page.value = 1
+  load()
 }
 
 // 只提示符合当前来源筛选的新条目；关键字和时间范围由刷新后的查询决定
@@ -53,7 +66,7 @@ const { connected } = useEventSource<NewsEvent>("/api/news/stream", "news", (eve
     pendingCount.value++
 })
 
-load(true)
+load()
 </script>
 
 <template>
@@ -82,7 +95,7 @@ load(true)
       class="cursor-pointer" @click="search"
     />
 
-    <div v-infinite-scroll="() => load()" :infinite-scroll-disabled="loading || finished" class="min-h-0 flex-1 overflow-auto">
+    <div ref="listBox" v-loading="loading" class="min-h-0 flex-1 overflow-auto">
       <div
         v-for="item in items" :key="item.id"
         class="cursor-pointer border-b border-b-solid border-[var(--el-border-color-lighter)] px-2 py-3 hover:bg-[var(--el-fill-color-light)]"
@@ -107,10 +120,14 @@ load(true)
           {{ item.summary || item.excerpt }}
         </div>
       </div>
-      <div class="py-4 text-center text-sm text-[var(--el-text-color-secondary)]">
-        {{ loading ? "加载中…" : finished ? "没有更多了" : "" }}
-      </div>
+      <el-empty v-if="!loading && items.length === 0" description="没有符合条件的新闻" />
     </div>
+
+    <el-pagination
+      v-model:current-page="page" v-model:page-size="pageSize" :total="total" :page-sizes="[20, 30, 50, 100]"
+      layout="total, sizes, prev, pager, next, jumper" background class="justify-end"
+      @current-change="load" @size-change="changePageSize"
+    />
 
     <NewsDrawer v-model="openedId" />
   </div>
