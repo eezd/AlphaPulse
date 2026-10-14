@@ -1,9 +1,14 @@
 from alphapulse.core.db import Base
+from alphapulse.models.ai import AiProvider, ChatMessage, ChatSession, ContextVersion, SkillNode, SkillVersion
 from alphapulse.models.market import Kline, KlineSyncState, MarketSymbol
 from alphapulse.models.news import CrawlLog, CrawlRun, NewsItem, NewsRevision, RawBody, RawResponse, Source
 
 __all__ = [
+    "AiProvider",
     "Base",
+    "ChatMessage",
+    "ChatSession",
+    "ContextVersion",
     "CrawlLog",
     "CrawlRun",
     "Kline",
@@ -13,5 +18,7 @@ __all__ = [
     "NewsRevision",
     "RawBody",
     "RawResponse",
+    "SkillNode",
+    "SkillVersion",
     "Source",
 ]

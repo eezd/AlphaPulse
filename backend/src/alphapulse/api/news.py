@@ -55,16 +55,8 @@ class Revision(BaseModel):
     captured_at: datetime
 
 
-@router.get("")
-async def list_news(
-    session: Annotated[AsyncSession, Depends(get_session)],
-    source: Annotated[list[str] | None, Query()] = None,
-    q: str | None = None,
-    start: datetime | None = None,
-    end: datetime | None = None,
-    page: Annotated[int, Query(ge=1)] = 1,
-    limit: Annotated[int, Query(ge=1, le=100)] = 30,
-) -> NewsPage:
+def news_filters(source: list[str] | None, q: str | None, start: datetime | None, end: datetime | None) -> list:
+    """新闻列表和 Chat 检索工具共用的筛选条件"""
     conditions = []
     if source:
         conditions.append(NewsItem.source_code.in_(source))
@@ -77,6 +69,20 @@ async def list_news(
         conditions.append(NewsItem.published_at >= start)
     if end:
         conditions.append(NewsItem.published_at < end)
+    return conditions
+
+
+@router.get("")
+async def list_news(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    source: Annotated[list[str] | None, Query()] = None,
+    q: str | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    page: Annotated[int, Query(ge=1)] = 1,
+    limit: Annotated[int, Query(ge=1, le=100)] = 30,
+) -> NewsPage:
+    conditions = news_filters(source, q, start, end)
     total = await session.scalar(select(func.count()).select_from(NewsItem).where(*conditions))
     rows = (await session.execute(
         select(NewsItem, func.left(NewsItem.content_text, EXCERPT_LENGTH).label("excerpt"))
