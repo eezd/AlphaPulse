@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from alphapulse.ai import llm
 from alphapulse.ai.prompt import build_system_prompt, current_context, estimate_tokens
-from alphapulse.ai.tools import run_tool, tool_specs
+from alphapulse.ai.tools import ToolOutcome, run_tool, tool_specs
 from alphapulse.core.auth import require_admin
 from alphapulse.core.db import SessionLocal, get_session
 from alphapulse.models import AiProvider, ChatMessage, ChatSession, ContextVersion
@@ -27,6 +27,7 @@ MAX_TOOL_ROUNDS = 8
 # 发给前端展示的工具结果长度
 TOOL_PREVIEW_CHARS = 2000
 STOPPED_RESULT = json.dumps({"error": "用户已停止生成，工具未执行"}, ensure_ascii=False)
+TRUNCATED_RESULT = json.dumps({"error": "输出达到最大输出上限被截断，工具参数不完整，未执行。请精简内容后重新调用"}, ensure_ascii=False)
 
 # api 只有一个进程：同一时间只允许一轮生成，Reset 也要等生成结束
 generating = asyncio.Lock()
@@ -177,10 +178,15 @@ async def send_message(body: SendIn) -> AsyncIterator[ServerSentEvent]:
             assistant = {"text": completion.text, "tool_calls": completion.tool_calls}
             if completion.thinking_blocks:
                 assistant["thinking_blocks"] = completion.thinking_blocks
+            truncated_message = f"模型输出达到最大输出上限（{provider.max_tokens} token）被截断，可在「环境变量」页调大「最大输出」"
+            if completion.truncated and not completion.tool_calls:
+                assistant["error"] = truncated_message
             await save_messages(ChatMessage(session_id=current.id, role="assistant", content=assistant, provider_id=provider.id, usage=completion.usage))
             messages.append({"role": "assistant", **assistant})
             yield event("usage", completion.usage)
             if not completion.tool_calls:
+                if completion.truncated:
+                    yield event("error", {"message": truncated_message})
                 break
 
             pending = list(completion.tool_calls)
@@ -188,7 +194,8 @@ async def send_message(body: SendIn) -> AsyncIterator[ServerSentEvent]:
                 while pending:
                     call = pending[0]
                     yield event("tool_call", {"id": call["id"], "name": call["name"], "arguments": call["arguments"]})
-                    outcome = await run_tool(call["name"], call["arguments"])
+                    # 截断时不执行，把原因告诉模型，让它精简后重试
+                    outcome = ToolOutcome(TRUNCATED_RESULT) if completion.truncated else await run_tool(call["name"], call["arguments"])
                     result = {"tool_call_id": call["id"], "name": call["name"], "result": outcome.result}
                     await save_messages(ChatMessage(session_id=current.id, role="tool", content=result))
                     pending.pop(0)

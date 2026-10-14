@@ -54,6 +54,8 @@ class Completion:
     usage: dict = field(default_factory=dict)
     # Anthropic 的 thinking / redacted_thinking 块：工具调用循环中必须原样回传，否则接口报错
     thinking_blocks: list[dict] = field(default_factory=list)
+    # 达到 max_tokens 被截断：工具调用的参数可能不完整，不能执行
+    truncated: bool = False
 
 
 @dataclass
@@ -175,6 +177,8 @@ async def _stream_openai(provider: AiProvider, system: str, messages: list[dict]
                 result.usage = {"input_tokens": chunk.usage.prompt_tokens, "output_tokens": chunk.usage.completion_tokens}
             if not chunk.choices:
                 continue
+            if chunk.choices[0].finish_reason == "length":
+                result.truncated = True
             delta = chunk.choices[0].delta
             if delta.content:
                 result.text += delta.content
@@ -187,7 +191,7 @@ async def _stream_openai(provider: AiProvider, system: str, messages: list[dict]
                     call["name"] += tc.function.name
                 if tc.function and tc.function.arguments:
                     call["arguments"] += tc.function.arguments
-    result.tool_calls = [_parse_call(c["id"], c["name"], c["arguments"]) for _, c in sorted(calls.items())]
+    result.tool_calls = [_parse_call(c["id"], c["name"], c["arguments"], result.truncated) for _, c in sorted(calls.items())]
     yield result
 
 
@@ -260,12 +264,16 @@ async def _stream_anthropic(provider: AiProvider, system: str, messages: list[di
                     thinking[event.index]["signature"] += event.delta.signature
             elif event.type == "message_delta":
                 result.usage["output_tokens"] = event.usage.output_tokens
-    result.tool_calls = [_parse_call(b["id"], b["name"], b["arguments"]) for _, b in sorted(blocks.items())]
+                result.truncated = event.delta.stop_reason == "max_tokens"
+    result.tool_calls = [_parse_call(b["id"], b["name"], b["arguments"], result.truncated) for _, b in sorted(blocks.items())]
     result.thinking_blocks = [b for _, b in sorted(thinking.items())]
     yield result
 
 
-def _parse_call(call_id: str, name: str, arguments: str) -> dict:
+def _parse_call(call_id: str, name: str, arguments: str, truncated: bool) -> dict:
+    if truncated:
+        # 截断的参数是半截 JSON，不解析；调用方不会执行它
+        return {"id": call_id, "name": name, "arguments": {}}
     try:
         parsed = json.loads(arguments) if arguments else {}
     except json.JSONDecodeError as e:
