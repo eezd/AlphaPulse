@@ -30,6 +30,7 @@ const TOOL_LABELS: Record<string, string> = {
   search_symbols: "查找交易对",
   get_klines: "获取 K 线",
   get_ticker: "获取 24h 行情",
+  get_derivatives: "获取衍生品数据",
   list_skills: "列出 skills",
   read_skill: "读取 skill",
   propose_skill_edit: "提交 skill 草稿",

@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, StringConstraints
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,6 +19,9 @@ from alphapulse.models import AiProvider
 router = APIRouter(prefix="/api/settings", tags=["settings"], dependencies=[Depends(require_admin)])
 
 Protocol = Literal["openai", "anthropic"]
+# 从页面粘贴时容易带上首尾空格，模型名带空格会被上游当成另一个模型（404）
+Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]
+Model = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
 
 
 class ProviderOut(BaseModel):
@@ -36,11 +39,11 @@ class ProviderOut(BaseModel):
 
 
 class ProviderIn(BaseModel):
-    name: Annotated[str, Field(min_length=1, max_length=64)]
+    name: Name
     protocol: Protocol
     base_url: HttpUrl
     api_key: Annotated[str, Field(min_length=1)]
-    model: Annotated[str, Field(min_length=1, max_length=128)]
+    model: Model
     max_tokens: Annotated[int, Field(ge=256, le=128000)] = 8192
     context_window: Annotated[int, Field(ge=4096, le=2000000)] = 200000
     reasoning_effort: llm.Effort | None = None
@@ -48,12 +51,12 @@ class ProviderIn(BaseModel):
 
 
 class ProviderPatch(BaseModel):
-    name: Annotated[str | None, Field(min_length=1, max_length=64)] = None
+    name: Name | None = None
     protocol: Protocol | None = None
     base_url: HttpUrl | None = None
     # 为空表示不修改
     api_key: str | None = None
-    model: Annotated[str | None, Field(min_length=1, max_length=128)] = None
+    model: Model | None = None
     max_tokens: Annotated[int | None, Field(ge=256, le=128000)] = None
     context_window: Annotated[int | None, Field(ge=4096, le=2000000)] = None
     # 显式传 null 表示不传思考强度

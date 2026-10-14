@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import anthropic
+import httpx
+import httpx2  # anthropic SDK 使用的 HTTP 客户端，异常类与 httpx 不通用
 import openai
 
 from alphapulse.core.crypto import decrypt
@@ -25,7 +27,8 @@ TIMEOUT_SECONDS = 600
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
 # SDK 自带重试只针对连接错误、429 和 5xx
 MAX_RETRIES = 2
-# 流内错误（上游过载等）SDK 不重试，由这里重试；只在还没有输出内容时重试
+# 流内错误（上游过载等）和流式读取中的网络中断 SDK 不重试；连接失败 SDK 重试后仍可能失败（上游短暂不可达）。
+# 这些都由这里再重试，且只在还没有输出内容时重试
 STREAM_RETRIES = 3
 STREAM_RETRY_DELAY_SECONDS = 2
 
@@ -84,11 +87,12 @@ async def stream(
                 output = True
                 yield event
             return
-        except (openai.APIError, anthropic.APIError) as e:
-            # 已经推送过内容再重试会重复输出，只重试还没有输出时的流内错误
-            if output or attempt == STREAM_RETRIES or not _in_stream_error(e):
+        # 流式读取过程中的网络错误 SDK 不包装，以原始的 httpx / httpx2 异常抛出
+        except (openai.APIError, anthropic.APIError, httpx.TransportError, httpx2.TransportError) as e:
+            # 已经推送过内容再重试会重复输出
+            if output or attempt == STREAM_RETRIES or not _retryable(e):
                 raise _llm_error(e) from e
-            logger.warning("模型流内出错，%ss 后第 %s 次重试：%s", STREAM_RETRY_DELAY_SECONDS, attempt + 1, _llm_error(e))
+            logger.warning("模型调用失败，%ss 后第 %s 次重试：%s", STREAM_RETRY_DELAY_SECONDS, attempt + 1, _llm_error(e))
             await asyncio.sleep(STREAM_RETRY_DELAY_SECONDS)
 
 
@@ -100,6 +104,15 @@ def _in_stream_error(e: Exception) -> bool:
     return isinstance(e, anthropic.APIStatusError) and e.status_code == 200
 
 
+def _retryable(e: Exception) -> bool:
+    """流内错误事件、连接失败、读取中断可重试；超时不重试（单次已等 TIMEOUT_SECONDS）"""
+    if isinstance(e, (openai.APITimeoutError, anthropic.APITimeoutError, httpx.TimeoutException, httpx2.TimeoutException)):
+        return False
+    return _in_stream_error(e) or isinstance(
+        e, (openai.APIConnectionError, anthropic.APIConnectionError, httpx.TransportError, httpx2.TransportError),
+    )
+
+
 def _llm_error(e: Exception) -> LlmError:
     if _in_stream_error(e):
         error = e.body.get("error") if isinstance(e.body, dict) else None
@@ -107,10 +120,12 @@ def _llm_error(e: Exception) -> LlmError:
         return LlmError(f"模型接口出错：{message or e.message}")
     if isinstance(e, (openai.APIStatusError, anthropic.APIStatusError)):
         return LlmError(f"模型接口返回 {e.status_code}：{e.message}")
-    if isinstance(e, (openai.APITimeoutError, anthropic.APITimeoutError)):
+    if isinstance(e, (openai.APITimeoutError, anthropic.APITimeoutError, httpx.TimeoutException, httpx2.TimeoutException)):
         return LlmError(f"模型接口超时（{TIMEOUT_SECONDS}s）")
     if isinstance(e, (openai.APIConnectionError, anthropic.APIConnectionError)):
         return LlmError(f"无法连接模型接口：{e}")
+    if isinstance(e, (httpx.TransportError, httpx2.TransportError)):
+        return LlmError(f"模型接口连接中断：{e!r}")
     return LlmError(f"模型接口出错：{e}")
 
 

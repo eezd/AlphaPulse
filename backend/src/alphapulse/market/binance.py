@@ -13,7 +13,13 @@ REST = {
     "spot": {"base": "https://api.binance.com", "klines": "/api/v3/klines", "exchange_info": "/api/v3/exchangeInfo",
              "ticker": "/api/v3/ticker/24hr", "weight_limit": 6000, "kline_limit": 1000},
     "um": {"base": "https://fapi.binance.com", "klines": "/fapi/v1/klines", "exchange_info": "/fapi/v1/exchangeInfo",
-           "ticker": "/fapi/v1/ticker/24hr", "weight_limit": 2400, "kline_limit": 1500},
+           "ticker": "/fapi/v1/ticker/24hr", "weight_limit": 2400, "kline_limit": 1500,
+           # 衍生品数据：/futures/data 下的统计只保留最近 30 天
+           "premium_index": "/fapi/v1/premiumIndex", "funding_rate": "/fapi/v1/fundingRate",
+           "open_interest_hist": "/futures/data/openInterestHist",
+           "global_long_short": "/futures/data/globalLongShortAccountRatio",
+           "top_long_short_position": "/futures/data/topLongShortPositionRatio",
+           "taker_buy_sell": "/futures/data/takerlongshortRatio"},
 }
 # 合约旧路由 fstream.binance.com/stream 能连上但不推送数据，K 线/行情流在 /market 路由下
 WS = {"spot": "wss://stream.binance.com:9443/stream", "um": "wss://fstream.binance.com/market/stream"}

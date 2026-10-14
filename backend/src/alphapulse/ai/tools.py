@@ -4,6 +4,7 @@
 工具出错时把错误文本返回给模型，不编造数据。
 """
 
+import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -26,7 +27,7 @@ from alphapulse.models.market import INTERVALS
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 NEWS_BODY_LIMIT = 4000
 # 返回给模型的逐根 K 线数量；统计指标基于全部取到的 K 线计算
-BARS_IN_RESULT = 60
+BARS_IN_RESULT = 30
 SOURCE_NAMES = {"cls_telegraph": "财联社电报", "cls_depth": "财联社深度", "wscn_live": "华尔街见闻快讯", "wscn_news": "华尔街见闻文章"}
 
 
@@ -195,6 +196,114 @@ async def get_ticker(args: GetTicker) -> ToolOutcome:
     }))
 
 
+# ---------- 衍生品数据 ----------
+
+# 每个序列返回给模型的最近点数；窗口统计基于全部取到的数据
+POINTS_IN_RESULT = 12
+FUNDING_HISTORY = 30
+
+
+class GetDerivatives(BaseModel):
+    symbol: Annotated[str, Field(description="U 本位永续交易对，如 BTCUSDT")]
+    period: Annotated[
+        Literal["5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"],
+        Field(description="持仓量、多空比、主动买卖比的统计周期"),
+    ] = "1h"
+    limit: Annotated[int, Field(ge=2, le=500, description="统计窗口的周期数，如 1h × 24 为最近一天；币安只提供最近 30 天")] = 24
+
+
+def pct(value: float) -> float:
+    return round(value * 100, 4)
+
+
+def ratio_summary(rows: list[dict], key: str) -> dict:
+    values = [float(r[key]) for r in rows]
+    return {
+        "latest": values[-1], "window_avg": round(sum(values) / len(values), 4), "window_min": min(values), "window_max": max(values),
+        "recent": [[ms_local(r["timestamp"]), float(r[key])] for r in rows[-POINTS_IN_RESULT:]],
+    }
+
+
+async def funding_part(symbol: str) -> dict:
+    premium, history = await asyncio.gather(
+        call_binance(client.get("um", "premium_index", {"symbol": symbol})),
+        call_binance(client.get("um", "funding_rate", {"symbol": symbol, "limit": FUNDING_HISTORY})),
+    )
+    mark, index = float(premium["markPrice"]), float(premium["indexPrice"])
+    rates = [float(r["fundingRate"]) for r in history]
+    return {
+        "unit": "%",
+        # premiumIndex 的 lastFundingRate 随行情实时变化，是下次结算的预估值
+        "next_rate_estimate_pct": pct(float(premium["lastFundingRate"])),
+        "next_funding_time": ms_local(premium["nextFundingTime"]),
+        "interval_hours": round((history[-1]["fundingTime"] - history[-2]["fundingTime"]) / 3_600_000) if len(history) >= 2 else None,
+        "mark_price": mark, "index_price": index, "premium_pct": pct((mark - index) / index),
+        "history_count": len(rates),
+        "history_avg_pct": pct(sum(rates) / len(rates)) if rates else None,
+        "history_max_pct": pct(max(rates)) if rates else None,
+        "history_min_pct": pct(min(rates)) if rates else None,
+        "recent_settled": [[ms_local(r["fundingTime"]), pct(float(r["fundingRate"]))] for r in history[-8:]],
+    }
+
+
+async def open_interest_part(symbol: str, period: str, limit: int) -> dict:
+    rows = await call_binance(client.get("um", "open_interest_hist", {"symbol": symbol, "period": period, "limit": limit}))
+    if not rows:
+        return {"error": "无数据"}
+    first, last = rows[0], rows[-1]
+
+    def price(r: dict) -> float:
+        return float(r["sumOpenInterestValue"]) / float(r["sumOpenInterest"])
+
+    return {
+        "latest_contracts": float(last["sumOpenInterest"]), "latest_value_usdt": round(float(last["sumOpenInterestValue"])),
+        "window_change_pct": pct(float(last["sumOpenInterest"]) / float(first["sumOpenInterest"]) - 1),
+        # 由持仓价值 / 持仓量推算的同窗口价格变化，用于对照持仓量与价格的方向
+        "window_price_change_pct": pct(price(last) / price(first) - 1),
+        "recent": [[ms_local(r["timestamp"]), float(r["sumOpenInterest"])] for r in rows[-POINTS_IN_RESULT:]],
+    }
+
+
+async def ratio_part(path_key: str, symbol: str, period: str, limit: int, key: str) -> dict:
+    rows = await call_binance(client.get("um", path_key, {"symbol": symbol, "period": period, "limit": limit}))
+    return ratio_summary(rows, key) if rows else {"error": "无数据"}
+
+
+async def taker_part(symbol: str, period: str, limit: int) -> dict:
+    rows = await call_binance(client.get("um", "taker_buy_sell", {"symbol": symbol, "period": period, "limit": limit}))
+    if not rows:
+        return {"error": "无数据"}
+    buy, sell = sum(float(r["buyVol"]) for r in rows), sum(float(r["sellVol"]) for r in rows)
+    return {**ratio_summary(rows, "buySellRatio"), "window_buy_vol": buy, "window_sell_vol": sell}
+
+
+async def settle(request: Awaitable[dict]) -> dict:
+    """单项失败只标记该项，其余照常返回"""
+    try:
+        return await request
+    except HTTPException as e:
+        return {"error": e.detail}
+
+
+async def get_derivatives(args: GetDerivatives) -> ToolOutcome:
+    symbol = args.symbol.strip().upper()
+    funding, oi, accounts, top, taker = await asyncio.gather(
+        settle(funding_part(symbol)),
+        settle(open_interest_part(symbol, args.period, args.limit)),
+        settle(ratio_part("global_long_short", symbol, args.period, args.limit, "longShortRatio")),
+        settle(ratio_part("top_long_short_position", symbol, args.period, args.limit, "longShortRatio")),
+        settle(taker_part(symbol, args.period, args.limit)),
+    )
+    return ToolOutcome(dump({
+        "symbol": symbol, "period": args.period, "window": f"最近 {args.limit} 个 {args.period}",
+        "funding_rate": funding,
+        "open_interest": oi,
+        "long_short_account_ratio": accounts,
+        "top_trader_position_ratio": top,
+        "taker_buy_sell_ratio": taker,
+    }))
+
+
 # ---------- Skills 与 CONTEXT.md ----------
 
 class NoArgs(BaseModel):
@@ -286,6 +395,10 @@ TOOLS: dict[str, Tool] = {
     "search_symbols": Tool(SearchSymbols, search_symbols, "在币安 U 本位永续（含美股/韩股等 TradFi 永续）中查找交易对代码。"),
     "get_klines": Tool(GetKlines, get_klines, "取 U 本位永续 K 线和确定性统计（涨跌幅、高低点、MA20/60、ATR14、波段高低点、量比），用于判断支撑阻力和止损位。"),
     "get_ticker": Tool(GetTicker, get_ticker, "取 U 本位永续 24h 行情和最后成交时间。"),
+    "get_derivatives": Tool(GetDerivatives, get_derivatives, (
+        "取 U 本位永续的衍生品数据，用于判断多空拥挤程度：资金费率（下次预估、近 30 次结算，单位 %）、"
+        "溢价、持仓量（窗口变化及同期价格变化）、全市场账户多空比、大户持仓多空比、主动买卖比（>1 表示主动买入多）。"
+    )),
     "list_skills": Tool(NoArgs, list_skills, "列出全部 skills 的路径、优先级和版本状态。"),
     "read_skill": Tool(ReadSkill, read_skill, "读取 skill 的某个版本（默认最新，可能是草稿）。"),
     "propose_skill_edit": Tool(ProposeSkillEdit, propose_skill_edit, "修改已有 skill：保存为草稿版本，用户发布后才生效。content 必须是完整内容。"),
