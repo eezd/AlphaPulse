@@ -271,6 +271,8 @@ async def open_interest_part(symbol: str, period: str, limit: int) -> dict:
 
     return {
         "latest_contracts": float(last["sumOpenInterest"]), "latest_value_usdt": round(float(last["sumOpenInterestValue"])),
+        "window_min_contracts": min(float(r["sumOpenInterest"]) for r in rows),
+        "window_max_contracts": max(float(r["sumOpenInterest"]) for r in rows),
         "window_change_pct": pct(float(last["sumOpenInterest"]) / float(first["sumOpenInterest"]) - 1),
         # 由持仓价值 / 持仓量推算的同窗口价格变化，用于对照持仓量与价格的方向
         "window_price_change_pct": pct(price(last) / price(first) - 1),
