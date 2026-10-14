@@ -53,6 +53,8 @@ class SessionOut(BaseModel):
 class SendIn(BaseModel):
     text: Annotated[str, Field(min_length=1, max_length=20000)]
     provider_id: int | None = None
+    # 本轮思考强度；为空时用模型配置里的默认值
+    reasoning_effort: llm.Effort | None = None
 
 
 class ResetIn(BaseModel):
@@ -121,7 +123,7 @@ async def get_chat_session(session: Annotated[AsyncSession, Depends(get_session)
 
 @router.post("/messages", response_class=EventSourceResponse)
 async def send_message(body: SendIn) -> AsyncIterator[ServerSentEvent]:
-    """事件：prompt、delta、tool_call、tool_result、skill_draft、context_updated、usage、error、done"""
+    """事件：prompt、thinking、delta、tool_call、tool_result、skill_draft、context_updated、usage、error、done"""
     if generating.locked():
         yield event("error", {"message": "上一轮还在生成，请等待完成或先停止"})
         return
@@ -148,14 +150,17 @@ async def send_message(body: SendIn) -> AsyncIterator[ServerSentEvent]:
         await save_messages(ChatMessage(session_id=current.id, role="user", content={"text": body.text}))
 
         specs = tool_specs()
+        effort = body.reasoning_effort or provider.reasoning_effort
         for round_no in range(MAX_TOOL_ROUNDS + 1):
             text = ""
             completion: llm.Completion | None = None
             try:
-                async for item in llm.stream(provider, system, messages, specs if round_no < MAX_TOOL_ROUNDS else []):
+                async for item in llm.stream(provider, system, messages, specs if round_no < MAX_TOOL_ROUNDS else [], effort):
                     if isinstance(item, llm.TextDelta):
                         text += item.text
                         yield event("delta", {"text": item.text})
+                    elif isinstance(item, llm.ThinkingStarted):
+                        yield event("thinking", {})
                     else:
                         completion = item
             except llm.LlmError as e:
@@ -170,6 +175,8 @@ async def send_message(body: SendIn) -> AsyncIterator[ServerSentEvent]:
                 raise
 
             assistant = {"text": completion.text, "tool_calls": completion.tool_calls}
+            if completion.thinking_blocks:
+                assistant["thinking_blocks"] = completion.thinking_blocks
             await save_messages(ChatMessage(session_id=current.id, role="assistant", content=assistant, provider_id=provider.id, usage=completion.usage))
             messages.append({"role": "assistant", **assistant})
             yield event("usage", completion.usage)

@@ -30,7 +30,7 @@ class ProviderOut(BaseModel):
     model: str
     max_tokens: int
     context_window: int
-    temperature: float | None
+    reasoning_effort: llm.Effort | None
     is_default: bool
     updated_at: datetime
 
@@ -43,7 +43,7 @@ class ProviderIn(BaseModel):
     model: Annotated[str, Field(min_length=1, max_length=128)]
     max_tokens: Annotated[int, Field(ge=256, le=128000)] = 8192
     context_window: Annotated[int, Field(ge=4096, le=2000000)] = 200000
-    temperature: Annotated[float | None, Field(ge=0, le=2)] = None
+    reasoning_effort: llm.Effort | None = None
     is_default: bool = False
 
 
@@ -56,7 +56,8 @@ class ProviderPatch(BaseModel):
     model: Annotated[str | None, Field(min_length=1, max_length=128)] = None
     max_tokens: Annotated[int | None, Field(ge=256, le=128000)] = None
     context_window: Annotated[int | None, Field(ge=4096, le=2000000)] = None
-    temperature: Annotated[float | None, Field(ge=0, le=2)] = None
+    # 显式传 null 表示不传思考强度
+    reasoning_effort: llm.Effort | None = None
     is_default: bool | None = None
 
 
@@ -111,9 +112,9 @@ async def create_provider(body: ProviderIn, session: Annotated[AsyncSession, Dep
 async def patch_provider(provider_id: int, body: ProviderPatch, session: Annotated[AsyncSession, Depends(get_session)]) -> ProviderOut:
     provider = await get_provider(session, provider_id)
     values = body.model_dump(exclude_unset=True, exclude={"api_key", "base_url", "is_default"})
-    # temperature 显式传 null 表示清除，其他字段为 null 时忽略
+    # reasoning_effort 显式传 null 表示清除，其他字段为 null 时忽略
     for field, value in values.items():
-        if value is not None or field == "temperature":
+        if value is not None or field == "reasoning_effort":
             setattr(provider, field, value)
     if body.base_url is not None:
         provider.base_url = str(body.base_url)
@@ -147,7 +148,7 @@ async def test_provider(provider_id: int, session: Annotated[AsyncSession, Depen
     started = time.monotonic()
     try:
         completion = None
-        async for event in llm.stream(provider, "只回复 OK。", [{"role": "user", "text": "ping"}], []):
+        async for event in llm.stream(provider, "只回复 OK。", [{"role": "user", "text": "ping"}], [], provider.reasoning_effort):
             if isinstance(event, llm.Completion):
                 completion = event
     except llm.LlmError as e:

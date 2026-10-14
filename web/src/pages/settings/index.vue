@@ -1,6 +1,6 @@
 <script lang="ts" setup>
 import type { Provider, ProviderForm } from "@/apis/settings"
-import { createProvider, deleteProvider, listProviders, patchProvider, testProvider } from "@/apis/settings"
+import { createProvider, deleteProvider, EFFORTS, listProviders, patchProvider, testProvider } from "@/apis/settings"
 import { formatTime } from "@/utils/text"
 
 const PROTOCOL_LABELS = { openai: "OpenAI 格式（/v1/chat/completions）", anthropic: "Claude 格式（/v1/messages）" } as const
@@ -12,7 +12,7 @@ const saving = ref(false)
 const testing = ref<number | null>(null)
 
 function emptyForm(): ProviderForm {
-  return { name: "", protocol: "anthropic", base_url: "", api_key: "", model: "", max_tokens: 8192, context_window: 200000, temperature: null, is_default: false }
+  return { name: "", protocol: "anthropic", base_url: "", api_key: "", model: "", max_tokens: 8192, context_window: 200000, reasoning_effort: null, is_default: false }
 }
 const form = ref<ProviderForm>(emptyForm())
 
@@ -106,6 +106,11 @@ load()
       </el-table-column>
       <el-table-column prop="base_url" label="Base URL" min-width="200" />
       <el-table-column prop="model" label="模型" min-width="150" />
+      <el-table-column label="思考强度" width="90">
+        <template #default="{ row }">
+          {{ (row as Provider).reasoning_effort ?? "-" }}
+        </template>
+      </el-table-column>
       <el-table-column label="API Key" width="100">
         <template #default="{ row }">
           ****{{ row.api_key_hint }}
@@ -169,9 +174,11 @@ load()
           <el-input-number v-model="form.context_window" :min="4096" :max="2000000" :step="10000" controls-position="right" />
           <span class="ml-2 text-xs">token，超过时拒绝发送</span>
         </el-form-item>
-        <el-form-item label="Temperature">
-          <el-input-number v-model="form.temperature" :min="0" :max="2" :step="0.1" :value-on-clear="null" controls-position="right" placeholder="默认" />
-          <span class="ml-2 text-xs">留空使用模型默认值</span>
+        <el-form-item label="思考强度">
+          <el-select v-model="form.reasoning_effort" clearable placeholder="不设置" class="w-40" :value-on-clear="null">
+            <el-option v-for="e in EFFORTS" :key="e" :value="e" :label="e" />
+          </el-select>
+          <span class="ml-2 text-xs">Chat 默认值，可在 Chat 页按轮调整；留空则不传，由模型决定。越高越慢、越贵</span>
         </el-form-item>
         <el-form-item label="设为默认">
           <el-switch v-model="form.is_default" />

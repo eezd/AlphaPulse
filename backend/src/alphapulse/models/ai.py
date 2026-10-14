@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -23,7 +23,8 @@ class AiProvider(Base):
     max_tokens: Mapped[int] = mapped_column(Integer, default=8192)
     # 上下文上限（token），超过时拒绝发送而不是静默截断
     context_window: Mapped[int] = mapped_column(Integer, default=200000)
-    temperature: Mapped[float | None] = mapped_column(Float)
+    # 默认思考强度；为空表示不传，由模型决定。Chat 可按轮覆盖
+    reasoning_effort: Mapped[str | None] = mapped_column(String(8))
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

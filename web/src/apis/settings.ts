@@ -2,6 +2,11 @@ import { http } from "@/http"
 
 export type Protocol = "openai" | "anthropic"
 
+/** 思考强度，与后端 llm.Effort 一致 */
+export const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const
+
+export type Effort = typeof EFFORTS[number]
+
 export interface Provider {
   id: number
   name: string
@@ -11,7 +16,8 @@ export interface Provider {
   model: string
   max_tokens: number
   context_window: number
-  temperature: number | null
+  /** 为空表示不传，由模型决定 */
+  reasoning_effort: Effort | null
   is_default: boolean
   updated_at: string
 }
@@ -25,7 +31,8 @@ export interface ProviderForm {
   model: string
   max_tokens: number
   context_window: number
-  temperature: number | null
+  /** 为空表示不传，由模型决定 */
+  reasoning_effort: Effort | null
   is_default: boolean
 }
 
@@ -53,6 +60,6 @@ export function deleteProvider(id: number): Promise<void> {
 }
 
 export function testProvider(id: number): Promise<TestResult> {
-  // 模型接口超时 120s 且 SDK 会重试，前端放宽等待时间
-  return http.post(`/settings/providers/${id}/test`, null, { timeout: 400000 })
+  // 模型接口读超时 600s 且 SDK 会重试 2 次，前端放宽等待时间
+  return http.post(`/settings/providers/${id}/test`, null, { timeout: 1900000 })
 }

@@ -18,6 +18,8 @@ export interface DisplayItem {
   error?: string
   /** 生成中：这次模型调用已结束，后续文字另起一条 */
   closed?: boolean
+  /** 生成中：模型正在思考，还没有输出文字 */
+  thinking?: boolean
 }
 
 defineProps<{ items: DisplayItem[] }>()
@@ -53,6 +55,9 @@ function prettyResult(result: string) {
       </div>
       <div v-else class="flex flex-col gap-2">
         <!-- markdown-it 已关闭 html，模型输出中的标签按文本显示 -->
+        <div v-if="item.thinking" class="text-xs text-[var(--el-text-color-secondary)]">
+          思考中…
+        </div>
         <div v-if="item.text" class="markdown-body" v-html="renderMarkdown(item.text)" />
         <el-collapse v-if="item.toolCalls.length" class="tool-cards">
           <el-collapse-item v-for="call in item.toolCalls" :key="call.id" :name="call.id">

@@ -1,11 +1,11 @@
 <script lang="ts" setup>
 import type { ChatMessage } from "@/apis/chat"
-import type { Provider } from "@/apis/settings"
+import type { Effort, Provider } from "@/apis/settings"
 import type { SkillNode } from "@/apis/skills"
 import type { DisplayItem } from "@/pages/chat/components/MessageList.vue"
 import { ElNotification } from "element-plus"
 import { getChatSession, resetChat } from "@/apis/chat"
-import { listProviders } from "@/apis/settings"
+import { EFFORTS, listProviders } from "@/apis/settings"
 import { listSkillTree } from "@/apis/skills"
 import SkillTree from "@/components/SkillTree.vue"
 import SkillVersionDrawer from "@/components/SkillVersionDrawer.vue"
@@ -22,6 +22,8 @@ const contextTab = ref<InstanceType<typeof ContextTab>>()
 const providers = ref<Provider[]>([])
 const providerId = usePersisted<number | null>("chat.providerId", null)
 const provider = computed(() => providers.value.find(p => p.id === providerId.value))
+// 为空表示跟随模型配置里的默认值
+const effort = usePersisted<Effort | null>("chat.effort", null)
 
 const messages = ref<ChatMessage[]>([])
 const estimatedTokens = ref(0)
@@ -94,11 +96,19 @@ function currentAssistant(): DisplayItem {
 function onEvent(name: string, data: any) {
   if (name === "prompt") {
     estimatedTokens.value = data.estimated_tokens
+    // OpenAI 格式推理期间没有任何推送，先显示等待状态直到出字
+    currentAssistant().thinking = true
+  } else if (name === "thinking") {
+    currentAssistant().thinking = true
   } else if (name === "delta") {
-    currentAssistant().text += data.text
+    const item = currentAssistant()
+    item.thinking = false
+    item.text += data.text
   } else if (name === "usage") {
     // 一次模型调用结束；之后的工具调用挂在这条回复上，新的文字另起一条
-    currentAssistant().closed = true
+    const item = currentAssistant()
+    item.closed = true
+    item.thinking = false
   } else if (name === "tool_call") {
     const last = [...liveItems.value].reverse().find(i => i.kind === "assistant") ?? currentAssistant()
     last.toolCalls.push({ id: data.id, name: data.name, arguments: data.arguments, result: null })
@@ -108,6 +118,10 @@ function onEvent(name: string, data: any) {
       if (call)
         call.result = data.preview
     }
+    // 工具都返回后进入下一次模型调用
+    const last = liveItems.value.at(-1)
+    if (last?.closed && last.toolCalls.every(c => c.result !== null))
+      currentAssistant().thinking = true
   } else if (name === "skill_draft") {
     highlightIds.value = [...new Set([...highlightIds.value, data.skill_id])]
     loadSkills()
@@ -115,7 +129,9 @@ function onEvent(name: string, data: any) {
   } else if (name === "context_updated") {
     contextTab.value?.refreshFromChat()
   } else if (name === "error") {
-    currentAssistant().error = data.message
+    const item = currentAssistant()
+    item.thinking = false
+    item.error = data.message
   }
   scrollToBottom()
 }
@@ -131,11 +147,11 @@ async function submit() {
   input.value = ""
   liveItems.value = [{ key: `live-user${Date.now()}`, kind: "user", text, toolCalls: [] }]
   scrollToBottom()
-  await send({ text, provider_id: provider.value.id }, onEvent)
+  await send({ text, provider_id: provider.value.id, reasoning_effort: effort.value }, onEvent)
   // 无论完成、出错还是停止，都以服务端保存的会话为准；保留本地的错误提示
   const errors = liveItems.value.filter(i => i.error)
   await loadSession()
-  liveItems.value = errors.map(e => ({ ...e, text: "", toolCalls: [] }))
+  liveItems.value = errors.map(e => ({ ...e, text: "", toolCalls: [], thinking: false }))
 }
 
 function onKeydown(e: Event | KeyboardEvent) {
@@ -221,6 +237,9 @@ loadSkills()
             <div class="flex flex-wrap items-center gap-3">
               <el-select v-model="providerId" placeholder="选择模型配置" class="w-60" :disabled="streaming">
                 <el-option v-for="p in providers" :key="p.id" :value="p.id" :label="`${p.name}（${p.model}）`" />
+              </el-select>
+              <el-select v-model="effort" class="w-44" :disabled="streaming" clearable :value-on-clear="null" :placeholder="`思考强度：跟随配置（${provider?.reasoning_effort ?? '不设置'}）`">
+                <el-option v-for="e in EFFORTS" :key="e" :value="e" :label="`思考强度：${e}`" />
               </el-select>
               <el-tooltip content="下一轮发给模型的 system prompt（含已发布 skills、CONTEXT.md）与历史消息的估算大小" placement="bottom">
                 <span class="text-xs" :class="tokenRatio > 0.8 ? 'text-red-500 font-bold' : 'text-[var(--el-text-color-secondary)]'">
