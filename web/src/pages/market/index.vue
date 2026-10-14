@@ -15,7 +15,7 @@ const CANDLE_PANE = "candle_pane"
 const SYMBOLS_REFRESH_MS = 5000
 
 const symbols = ref<MarketSymbol[]>([])
-const selection = usePersisted<{ market: Market, symbol: string }>("market.selection", { market: "spot", symbol: "BTCUSDT" })
+const selection = usePersisted<{ market: Market, symbol: string }>("market.selection", { market: "um", symbol: "BTCUSDT" })
 const interval = usePersisted("market.interval", "15m")
 const favorites = usePersisted("market.favorites", DEFAULT_FAVORITE_INTERVALS)
 const mainIndicators = usePersisted("market.mainIndicators", ["MA"])
@@ -166,8 +166,10 @@ const refreshTimer = setInterval(refreshSymbols, SYMBOLS_REFRESH_MS)
 
 onMounted(async () => {
   await refreshSymbols()
-  if (!current.value && symbols.value.length)
-    selection.value = { market: symbols.value[0].market, symbol: symbols.value[0].symbol }
+  // 之前选中的交易对已被删除时，优先回到 BTCUSDT
+  const fallback = symbols.value.find(s => s.symbol === "BTCUSDT") ?? symbols.value[0]
+  if (!current.value && fallback)
+    selection.value = { market: fallback.market, symbol: fallback.symbol }
   chart = init(chartEl.value!, { locale: "zh-CN", timezone: "Asia/Shanghai", styles: "dark" })
   chart!.setStyles(BINANCE_STYLES)
   chart!.setDataLoader(dataLoader)
