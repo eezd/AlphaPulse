@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from alphapulse.ai.skills import published_skills
 from alphapulse.ai.tools import LOCAL_TZ, SOURCE_NAMES, local
-from alphapulse.models import ContextVersion, MarketSymbol, NewsItem
+from alphapulse.models import ContextVersion, NewsItem
 
 BASE_INSTRUCTIONS = """你是用户的个人投资研究助手，服务于 AlphaPulse 系统。
 
@@ -44,10 +44,9 @@ async def data_overview(session: AsyncSession) -> str:
         select(NewsItem.source_code, func.min(NewsItem.published_at), func.max(NewsItem.published_at), func.count())
         .group_by(NewsItem.source_code).order_by(NewsItem.source_code)
     )).all()
-    stored = (await session.scalars(select(MarketSymbol.symbol).where(MarketSymbol.market == "um").order_by(MarketSymbol.symbol))).all()
     lines = [f"- 当前时间：{local(datetime.now(LOCAL_TZ))}（北京时间）", "- 新闻库："]
     lines += [f"  - {SOURCE_NAMES.get(code, code)}：{count} 条，{local(start)} 至 {local(end)}" for code, start, end, count in news]
-    lines.append(f"- K 线：币安 U 本位永续。本地已存全历史的交易对：{'、'.join(stored) or '无'}；其他永续交易对由 get_klines 实时从币安获取（不落库）。")
+    lines.append("- K 线：币安 U 本位永续（含 TradFi 永续），get_klines 实时从币安获取。")
     return "\n".join(lines)
 
 
