@@ -3,3 +3,4 @@ CONTEXT.md
 backups/
 .venv/
 __pycache__/
+docs/
