@@ -87,7 +87,7 @@ function symbolState(s: TradingSymbol) {
   if (positions.value.some(p => p.symbol === s.symbol))
     return { label: "持仓中", type: "success" } as const
   if (s.plan_status === "pending")
-    return { label: "等待确认", type: "primary" } as const
+    return { label: "挂单中", type: "primary" } as const
   return { label: "空仓", type: "info" } as const
 }
 
@@ -170,7 +170,7 @@ watch(selected, () => {
 async function toggleRunning() {
   if (status.value!.running) {
     await ElMessageBox.confirm(
-      "停止后不再做新的分析，并撤销还在等待确认的计划。已有持仓保留，止损、止盈、到期平仓等程序规则继续执行。",
+      "停止后不再做新的分析，并撤销未成交的限价单。已有持仓保留，止损、止盈、到期平仓等程序规则继续执行。",
       "停止行情交易",
       { type: "warning", confirmButtonText: "停止" }
     )

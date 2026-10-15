@@ -151,8 +151,8 @@ export interface TradeDecision {
   reevaluate: PlanCondition[]
   direction: "long" | "short" | null
   confidence: "high" | "medium" | "low" | null
-  /** 待确认入场；计划 3.1 之前的分析没有这个字段 */
-  setup?: { zone_low: string, zone_high: string, confirm_price: string, basis: string } | null
+  /** 区间与挂单价；更早格式的分析没有这个字段 */
+  setup?: { zone_low: string, zone_high: string, entry_price?: string, basis: string } | null
   valid_hours?: string | null
 }
 
@@ -172,13 +172,11 @@ export interface EntrySizing {
 
 export interface Sizing {
   direction: "long" | "short"
-  setup: { zone_low: string, zone_high: string, confirm_price: string }
-  /** 提交时按确认价入场、止损放在区间远端外估算 */
-  estimate: EntrySizing
+  setup: { zone_low: string, zone_high: string }
+  /** 限价、止损和数量 */
+  entry: EntrySizing
   atr: string
   position_qty: string
-  /** 5m 确认后由执行器写入；有它表示已触发 */
-  entry?: EntrySizing & { triggered_at: string, bar_close: string, extreme: string, atr: string }
 }
 
 export interface Analysis {
@@ -220,7 +218,7 @@ export type PlanStatus = "proposed" | "pending" | "open" | "closing" | "closed" 
 
 export const PLAN_STATUS_LABELS: Record<PlanStatus, string> = {
   proposed: "待采纳",
-  pending: "等待确认",
+  pending: "挂单中",
   open: "持仓中",
   closing: "平仓中",
   closed: "已结束",
@@ -256,12 +254,9 @@ export const CLOSE_REASON_LABELS: Record<string, string> = {
   stop_failed: "止损挂单失败",
   close: "市价平仓",
   replaced: "被新计划替换",
-  expired: "到期未触发",
+  expired: "限价单到期未成交",
   stopped: "已停止交易",
-  broken: "区间被突破",
-  missed: "错过确认",
-  skipped: "止损过远，放弃入场",
-  entry_failed: "入场失败"
+  entry_failed: "入场单被拒"
 }
 
 /** 止盈阶梯（与后端 plan.TAKE_PROFIT_STEPS 一致）：[距成交均价的涨跌幅, 平仓比例] */

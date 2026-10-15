@@ -1,6 +1,7 @@
-"""交易计划的纯计算：模型提交的待确认入场、校验、5m 确认扫描、触发时的止损与仓位、止盈阶梯。
+"""交易计划的纯计算：模型提交的区间和限价、校验、止损与仓位、止盈阶梯、应有订单。
 
-只做短线做波动：模型划出区间和确认价，程序在 5m 收盘确认后市价入场，止损和止盈由程序按固定规则计算。
+只做短线做波动：模型划出支撑区（压力区）并给出区内的限价，采纳后立即挂限价单（maker 手续费）；
+止损放在区间远端外，与入场单一起挂；止盈按成交均价的固定比例。
 下方常量与 main/README 的数字重复，并写进了分析器的提示词；改 README 时要同步修改。
 """
 
@@ -18,12 +19,12 @@ DAILY_ANALYSIS_LIMIT = 60
 RISK_PCT = Decimal("0.01")
 LOW_CONFIDENCE_FACTOR = Decimal("0.5")
 MAX_LEVERAGE = 3
-# 待确认入场的最长有效小时数；成交后的最长持仓小时数
+# 限价单的最长有效小时数；首次成交后的最长持仓小时数
 SETUP_VALID_HOURS = 2
 MAX_HOLD_HOURS = 4
-CONFIRM_INTERVAL = "5m"
+ATR_INTERVAL = "5m"
 ATR_PERIOD = 14
-# 止损放在确认过程的极值外 STOP_ATR_FACTOR × ATR14(5m)；离现价超过 MAX_STOP_PCT 就放弃这次入场
+# 止损放在区间远端外 STOP_ATR_FACTOR × ATR14(5m)；离挂单价超过 MAX_STOP_PCT 的计划不做
 STOP_ATR_FACTOR = Decimal("0.5")
 MAX_STOP_PCT = Decimal("0.01")
 # 止盈阶梯：（距成交均价的涨跌幅，平仓比例）。牛市里空单不恋战，第一档就平掉大部分
@@ -32,7 +33,7 @@ TAKE_PROFIT_STEPS: dict[str, tuple[tuple[Decimal, Decimal], ...]] = {
     "short": ((Decimal("0.005"), Decimal("0.8")), (Decimal("0.0075"), Decimal("0.2"))),
 }
 MAX_REEVALUATE = 4
-# 入场（市价）和止损都按吃单手续费估算（C1 实测 taker 0.04%）
+# 风险按吃单手续费保守估算（C1 实测 taker 0.04%；限价入场实际是 maker 0.02%）
 TAKER_FEE_RATE = Decimal("0.0004")
 # 例行分析周期：跟 1h 收盘
 ROUTINE_HOURS = 1
@@ -55,18 +56,18 @@ class Condition(BaseModel):
 class Setup(BaseModel):
     zone_low: Price
     zone_high: Price
-    confirm_price: Annotated[Decimal, Field(gt=0, description=(
-        "做多：不低于 zone_high，进区后 5m 收盘 ≥ 此价入场；做空：不高于 zone_low，进区后 5m 收盘 ≤ 此价入场"
+    entry_price: Annotated[Decimal, Field(gt=0, description=(
+        "限价单价格，须在区间内：做多低于现价，等价格回落成交；做空高于现价，等价格反弹成交"
     ))]
-    basis: Annotated[str, Field(description="区间和确认价的依据：对应的支撑区或压力区、周期、触碰次数")]
+    basis: Annotated[str, Field(description="区间和挂单价的依据：对应的支撑区或压力区、周期、触碰次数")]
 
 
 class TradePlan(BaseModel):
     """submit_trade_plan 的参数"""
 
     action: Annotated[Literal["plan", "keep", "exit", "wait"], Field(description=(
-        "plan：给出新的待确认入场（替换当前未触发的计划，仅在没有持仓时）；keep：当前计划或持仓不变；"
-        "exit：结束当前计划，有持仓则市价平仓；wait：观望，不给计划（仅在没有持仓和当前计划时）"
+        "plan：给出新的限价计划（替换当前未成交的计划，仅在没有持仓时）；keep：当前计划或持仓不变；"
+        "exit：结束当前计划，撤销未成交的限价单，有持仓则市价平仓；wait：观望，不给计划（仅在没有持仓和当前计划时）"
     ))]
     summary: Annotated[str, Field(description="一句话结论，含方向和置信度")]
     reasons: Annotated[str, Field(description="依据要点：新闻、结构、衍生品，引用新闻写 [新闻 id]")]
@@ -76,8 +77,8 @@ class TradePlan(BaseModel):
     ))] = []
     direction: Direction | None = None
     confidence: Literal["high", "medium", "low"] | None = None
-    setup: Annotated[Setup | None, Field(description="待确认入场：做多为支撑区，做空为压力区")] = None
-    valid_hours: Annotated[Decimal | None, Field(gt=0, description=f"有效小时数（≤ {SETUP_VALID_HOURS}），到期未触发则作废")] = None
+    setup: Annotated[Setup | None, Field(description="做多为支撑区，做空为压力区，以及区内的挂单价")] = None
+    valid_hours: Annotated[Decimal | None, Field(gt=0, description=f"限价单有效小时数（≤ {SETUP_VALID_HOURS}），到期未成交则撤单")] = None
 
 
 @dataclass
@@ -95,7 +96,7 @@ class PlanContext:
     # 交易列表中其他币的持仓名义价值合计
     other_notional: Decimal
     rules: SymbolRules
-    # 最近已收盘 5m K 线的 ATR14，用于预估止损
+    # 最近已收盘 5m K 线的 ATR14，用于计算止损
     atr: Decimal
     has_plan: bool
     position_side: Direction | None
@@ -109,14 +110,6 @@ class Bar:
     high: Decimal
     low: Decimal
     close: Decimal
-
-
-@dataclass(frozen=True)
-class SetupScan:
-    state: Literal["waiting", "triggered", "broken", "missed"]
-    bar: Bar | None = None
-    # 进区以来的极值：做多为最低价，做空为最高价
-    extreme: Decimal | None = None
 
 
 class PlanError(Exception):
@@ -152,46 +145,22 @@ def atr(bars: list[Bar], period: int = ATR_PERIOD) -> Decimal:
     return sum(ranges, Decimal(0)) / period
 
 
-def scan_setup(direction: Direction, setup: dict, bars: list[Bar], after_ms: int, now_ms: int) -> SetupScan:
-    """按计划生效后收盘的 5m K 线判断待确认入场（按时间顺序，先发生的为准）：
-
-    - 做多：某根最低价进入区间（≤ zone_high）后，出现收盘 ≥ 确认价（可以是同一根）→ 触发；
-      在此之前任何一根收盘 < zone_low → 支撑破位。做空镜像。
-    - 触发的那根不是最新一根已收盘 K 线（如程序停过）→ missed，不补做。
-    """
-    zone_low, zone_high, confirm = (Decimal(setup[k]) for k in ("zone_low", "zone_high", "confirm_price"))
-    closed = [b for b in bars if after_ms <= b.close_time < now_ms]
-    long = direction == "long"
-    extreme: Decimal | None = None
-    for i, bar in enumerate(closed):
-        if (bar.close < zone_low) if long else (bar.close > zone_high):
-            return SetupScan("broken", bar)
-        if extreme is None and ((bar.low <= zone_high) if long else (bar.high >= zone_low)):
-            extreme = bar.low if long else bar.high
-        if extreme is None:
-            continue
-        extreme = min(extreme, bar.low) if long else max(extreme, bar.high)
-        if (bar.close >= confirm) if long else (bar.close <= confirm):
-            return SetupScan("triggered" if i == len(closed) - 1 else "missed", bar, extreme)
-    return SetupScan("waiting")
-
-
-def setup_stop(direction: Direction, extreme: Decimal, atr_value: Decimal, tick: Decimal) -> Decimal:
-    """止损 = 极值外 STOP_ATR_FACTOR × ATR，向远离现价的方向取整"""
+def setup_stop(direction: Direction, far_edge: Decimal, atr_value: Decimal, tick: Decimal) -> Decimal:
+    """止损 = 区间远端外 STOP_ATR_FACTOR × ATR，向远离入场的方向取整"""
     if direction == "long":
-        return round_to_step(extreme - STOP_ATR_FACTOR * atr_value, tick, ROUND_FLOOR)
-    return round_to_step(extreme + STOP_ATR_FACTOR * atr_value, tick, ROUND_CEILING)
+        return round_to_step(far_edge - STOP_ATR_FACTOR * atr_value, tick, ROUND_FLOOR)
+    return round_to_step(far_edge + STOP_ATR_FACTOR * atr_value, tick, ROUND_CEILING)
 
 
 def size_entry(direction: Direction, price: Decimal, stop: Decimal, *, capital: Decimal, other_notional: Decimal,
                confidence: str, rules: SymbolRules) -> dict:
-    """按估计入场价和止损算数量：单笔风险上限与全账户杠杆取小。止损离现价太远、方向不对或数量不足时抛 PlanError"""
+    """按入场价和止损算数量：单笔风险上限与全账户杠杆取小。止损离入场价太远、方向不对或数量不足时抛 PlanError"""
     sign = 1 if direction == "long" else -1
     stop_pct = sign * (price - stop) / price
     if stop_pct <= 0:
-        raise PlanError([f"止损 {stop} 已越过现价 {price}"])
+        raise PlanError([f"止损 {stop} 不在入场价 {price} 的亏损一侧"])
     if stop_pct > MAX_STOP_PCT:
-        raise PlanError([f"止损 {stop} 距现价 {price} {stop_pct * 100:.2f}%，超过 {MAX_STOP_PCT * 100:.0f}%"])
+        raise PlanError([f"止损 {stop} 距入场价 {price} {stop_pct * 100:.2f}%，超过 {MAX_STOP_PCT * 100:.0f}%"])
     unit_loss = abs(price - stop) + (price + stop) * TAKER_FEE_RATE
     risk_amount = capital * RISK_PCT * (LOW_CONFIDENCE_FACTOR if confidence == "low" else 1)
     max_notional = capital * MAX_LEVERAGE - other_notional
@@ -247,7 +216,7 @@ def check_action(plan: TradePlan, ctx: PlanContext) -> list[str]:
 
 
 def check_setup(plan: TradePlan, ctx: PlanContext) -> dict:
-    """校验计划；action=plan 时返回待确认入场和预估（按确认价入场、止损放在区间远端外）。不通过时抛 PlanError"""
+    """校验计划；action=plan 时算出限价、止损和数量。不通过时抛 PlanError"""
     errors = check_action(plan, ctx)
     if plan.action != "plan":
         if errors:
@@ -256,36 +225,35 @@ def check_setup(plan: TradePlan, ctx: PlanContext) -> dict:
     missing = [name for name in ("direction", "confidence", "setup", "valid_hours") if getattr(plan, name) is None]
     if missing:
         raise PlanError([*errors, f"action=plan 时缺少：{', '.join(missing)}"])
-    direction, setup, mark = plan.direction, plan.setup, ctx.mark_price
+    direction, setup, mark, rules = plan.direction, plan.setup, ctx.mark_price, ctx.rules
     long = direction == "long"
+    # 向保守方向取整：做多的挂单价向下、做空向上
+    entry = round_to_step(setup.entry_price, rules.tick_size, ROUND_FLOOR if long else ROUND_CEILING)
     if setup.zone_low >= setup.zone_high:
         errors.append(f"区间下沿 {setup.zone_low} 须低于上沿 {setup.zone_high}")
-    # 确认 = 进区后收盘回到区间外侧；确认价在区间内会让刚碰到区间边缘、没有真正回落或收回的 K 线也触发
-    if long and setup.confirm_price < setup.zone_high:
-        errors.append(f"做多的确认价 {setup.confirm_price} 须不低于区间上沿 {setup.zone_high}（进区后收盘回到区间上方才算确认）")
-    if not long and setup.confirm_price > setup.zone_low:
-        errors.append(f"做空的确认价 {setup.confirm_price} 须不高于区间下沿 {setup.zone_low}（进区后收盘回到区间下方才算确认）")
-    if long and mark < setup.zone_low:
-        errors.append(f"现价 {mark} 已跌破区间下沿 {setup.zone_low}，支撑已破")
-    if not long and mark > setup.zone_high:
-        errors.append(f"现价 {mark} 已突破区间上沿 {setup.zone_high}，压力已破")
+    if not setup.zone_low <= entry <= setup.zone_high:
+        errors.append(f"挂单价 {entry} 须在区间 {setup.zone_low}–{setup.zone_high} 内")
+    # 限价单要挂在现价下方（做空在上方）等价格过来，否则会立即按市价成交，付吃单手续费
+    if long and entry >= mark:
+        errors.append(f"做多的挂单价 {entry} 须低于现价 {mark}")
+    if not long and entry <= mark:
+        errors.append(f"做空的挂单价 {entry} 须高于现价 {mark}")
     if plan.valid_hours > SETUP_VALID_HOURS:
         errors.append(f"valid_hours 不能超过 {SETUP_VALID_HOURS}")
     if errors:
         raise PlanError(errors)
-    far_edge = setup.zone_low if long else setup.zone_high
-    stop = setup_stop(direction, far_edge, ctx.atr, ctx.rules.tick_size)
+    stop = setup_stop(direction, setup.zone_low if long else setup.zone_high, ctx.atr, rules.tick_size)
     try:
-        estimate = size_entry(direction, setup.confirm_price, stop, capital=ctx.capital, other_notional=ctx.other_notional,
-                              confidence=plan.confidence, rules=ctx.rules)
+        sizing = size_entry(direction, entry, stop, capital=ctx.capital, other_notional=ctx.other_notional,
+                            confidence=plan.confidence, rules=rules)
     except PlanError as e:
-        raise PlanError([f"按确认价入场、止损放在区间{'下沿' if long else '上沿'}外 {STOP_ATR_FACTOR}×ATR(5m)={stop} 估算：{e}。"
-                         "区间太宽或离确认价太远，触发后也会被放弃，请收窄区间或调整确认价"]) from e
+        raise PlanError([f"止损放在区间{'下沿' if long else '上沿'}外 {STOP_ATR_FACTOR}×ATR(5m)={stop}：{e}。"
+                         "区间太宽或挂单价离区间远端太远，请收窄区间或调整挂单价"]) from e
     return {
         "direction": direction,
-        "setup": {k: str(getattr(setup, k)) for k in ("zone_low", "zone_high", "confirm_price")},
-        "estimate": estimate,
-        "atr": str(ctx.atr.quantize(ctx.rules.tick_size)),
+        "setup": {"zone_low": str(setup.zone_low), "zone_high": str(setup.zone_high)},
+        "entry": sizing,
+        "atr": str(ctx.atr.quantize(rules.tick_size)),
         # 执行器采纳前核对：持仓变了说明计划基于过时状态
         "position_qty": "0",
     }
@@ -307,26 +275,25 @@ class OrderSpec:
 
 
 def desired_orders(
-    sizing: dict, *, entry_sent: bool, entry_fill: tuple[Decimal, Decimal] | None, tp_filled: list[Decimal],
+    sizing: dict, *, entries_open: bool, entry_filled: Decimal, entry_average: Decimal | None, tp_filled: list[Decimal],
     position_qty: Decimal, stop_price: Decimal, rules: SymbolRules,
 ) -> list[OrderSpec]:
-    """已触发的计划在当前状态下应挂的单。
+    """计划在当前成交状态下应挂的单。
 
-    - 入场：还没下过入场单时一张市价单；只下一次，被拒不重试。
-    - 止损：有持仓或入场还没成交（未下单、已发出待成交）时一张只减仓止损，数量取计划数量与持仓的较大者（大于持仓时交易所只平实际持仓）。
-    - 止盈：有持仓时按入场成交（数量，均价）排出阶梯，减去各档已成交。
+    - 入场：entries_open 时一张限价单，数量为剩余未成交部分。
+    - 止损：有持仓或有入场单时一张只减仓止损，数量取计划数量与持仓的较大者（大于持仓时交易所只平实际持仓）。
+    - 止盈：有持仓时按已成交数量和成交均价排出阶梯，减去各档已成交。
     """
     direction = sizing["direction"]
     open_side, close_side = ("BUY", "SELL") if direction == "long" else ("SELL", "BUY")
     quantity = Decimal(sizing["entry"]["quantity"])
     orders = []
-    if not entry_sent:
-        orders.append(OrderSpec("entry", 0, open_side, "MARKET", None, None, quantity))
-    if position_qty > 0 or entry_fill is None:
+    if entries_open and entry_filled < quantity:
+        orders.append(OrderSpec("entry", 0, open_side, "LIMIT", Decimal(sizing["entry"]["price"]), None, quantity - entry_filled))
+    if position_qty > 0 or orders:
         orders.append(OrderSpec("stop", None, close_side, "STOP_MARKET", None, stop_price, max(quantity, position_qty)))
-    if position_qty > 0 and entry_fill is not None:
-        filled, average = entry_fill
-        for j, (price, target) in enumerate(take_profit_targets(direction, average, filled, rules)):
+    if position_qty > 0 and entry_average is not None:
+        for j, (price, target) in enumerate(take_profit_targets(direction, entry_average, entry_filled, rules)):
             remaining = target - tp_filled[j]
             if remaining > 0:
                 orders.append(OrderSpec("tp", j, close_side, "LIMIT", price, None, remaining))

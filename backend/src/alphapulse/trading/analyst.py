@@ -1,4 +1,4 @@
-"""模拟盘分析器：为一个币调用模型，划出经程序校验、由执行器在 5m 收盘确认后自动入场的短线计划。
+"""模拟盘分析器：为一个币调用模型，划出经程序校验、由执行器立即挂限价单执行的短线计划。
 
 只开放只读工具和 submit_trade_plan；行情预先取好放进用户消息，减少工具往返。
 """
@@ -48,31 +48,28 @@ def _ladder(direction: str) -> str:
     return f"{' / '.join(sign + _pct(p) for p, _ in steps)} 分别平 {' / '.join(_pct(r) for _, r in steps)}"
 
 
-INSTRUCTIONS = f"""你是 AlphaPulse 的模拟盘交易分析器：为一个币种划出短线「待确认入场」，由程序在 5m 收盘确认后自动入场并管理持仓。
+INSTRUCTIONS = f"""你是 AlphaPulse 的模拟盘交易分析器：为一个币种划出短线计划（区间 + 区内的挂单价），由程序立即挂限价单并管理持仓。
 
 ## 任务
 - 下方 Skills 是交易规范。以下几处按本节执行，与 Skills 冲突时以本节为准：
   - main/README 第 8 节的输出表格不适用：用简短中文写出结论、所用的区间、依据（新闻、结构、衍生品）和风险；数字只通过 submit_trade_plan 提交。
   - main/README 第 9 节不适用：没有 CONTEXT.md，不要写。之前的结论见用户消息里的「最近决策」，要按实时数据复核，不直接沿用旧点位。
-  - 数量、止损、止盈由程序计算，你只给方向、区间、确认价、有效期和置信度。
+  - 数量、止损、止盈由程序计算，你只给方向、区间、挂单价、有效期和置信度。
 - 用户消息里已预先取好实盘行情（ticker、{' / '.join(KLINE_INTERVALS)} K 线、衍生品），不要用相同参数重复调用；需要其他周期或其他币时再调用。
 - 新闻没有预取，必须用 search_news 检索相关新闻，并查清有效期和持仓时限内的重大数据及公布时间。
 - 最后必须调用一次 submit_trade_plan。校验不通过会返回原因，按原因修正后重新提交。
 
 ## 程序如何执行
-- 待确认入场（action=plan）：程序在每根 5m K 线收盘时检查，只看计划生效后收盘的 K 线，交易所上不预挂入场单。
-  - 做多：某根 5m 的最低价进入区间（≤ zone_high）之后，出现一根收盘 ≥ confirm_price（可以是同一根）→ 立即市价做多。在此之前若有 5m 收盘 < zone_low，视为支撑破位，计划撤销并重新请你分析。
-  - 做空：某根 5m 的最高价进入区间（≥ zone_low）之后，出现一根收盘 ≤ confirm_price → 立即市价做空。在此之前若有 5m 收盘 > zone_high，视为压力突破，撤销。
-  - 到 valid_hours 仍未触发则作废，并重新请你分析。
-- 止损：触发时由程序计算，放在进区以来的最低价（做空为最高价）外 {rules.STOP_ATR_FACTOR}×ATR14(5m)，在市价入场前挂到交易所（按标记价触发）。止损距现价超过 {_pct(rules.MAX_STOP_PCT)} 就放弃这次入场。
-- 止盈：按成交均价，做多 {_ladder("long")}；做空 {_ladder("short")}。止盈 1 成交后止损移到保本价。
-- 持仓最长 {rules.MAX_HOLD_HOURS} 小时，到时市价平仓。平仓后程序会请你重新分析。
+- 计划（action=plan）被采纳后，程序立即在 entry_price 挂限价单（maker 手续费），同时在交易所挂只减仓止损（按标记价触发）。到 valid_hours 仍未成交则撤单，并重新请你分析。
+- 止损：区间远端外 {rules.STOP_ATR_FACTOR}×ATR14(5m)，做多放在 zone_low 下方，做空放在 zone_high 上方。
+- 止盈：按成交均价，做多 {_ladder("long")}；做空 {_ladder("short")}。止盈 1 成交后撤销未成交的入场部分，止损移到保本价。
+- 首次成交后最长持仓 {rules.MAX_HOLD_HOURS} 小时，到时市价平仓。平仓后程序会请你重新分析。
 - 仓位：单笔风险为交易资金的 {_pct(rules.RISK_PCT)}，置信度低时减半；名义仓位合计不超过 {rules.MAX_LEVERAGE} 倍交易资金。
 - reevaluate：任一条件满足时程序重新请你分析（最多 {rules.MAX_REEVALUATE} 个），用来表达另一侧方向、需要重新划区的位置。
 
 ## 程序的硬性校验
-- zone_low < zone_high。做多：confirm_price ≥ zone_high，现价 ≥ zone_low；做空：confirm_price ≤ zone_low，现价 ≤ zone_high。确认就是「进区后收盘回到区间外侧」。
-- 按确认价入场、止损放在区间远端外 {rules.STOP_ATR_FACTOR}×ATR 估算：止损距离不超过 {_pct(rules.MAX_STOP_PCT)}，数量不低于交易所最小下单金额。
+- zone_low < zone_high，entry_price 在区间内。做多 entry_price 低于现价，做空高于现价（限价单要等价格过来，不能一挂就成交）。
+- 止损距挂单价不超过 {_pct(rules.MAX_STOP_PCT)}，数量不低于交易所最小下单金额。
 - valid_hours ≤ {rules.SETUP_VALID_HOURS}。
 
 ## 有持仓时
@@ -106,13 +103,13 @@ def plan_brief(decision: dict, sizing: dict | None) -> dict:
     brief = {k: decision.get(k) for k in ("action", "summary", "direction", "confidence", "setup", "valid_hours")}
     brief["reevaluate"] = [{k: c[k] for k in ("direction", "price", "timeframe")} for c in decision.get("reevaluate") or []]
     if sizing and "entry" in sizing:
-        brief["entry"] = {k: sizing["entry"][k] for k in ("triggered_at", "price", "stop", "quantity", "risk_at_stop")}
+        brief["entry"] = {k: sizing["entry"].get(k) for k in ("price", "stop", "quantity", "risk_at_stop")}
     return brief
 
 
-async def confirm_atr(symbol: str) -> Decimal:
-    """最近已收盘 5m K 线的 ATR14，用于预估止损"""
-    bars = parse_bars(await market_client.get("um", "klines", {"symbol": symbol, "interval": rules.CONFIRM_INTERVAL, "limit": rules.ATR_PERIOD + 2}))
+async def recent_atr(symbol: str) -> Decimal:
+    """最近已收盘 5m K 线的 ATR14，用于计算止损"""
+    bars = parse_bars(await market_client.get("um", "klines", {"symbol": symbol, "interval": rules.ATR_INTERVAL, "limit": rules.ATR_PERIOD + 2}))
     now_ms = datetime.now(UTC).timestamp() * 1000
     return atr([b for b in bars if b.close_time < now_ms])
 
@@ -179,7 +176,7 @@ async def prepare(symbol: str, reasons: list[str], analysis_id: int) -> Prepared
     symbol_rules_ = await symbol_rules(symbol)
     mark = await mark_price(symbol)
     context = PlanContext(
-        mark_price=mark, capital=capital, other_notional=other_notional, rules=symbol_rules_, atr=await confirm_atr(symbol),
+        mark_price=mark, capital=capital, other_notional=other_notional, rules=symbol_rules_, atr=await recent_atr(symbol),
         has_plan=current is not None, position_side=position_side(snapshot, symbol),
     )
 
@@ -239,11 +236,11 @@ def describe(plan: TradePlan, sizing: dict, dry_run: bool) -> str:
     prefix = "试运行" if dry_run else ""
     if plan.action != "plan":
         return f"{prefix}{ACTION_LABELS[plan.action]}：{plan.summary}"
-    setup, estimate = sizing["setup"], sizing["estimate"]
+    setup, entry = sizing["setup"], sizing["entry"]
     return (
-        f"{prefix}待确认入场：{DIRECTION_LABELS[plan.direction]}，置信度{CONFIDENCE_LABELS[plan.confidence]}；"
-        f"区间 {setup['zone_low']}–{setup['zone_high']}，5m 收盘{'≥' if plan.direction == 'long' else '≤'} {setup['confirm_price']} 入场，"
-        f"有效 {plan.valid_hours} 小时；按确认价预估止损 {estimate['stop']}（{estimate['stop_pct']}%）、数量 {estimate['quantity']}。{plan.summary}"
+        f"{prefix}计划：限价{DIRECTION_LABELS[plan.direction]} {entry['price']} × {entry['quantity']}，置信度{CONFIDENCE_LABELS[plan.confidence]}；"
+        f"区间 {setup['zone_low']}–{setup['zone_high']}，止损 {entry['stop']}（{entry['stop_pct']}%），止损亏损 {entry['risk_at_stop']} USDT，"
+        f"有效 {plan.valid_hours} 小时。{plan.summary}"
     )
 
 
@@ -254,7 +251,7 @@ async def submit(prepared: Prepared, symbol: str, analysis_id: int, arguments: d
         return dump({"error": "参数无效", "details": e.errors(include_url=False)}), None
     # 分析可能持续几分钟，按提交时的标记价、持仓和 ATR 校验
     prepared.context.mark_price = await mark_price(symbol)
-    prepared.context.atr = await confirm_atr(symbol)
+    prepared.context.atr = await recent_atr(symbol)
     snapshot = await read_snapshot()
     if snapshot:
         prepared.context.position_side = position_side(snapshot, symbol)

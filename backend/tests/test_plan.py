@@ -5,7 +5,7 @@ import pytest
 
 from alphapulse.trading.plan import (
     Bar, OrderSpec, PlanContext, PlanError, SymbolRules, TradePlan, atr, check_setup, desired_orders, diff_orders, next_routine_at,
-    round_to_step, scan_setup, setup_stop, size_entry, split_take_profits, take_profit_targets,
+    round_to_step, setup_stop, size_entry, split_take_profits, take_profit_targets,
 )
 
 BTC = SymbolRules(tick_size=Decimal("0.1"), step_size=Decimal("0.0001"), min_notional=Decimal("50"))
@@ -39,11 +39,6 @@ def bars_until(hhmm: str) -> list[Bar]:
     return [Bar(ms(t), ms(t) + FIVE_MINUTES_MS - 1, Decimal(h), Decimal(lo), Decimal(c)) for t, h, lo, c in BTC_BARS if ms(t) <= ms(hhmm)]
 
 
-def scan(direction, zone_low, zone_high, confirm, adopted: str, now: str):
-    setup = {"zone_low": zone_low, "zone_high": zone_high, "confirm_price": confirm}
-    return scan_setup(direction, setup, bars_until(now), ms(adopted), ms(now) + 2000)
-
-
 def context(**overrides) -> PlanContext:
     values = {
         "mark_price": Decimal("81000"), "capital": Decimal("1000"), "other_notional": Decimal("0"), "rules": BTC,
@@ -55,7 +50,7 @@ def context(**overrides) -> PlanContext:
 def setup_plan(**overrides) -> TradePlan:
     values = {
         "action": "plan", "summary": "回踩支撑做多", "reasons": "支撑区", "risks": "无", "direction": "long", "confidence": "medium",
-        "setup": {"zone_low": "80200", "zone_high": "80700", "confirm_price": "80750", "basis": "1h 支撑区"}, "valid_hours": "2",
+        "setup": {"zone_low": "80200", "zone_high": "80700", "entry_price": "80500", "basis": "1h 支撑区"}, "valid_hours": "2",
     }
     return TradePlan.model_validate({**values, **overrides})
 
@@ -81,55 +76,26 @@ def test_split_take_profits_keeps_total():
     assert split_take_profits(Decimal("0.001"), (Decimal("0.5"), Decimal("0.3"), Decimal("0.2")), Decimal("0.001")) == [0, 0, Decimal("0.001")]
 
 
-# ---------- 5m 确认（用户的两个例子） ----------
-
-def test_long_example_triggers_on_close_back_above_after_dip():
-    # 10:20 收在 80700 还低于确认价；10:25 下探到 80188（影线低于区间下沿但收盘没破）收回 80804 → 10:30 触发
-    result = scan("long", "80200", "80700", "80750", adopted="10:12", now="10:30")
-    assert result.state == "triggered"
-    assert result.bar.open_time == ms("10:25")
-    assert result.extreme == Decimal("80188.00")
-    assert scan("long", "80200", "80700", "80750", adopted="10:12", now="10:25").state == "waiting"
-
-
-def test_short_example_triggers_on_rejection_from_resistance():
-    # 10:50 只到 81411.7，未进区；10:55 冲到 81646.5 后收在 81500 → 11:00 触发
-    result = scan("short", "81500", "81700", "81500", adopted="10:47", now="11:00")
-    assert (result.state, result.bar.open_time, result.extreme) == ("triggered", ms("10:55"), Decimal("81646.50"))
-
-
-def test_bars_closed_before_adoption_are_ignored():
-    # 10:25 那根在计划生效（10:30）前已收盘，不算
-    assert scan("long", "80200", "80700", "80750", adopted="10:30", now="10:30").state == "waiting"
-
-
-def test_trigger_not_on_latest_bar_is_missed():
-    assert scan("long", "80200", "80700", "80750", adopted="10:12", now="10:35").state == "missed"
-
-
-def test_close_beyond_far_edge_breaks_setup():
-    result = scan("long", "80750", "81000", "81050", adopted="10:12", now="10:30")
-    assert (result.state, result.bar.open_time) == ("broken", ms("10:20"))
-
+# ---------- 止损与仓位（用户的例子） ----------
 
 def test_atr_and_stop_from_example():
-    closed = bars_until("10:25")
-    value = atr(closed)
+    value = atr(bars_until("10:25"))
     assert value.quantize(Decimal("0.0001")) == Decimal("302.9714")
-    # 做多：80188 − 0.5 × 302.97 = 80036.51 → 向下取整 80036.5，距 80804.2 约 0.95%，仍在 1% 以内
-    stop = setup_stop("long", Decimal("80188.00"), value, BTC.tick_size)
-    assert stop == Decimal("80036.5")
-    entry = size_entry("long", Decimal("80804.2"), stop, capital=Decimal("1000"), other_notional=Decimal("0"), confidence="medium", rules=BTC)
-    assert entry["stop_pct"] == "0.95"
-    # 10 ÷ (767.7 + (80804.2 + 80036.5) × 0.0004 = 832.04) = 0.01201… → 0.0120
-    assert entry["quantity"] == "0.0120"
-    assert setup_stop("short", Decimal("81646.50"), atr(bars_until("10:55")), BTC.tick_size) == Decimal("81827.8")
+    # 做多：支撑区 80200–80700 内挂 80500；止损 80200 − 0.5 × 302.97 = 80048.51 → 向下取整 80048.5，距挂单价 0.56%
+    stop = setup_stop("long", Decimal("80200"), value, BTC.tick_size)
+    assert stop == Decimal("80048.5")
+    entry = size_entry("long", Decimal("80500"), stop, capital=Decimal("1000"), other_notional=Decimal("0"), confidence="medium", rules=BTC)
+    assert entry["stop_pct"] == "0.56"
+    # 10 ÷ (451.5 + (80500 + 80048.5) × 0.0004 = 515.72) = 0.01939… → 0.0193
+    assert entry["quantity"] == "0.0193"
+    # 做空：压力区上沿 81700 + 0.5 × 362.56 = 81881.28 → 向上取整 81881.3
+    assert setup_stop("short", Decimal("81700"), atr(bars_until("10:55")), BTC.tick_size) == Decimal("81881.3")
 
 
 def test_size_entry_rejects_far_stop_and_halves_low_confidence():
     with pytest.raises(PlanError, match="超过 1%"):
         size_entry("long", Decimal("80000"), Decimal("79100"), capital=Decimal("1000"), other_notional=Decimal("0"), confidence="high", rules=BTC)
-    with pytest.raises(PlanError, match="越过现价"):
+    with pytest.raises(PlanError, match="亏损一侧"):
         size_entry("short", Decimal("80000"), Decimal("79900"), capital=Decimal("1000"), other_notional=Decimal("0"), confidence="high", rules=BTC)
     medium = size_entry("long", Decimal("80000"), Decimal("79600"), capital=Decimal("1000"), other_notional=Decimal("0"), confidence="medium", rules=BTC)
     low = size_entry("long", Decimal("80000"), Decimal("79600"), capital=Decimal("1000"), other_notional=Decimal("0"), confidence="low", rules=BTC)
@@ -150,24 +116,25 @@ def test_take_profit_ladders():
 
 # ---------- 提交校验 ----------
 
-def test_check_setup_accepts_and_estimates():
+def test_check_setup_sizes_limit_entry():
     sizing = check_setup(setup_plan(), context())
-    assert sizing["setup"] == {"zone_low": "80200", "zone_high": "80700", "confirm_price": "80750"}
-    # 预估止损 = 80200 − 0.5 × 100 = 80150，距确认价 80750 约 0.74%
-    assert (sizing["estimate"]["stop"], sizing["estimate"]["stop_pct"]) == ("80150.0", "0.74")
+    assert sizing["setup"] == {"zone_low": "80200", "zone_high": "80700"}
+    # 止损 = 80200 − 0.5 × 100 = 80150，距 80500 为 0.43%；数量 10 ÷ (350 + 64.26) = 0.0241
+    entry = sizing["entry"]
+    assert (entry["price"], entry["stop"], entry["stop_pct"], entry["quantity"]) == ("80500.0", "80150.0", "0.43", "0.0241")
     assert sizing["position_qty"] == "0"
 
 
 def test_check_setup_rejects_bad_setups():
-    bad_order = setup_plan(setup={"zone_low": "80700", "zone_high": "80200", "confirm_price": "80750", "basis": "x"})
-    assert "须低于上沿" in errors_of(bad_order, context())
-    inside = setup_plan(setup={"zone_low": "80200", "zone_high": "80700", "confirm_price": "80500", "basis": "x"})
-    assert "不低于区间上沿" in errors_of(inside, context())
-    short_inside = setup_plan(direction="short", setup={"zone_low": "81500", "zone_high": "81700", "confirm_price": "81600", "basis": "x"})
-    assert "不高于区间下沿" in errors_of(short_inside, context())
-    assert "支撑已破" in errors_of(setup_plan(), context(mark_price=Decimal("80100")))
-    wide = setup_plan(setup={"zone_low": "79800", "zone_high": "80700", "confirm_price": "80750", "basis": "x"})
-    assert "超过 1%" in errors_of(wide, context())
+    def plan(direction="long", **setup):
+        return setup_plan(direction=direction, setup={"zone_low": "80200", "zone_high": "80700", "entry_price": "80500", "basis": "x", **setup})
+
+    assert "须低于上沿" in errors_of(plan(zone_low="80700", zone_high="80200"), context())
+    assert "须在区间" in errors_of(plan(entry_price="80800"), context())
+    # 限价单必须挂在现价下方（做空在上方），否则一挂就按市价成交
+    assert "须低于现价" in errors_of(plan(), context(mark_price=Decimal("80400")))
+    assert "须高于现价" in errors_of(plan("short"), context(mark_price=Decimal("80600")))
+    assert "超过 1%" in errors_of(plan(zone_low="79600"), context())
     assert "valid_hours" in errors_of(setup_plan(valid_hours="3"), context())
 
 
@@ -183,35 +150,43 @@ def test_action_rules():
 
 # ---------- 应有订单 ----------
 
-TRIGGERED = {"direction": "long", "setup": {}, "entry": {"quantity": "0.0120", "stop": "80036.5"}}
+LIMIT_PLAN = {"direction": "long", "setup": {}, "entry": {"price": "80500.0", "quantity": "0.0241", "stop": "80150.0"}}
 NO_TP = [Decimal(0)] * 3
 
 
-def test_desired_orders_places_stop_and_market_entry_once():
-    orders = desired_orders(TRIGGERED, entry_sent=False, entry_fill=None, tp_filled=NO_TP, position_qty=Decimal(0),
-                            stop_price=Decimal("80036.5"), rules=BTC)
-    assert [(o.purpose, o.side, o.type, o.quantity) for o in orders] == [
-        ("entry", "BUY", "MARKET", Decimal("0.0120")), ("stop", "SELL", "STOP_MARKET", Decimal("0.0120")),
-    ]
-    # 入场单已发出、还没成交：只保留止损，不重发入场
-    orders = desired_orders(TRIGGERED, entry_sent=True, entry_fill=None, tp_filled=NO_TP, position_qty=Decimal(0),
-                            stop_price=Decimal("80036.5"), rules=BTC)
-    assert [o.purpose for o in orders] == ["stop"]
+def desired(**overrides):
+    values = {"entries_open": True, "entry_filled": Decimal(0), "entry_average": None, "tp_filled": NO_TP,
+              "position_qty": Decimal(0), "stop_price": Decimal("80150.0"), "rules": BTC}
+    return desired_orders(LIMIT_PLAN, **{**values, **overrides})
 
 
-def test_desired_orders_take_profits_follow_fill_price():
-    orders = desired_orders(TRIGGERED, entry_sent=True, entry_fill=(Decimal("0.0120"), Decimal("80810.0")),
-                            tp_filled=[Decimal("0.0072"), Decimal(0), Decimal(0)], position_qty=Decimal("0.0048"),
-                            stop_price=Decimal("80850.0"), rules=BTC)
-    assert [(o.purpose, o.leg, o.price, o.trigger_price, o.quantity) for o in orders] == [
-        ("stop", None, None, Decimal("80850.0"), Decimal("0.0120")),
-        ("tp", 1, Decimal("81416.0"), None, Decimal("0.0036")), ("tp", 2, Decimal("81618.1"), None, Decimal("0.0012")),
+def test_desired_orders_places_limit_entry_with_stop():
+    assert [(o.purpose, o.side, o.type, o.price, o.trigger_price, o.quantity) for o in desired()] == [
+        ("entry", "BUY", "LIMIT", Decimal("80500.0"), None, Decimal("0.0241")),
+        ("stop", "SELL", "STOP_MARKET", None, Decimal("80150.0"), Decimal("0.0241")),
     ]
 
 
-def test_desired_orders_nothing_after_flat():
-    assert desired_orders(TRIGGERED, entry_sent=True, entry_fill=(Decimal("0.0120"), Decimal("80810.0")), tp_filled=NO_TP,
-                          position_qty=Decimal(0), stop_price=Decimal("80036.5"), rules=BTC) == []
+def test_desired_orders_partial_fill_splits_take_profits_by_filled():
+    orders = desired(entry_filled=Decimal("0.0100"), entry_average=Decimal("80500"), position_qty=Decimal("0.0100"))
+    # 止盈：80500 × 1.005 = 80902.5，× 1.0075 = 81103.75 → 81103.7，× 1.01 = 81305；0.0100 按 60/30/10 拆
+    assert [(o.purpose, o.leg, o.price, o.quantity) for o in orders] == [
+        ("entry", 0, Decimal("80500.0"), Decimal("0.0141")), ("stop", None, None, Decimal("0.0241")),
+        ("tp", 0, Decimal("80902.5"), Decimal("0.0060")), ("tp", 1, Decimal("81103.7"), Decimal("0.0030")),
+        ("tp", 2, Decimal("81305.0"), Decimal("0.0010")),
+    ]
+
+
+def test_desired_orders_after_tp1_keeps_remaining_targets_only():
+    orders = desired(entries_open=False, entry_filled=Decimal("0.0241"), entry_average=Decimal("80500"),
+                     tp_filled=[Decimal("0.0144"), Decimal(0), Decimal(0)], position_qty=Decimal("0.0097"), stop_price=Decimal("80540.0"))
+    assert [(o.purpose, o.leg, o.trigger_price, o.quantity) for o in orders] == [
+        ("stop", None, Decimal("80540.0"), Decimal("0.0241")), ("tp", 1, None, Decimal("0.0072")), ("tp", 2, None, Decimal("0.0025")),
+    ]
+
+
+def test_desired_orders_nothing_when_flat_and_entries_closed():
+    assert desired(entries_open=False) == []
 
 
 def test_diff_orders_matches_by_value():
