@@ -23,9 +23,12 @@ const busy = computed(() => props.requesting || props.symbol.analyzing || !!prop
 const elapsed = computed(() => props.analysis ? Math.max(0, Math.round((now.value - new Date(props.analysis.started_at).getTime()) / 1000)) : 0)
 const duration = computed(() => props.analysis?.finished_at ? Math.round((new Date(props.analysis.finished_at).getTime() - new Date(props.analysis.started_at).getTime()) / 1000) : null)
 
+/** 已成交金额（USDT），按每笔的成交均价折算；有成交的订单一定有均价 */
 function filled(purpose: "entry" | "tp", leg: number) {
-  const total = props.orders.filter(o => o.purpose === purpose && o.leg === leg).reduce((sum, o) => sum + Number(o.filled_qty), 0)
-  return total ? String(Number(total.toFixed(8))) : "-"
+  const total = props.orders
+    .filter(o => o.purpose === purpose && o.leg === leg && Number(o.filled_qty) > 0)
+    .reduce((sum, o) => sum + Number(o.filled_qty) * Number(o.avg_price!), 0)
+  return total ? `${total.toFixed(2)} USDT` : "-"
 }
 
 function countdown(deadline: string | null) {
@@ -211,12 +214,12 @@ const ladder = computed(() => sizing.value?.entry && entryRow.value
           </div>
           <div class="kv">
             <span class="label">限价{{ long ? "做多" : "做空" }}</span>
-            <span><span class="num text-slate-900">{{ sizing.entry.price }} × {{ sizing.entry.quantity }}</span>
+            <span><span class="num text-slate-900">{{ sizing.entry.price }}</span>
               <span class="ml-2 text-xs text-slate-500">已成交 {{ filled("entry", 0) }}{{ entryRow?.avg_price ? `，均价 ${entryRow.avg_price}` : "" }}</span></span>
           </div>
           <div class="kv">
-            <span class="label">名义价值</span>
-            <span><span class="num text-slate-900">{{ sizing.entry.notional }} USDT</span>
+            <span class="label">下单金额</span>
+            <span><span class="num text-slate-900" :title="`数量 ${sizing.entry.quantity}`">{{ sizing.entry.notional }} USDT</span>
               <span class="ml-2 text-xs text-slate-500">{{ sizing.entry.leverage }} 倍交易资金</span></span>
           </div>
           <div class="kv">

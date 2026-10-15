@@ -46,20 +46,25 @@ const symbolOrders = computed(() => {
     ...s.orders.filter(o => o.symbol === selected.value).map(o => ({
       ...o,
       conditional: false,
-      priceText: num(o.price)
+      priceText: num(o.price),
+      amount: `${usdtValue(o.price, o.quantity)} USDT`
     })),
     ...s.algo_orders.filter(o => o.symbol === selected.value).map(o => ({
       ...o,
       conditional: true,
       priceText: `触发 ${num(o.trigger_price)}`,
-      filled: "0",
-      quantity: o.close_position ? "全部持仓" : o.quantity
+      amount: o.close_position ? "全部持仓" : `${usdtValue(o.trigger_price, o.quantity)} USDT`
     }))
   ].sort((a, b) => b.time - a.time)
 })
 
 function num(value: string) {
   return String(Number(value))
+}
+
+/** 币数量按价格折成 USDT 金额；页面上的仓位、挂单大小都用 USDT 显示 */
+function usdtValue(price: string, quantity: string) {
+  return (Number(price) * Number(quantity)).toFixed(2)
 }
 
 function money(value: string | undefined) {
@@ -388,9 +393,9 @@ onBeforeUnmount(() => clearInterval(timer))
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="数量" min-width="90">
+        <el-table-column label="仓位价值（USDT）" min-width="120">
           <template #default="{ row }">
-            {{ num(row.amount) }}
+            <span :title="`数量 ${num(row.amount)}`">{{ Math.abs(Number(row.notional)).toFixed(2) }}</span>
           </template>
         </el-table-column>
         <el-table-column label="开仓价" min-width="100">
@@ -471,7 +476,7 @@ onBeforeUnmount(() => clearInterval(timer))
           </div>
           <div class="mt-1 flex items-center justify-between text-xs text-slate-500">
             <span v-if="positionOf(s.symbol)" class="num">
-              {{ positionOf(s.symbol)!.leverage }}x {{ positionOf(s.symbol)!.side === "LONG" ? "多" : "空" }} · {{ num(positionOf(s.symbol)!.amount) }}
+              {{ positionOf(s.symbol)!.leverage }}x {{ positionOf(s.symbol)!.side === "LONG" ? "多" : "空" }} · {{ Math.abs(Number(positionOf(s.symbol)!.notional)).toFixed(2) }} USDT
             </span>
             <span v-else />
             <el-link type="danger" underline="never" class="text-xs!" @click.stop="remove(s)">
@@ -509,7 +514,7 @@ onBeforeUnmount(() => clearInterval(timer))
               <span class="num text-slate-400">{{ formatTime(new Date(o.time).toISOString(), "MM-DD HH:mm:ss") }}</span>
             </div>
             <div class="num mt-1 flex justify-between text-sm text-slate-900">
-              <span>{{ o.quantity === "全部持仓" ? o.quantity : num(o.quantity) }}</span>
+              <span :title="o.amount === '全部持仓' ? '' : `数量 ${num(o.quantity)}`">{{ o.amount }}</span>
               <span>@ {{ o.priceText }}</span>
             </div>
             <div class="mt-1 flex items-center gap-1 text-slate-500">
