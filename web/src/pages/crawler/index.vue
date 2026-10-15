@@ -73,14 +73,14 @@ refresh().then(() => Promise.all(info.value!.sources.map(s => loadHistory(s.code
 
 <template>
   <div v-if="info" class="h-full flex flex-col gap-3">
-    <div class="flex items-center gap-3">
+    <div class="flex items-center gap-3 border border-ap-line border-solid bg-ap-panel px-3 py-2">
       <el-tag :type="info.manager_alive ? 'success' : 'danger'">
-        {{ info.manager_alive ? "管理进程运行中" : "管理进程未运行" }}
+        <i class="mr-1.5 inline-block h-1.5 w-1.5 bg-current" :class="{ 'animate-pulse': info.manager_alive }" />{{ info.manager_alive ? "管理进程运行中" : "管理进程未运行" }}
       </el-tag>
       <el-tag :type="connected ? 'success' : 'danger'">
-        {{ connected ? "日志推送已连接" : "日志推送断开" }}
+        <i class="mr-1.5 inline-block h-1.5 w-1.5 bg-current" />{{ connected ? "日志推送已连接" : "日志推送断开" }}
       </el-tag>
-      <span class="text-sm text-[var(--el-text-color-secondary)]">数据库 {{ formatBytes(info.db_size_bytes) }}</span>
+      <span class="text-xs text-ap-muted">数据库 <b class="text-ap-text">{{ formatBytes(info.db_size_bytes) }}</b></span>
       <div class="flex-1" />
       <el-button type="danger" :loading="restarting.size > 0" @click="restart('all')">
         重启全部采集
@@ -89,7 +89,7 @@ refresh().then(() => Promise.all(info.value!.sources.map(s => loadHistory(s.code
     <el-tabs v-model="activeTab" type="border-card" class="crawler-tabs min-h-0 flex flex-1 flex-col">
       <el-tab-pane v-for="source in info.sources" :key="source.code" :name="source.code" class="h-full">
         <template #label>
-          <span :class="{ 'text-red-500 font-bold': source.consecutive_failures >= FAILURE_ALERT }">
+          <span :class="{ 'text-ap-down font-bold': source.consecutive_failures >= FAILURE_ALERT }">
             {{ source.name }}
           </span>
           <el-badge v-if="source.consecutive_failures >= FAILURE_ALERT" :value="source.consecutive_failures" class="ml-1" />

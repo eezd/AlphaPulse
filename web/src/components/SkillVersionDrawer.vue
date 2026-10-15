@@ -50,7 +50,7 @@ async function publish(version: SkillVersion) {
       <el-scrollbar class="w-60 shrink-0">
         <div
           v-for="v in versions" :key="v.id"
-          class="mb-1 cursor-pointer border rounded border-solid px-2 py-1 text-sm"
+          class="mb-1 cursor-pointer border border-solid px-2 py-1 text-sm"
           :class="v.id === selectedId ? 'border-[var(--el-color-primary)] bg-[var(--el-color-primary-light-9)]' : 'border-[var(--el-border-color-lighter)]'"
           @click="selectedId = v.id"
         >
@@ -81,11 +81,11 @@ async function publish(version: SkillVersion) {
             发布此版本
           </el-button>
         </div>
-        <el-scrollbar class="min-h-0 flex-1 border rounded border-solid border-[var(--el-border-color-lighter)]">
+        <el-scrollbar class="min-h-0 flex-1 border border-ap-line border-solid bg-ap-sunken">
           <div class="p-2 text-xs font-mono">
             <div
               v-for="(line, i) in diff" :key="i" class="whitespace-pre-wrap"
-              :class="{ 'bg-green-100': line.type === 'add', 'bg-red-100 line-through': line.type === 'del' }"
+              :class="{ 'diff-add': line.type === 'add', 'diff-del': line.type === 'del' }"
             >
               {{ line.type === "add" ? "+ " : line.type === "del" ? "- " : "  " }}{{ line.text }}
             </div>

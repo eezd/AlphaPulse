@@ -218,14 +218,16 @@ loadSkills()
     <el-tabs v-model="activeTab" class="chat-tabs min-h-0 flex flex-1 flex-col">
       <el-tab-pane label="Chat" name="chat" class="h-full">
         <div class="h-full flex gap-3">
-          <el-card class="w-72 shrink-0" body-class="h-full box-border flex flex-col gap-2" shadow="never">
-            <div class="flex items-center justify-between text-sm font-bold">
-              Skills
-              <el-button link size="small" @click="router.push('/skills')">
-                去管理
-              </el-button>
-            </div>
-            <div class="text-xs text-[var(--el-text-color-secondary)]">
+          <el-card class="w-72 flex shrink-0 flex-col" body-class="min-h-0 flex-1 box-border flex flex-col gap-2" shadow="never">
+            <template #header>
+              <div class="w-full flex items-center justify-between">
+                Skills
+                <el-button link type="primary" size="small" @click="router.push('/skills')">
+                  去管理
+                </el-button>
+              </div>
+            </template>
+            <div class="text-xs text-ap-muted">
               点击查看草稿与已发布版本的差异并发布；黄色为本次 Chat 刚改过的
             </div>
             <div class="min-h-0 flex-1">
@@ -242,7 +244,7 @@ loadSkills()
                 <el-option v-for="e in EFFORTS" :key="e" :value="e" :label="`思考强度：${e}`" />
               </el-select>
               <el-tooltip content="下一轮发给模型的 system prompt（含已发布 skills、CONTEXT.md）与历史消息的估算大小" placement="bottom">
-                <span class="text-xs" :class="tokenRatio > 0.8 ? 'text-red-500 font-bold' : 'text-[var(--el-text-color-secondary)]'">
+                <span class="text-xs" :class="tokenRatio > 0.8 ? 'text-ap-down font-bold' : 'text-[var(--el-text-color-secondary)]'">
                   上下文约 {{ estimatedTokens.toLocaleString() }}{{ provider ? ` / ${provider.context_window.toLocaleString()}` : "" }} token
                 </span>
               </el-tooltip>

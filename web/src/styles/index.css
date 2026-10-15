@@ -1,3 +1,5 @@
+/* 全站深色交易终端主题。颜色来自 palette.ts（由 UnoCSS preflight 输出为 --ap-* 变量） */
+
 html,
 body,
 #app {
@@ -6,14 +8,260 @@ body,
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: var(--ap-bg);
+  color: var(--ap-text);
+  font-family: var(--ap-font-mono);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color-scheme: dark;
 }
 
-/* Markdown 渲染（Chat 回复、skill 预览、CONTEXT.md 预览） */
+/* 浏览器默认不让表单控件继承字体 */
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--ap-panel-highest) transparent;
+}
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--ap-panel-highest);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ---------- Element Plus 变量 ---------- */
+
+html.dark {
+  --el-bg-color: var(--ap-panel);
+  --el-bg-color-page: var(--ap-bg);
+  --el-bg-color-overlay: var(--ap-panel);
+  --el-text-color-primary: var(--ap-text);
+  --el-text-color-regular: var(--ap-text);
+  --el-text-color-secondary: var(--ap-muted);
+  --el-text-color-placeholder: var(--ap-faint);
+  --el-text-color-disabled: color-mix(in srgb, var(--ap-faint) 60%, var(--ap-bg));
+  --el-border-color: var(--ap-line);
+  --el-border-color-dark: var(--ap-faint);
+  --el-border-color-darker: var(--ap-faint);
+  --el-border-color-light: color-mix(in srgb, var(--ap-line) 80%, var(--ap-panel));
+  --el-border-color-lighter: color-mix(in srgb, var(--ap-line) 60%, var(--ap-panel));
+  --el-border-color-extra-light: color-mix(in srgb, var(--ap-line) 40%, var(--ap-panel));
+  --el-border-color-hover: var(--ap-faint);
+  --el-fill-color: var(--ap-panel-high);
+  --el-fill-color-light: var(--ap-panel-high);
+  --el-fill-color-lighter: var(--ap-panel-low);
+  --el-fill-color-extra-light: var(--ap-panel-low);
+  --el-fill-color-dark: var(--ap-panel-highest);
+  --el-fill-color-darker: var(--ap-panel-highest);
+  /* 输入框、下拉框、复选按钮等的底色 */
+  --el-fill-color-blank: var(--ap-sunken);
+  --el-mask-color: color-mix(in srgb, var(--ap-bg) 80%, transparent);
+
+  --el-color-primary: var(--ap-brand);
+  --el-color-success: var(--ap-up);
+  --el-color-warning: var(--ap-warn);
+  --el-color-danger: var(--ap-down);
+  --el-color-error: var(--ap-down);
+  --el-color-info: var(--ap-faint);
+  /* Element 在实底语义色上一律用 --el-color-white 作文字色（按钮、分页、复选按钮、实心标签等）；
+     我们的黄、浅绿、浅红都需要深色字 */
+  --el-color-white: var(--ap-bg);
+
+  --el-border-radius-base: 0;
+  --el-border-radius-small: 0;
+  --el-border-radius-round: 0;
+  --el-font-family: var(--ap-font-mono);
+  --el-font-size-base: 13px;
+  --el-font-size-small: 12px;
+  --el-font-size-extra-small: 11px;
+  /* 稿中弹层不用柔和阴影，只用硬描边 */
+  --el-box-shadow: 2px 2px 0 #000;
+  --el-box-shadow-light: 2px 2px 0 #000;
+  --el-box-shadow-lighter: none;
+  --el-box-shadow-dark: none;
+}
+
+/* 语义色的浅色/深色档：浅色档向面板色混合，标签自然成为「浅底 + 描边」；深色档在暗色主题里是更亮的悬停色 */
+html.dark {
+  --el-color-primary-light-3: color-mix(in srgb, var(--el-color-primary) 70%, var(--ap-panel));
+  --el-color-primary-light-5: color-mix(in srgb, var(--el-color-primary) 50%, var(--ap-panel));
+  --el-color-primary-light-7: color-mix(in srgb, var(--el-color-primary) 30%, var(--ap-panel));
+  --el-color-primary-light-8: color-mix(in srgb, var(--el-color-primary) 22%, var(--ap-panel));
+  --el-color-primary-light-9: color-mix(in srgb, var(--el-color-primary) 12%, var(--ap-panel));
+  --el-color-primary-dark-2: color-mix(in srgb, var(--el-color-primary) 80%, #fff);
+  --el-color-success-light-3: color-mix(in srgb, var(--el-color-success) 70%, var(--ap-panel));
+  --el-color-success-light-5: color-mix(in srgb, var(--el-color-success) 50%, var(--ap-panel));
+  --el-color-success-light-7: color-mix(in srgb, var(--el-color-success) 30%, var(--ap-panel));
+  --el-color-success-light-8: color-mix(in srgb, var(--el-color-success) 22%, var(--ap-panel));
+  --el-color-success-light-9: color-mix(in srgb, var(--el-color-success) 12%, var(--ap-panel));
+  --el-color-success-dark-2: color-mix(in srgb, var(--el-color-success) 80%, #fff);
+  --el-color-warning-light-3: color-mix(in srgb, var(--el-color-warning) 70%, var(--ap-panel));
+  --el-color-warning-light-5: color-mix(in srgb, var(--el-color-warning) 50%, var(--ap-panel));
+  --el-color-warning-light-7: color-mix(in srgb, var(--el-color-warning) 30%, var(--ap-panel));
+  --el-color-warning-light-8: color-mix(in srgb, var(--el-color-warning) 22%, var(--ap-panel));
+  --el-color-warning-light-9: color-mix(in srgb, var(--el-color-warning) 12%, var(--ap-panel));
+  --el-color-warning-dark-2: color-mix(in srgb, var(--el-color-warning) 80%, #fff);
+  --el-color-danger-light-3: color-mix(in srgb, var(--el-color-danger) 70%, var(--ap-panel));
+  --el-color-danger-light-5: color-mix(in srgb, var(--el-color-danger) 50%, var(--ap-panel));
+  --el-color-danger-light-7: color-mix(in srgb, var(--el-color-danger) 30%, var(--ap-panel));
+  --el-color-danger-light-8: color-mix(in srgb, var(--el-color-danger) 22%, var(--ap-panel));
+  --el-color-danger-light-9: color-mix(in srgb, var(--el-color-danger) 12%, var(--ap-panel));
+  --el-color-danger-dark-2: color-mix(in srgb, var(--el-color-danger) 80%, #fff);
+  --el-color-error-light-3: var(--el-color-danger-light-3);
+  --el-color-error-light-5: var(--el-color-danger-light-5);
+  --el-color-error-light-7: var(--el-color-danger-light-7);
+  --el-color-error-light-8: var(--el-color-danger-light-8);
+  --el-color-error-light-9: var(--el-color-danger-light-9);
+  --el-color-error-dark-2: var(--el-color-danger-dark-2);
+  --el-color-info-light-3: color-mix(in srgb, var(--el-color-info) 70%, var(--ap-panel));
+  --el-color-info-light-5: color-mix(in srgb, var(--el-color-info) 50%, var(--ap-panel));
+  --el-color-info-light-7: color-mix(in srgb, var(--el-color-info) 30%, var(--ap-panel));
+  --el-color-info-light-8: color-mix(in srgb, var(--el-color-info) 22%, var(--ap-panel));
+  --el-color-info-light-9: color-mix(in srgb, var(--el-color-info) 12%, var(--ap-panel));
+  --el-color-info-dark-2: color-mix(in srgb, var(--el-color-info) 80%, #fff);
+}
+
+/* ---------- 组件 ---------- */
+
+/* 面板：1px 边框，32px 标题条 */
+html.dark .el-card {
+  --el-card-bg-color: var(--ap-panel);
+  --el-card-border-color: var(--ap-line);
+  --el-card-border-radius: 0;
+  --el-card-padding: 12px;
+}
+.el-card__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  min-height: 32px;
+  padding: 4px 12px !important;
+  border-bottom-color: var(--ap-line) !important;
+  background: var(--ap-panel-high);
+  font-family: var(--ap-font-head);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+/* 表格：紧凑行高，表头下沉色，数字等宽 */
+html.dark .el-table {
+  --el-table-bg-color: var(--ap-panel);
+  --el-table-tr-bg-color: var(--ap-panel);
+  --el-table-expanded-cell-bg-color: var(--ap-panel);
+  --el-table-header-bg-color: var(--ap-sunken);
+  --el-table-header-text-color: var(--ap-muted);
+  --el-table-row-hover-bg-color: var(--ap-panel-high);
+  --el-table-border-color: color-mix(in srgb, var(--ap-line) 60%, var(--ap-panel));
+  --el-table-text-color: var(--ap-text);
+}
+.el-table th.el-table__cell {
+  font-size: 11px;
+  font-weight: 500;
+}
+
+/* 主按钮：黄底深色字，悬停变亮 */
+html.dark .el-button--primary:not(.is-plain, .is-text, .is-link) {
+  --el-button-hover-bg-color: var(--el-color-primary-dark-2);
+  --el-button-hover-border-color: var(--el-color-primary-dark-2);
+}
+/* 危险、成功、警告按钮：浅底描边（稿中的「停止」），悬停填实 */
+html.dark .el-button--danger {
+  --ap-button-color: var(--el-color-danger);
+}
+html.dark .el-button--success {
+  --ap-button-color: var(--el-color-success);
+}
+html.dark .el-button--warning {
+  --ap-button-color: var(--el-color-warning);
+}
+html.dark :is(.el-button--danger, .el-button--success, .el-button--warning):not(.is-text, .is-link) {
+  --el-button-text-color: var(--ap-button-color);
+  --el-button-bg-color: color-mix(in srgb, var(--ap-button-color) 14%, transparent);
+  --el-button-border-color: color-mix(in srgb, var(--ap-button-color) 45%, transparent);
+  --el-button-hover-text-color: var(--ap-bg);
+  --el-button-hover-bg-color: var(--ap-button-color);
+  --el-button-hover-border-color: var(--ap-button-color);
+  --el-button-active-text-color: var(--ap-bg);
+  --el-button-active-bg-color: var(--ap-button-color);
+  --el-button-active-border-color: var(--ap-button-color);
+}
+/* 暗色主题里 light-5 是变暗，链接悬停要变亮 */
+html.dark .el-button.is-link {
+  --el-button-hover-link-text-color: color-mix(in srgb, var(--el-button-text-color) 75%, #fff);
+}
+
+html.dark .el-tag {
+  --el-tag-border-radius: 0;
+  font-weight: 600;
+}
+
+/* 树放在面板里，不要下沉底色 */
+html.dark .el-tree {
+  background: transparent;
+}
+
+html.dark .el-descriptions__body {
+  background-color: var(--ap-panel);
+}
+html.dark .el-descriptions {
+  --el-descriptions-item-bordered-label-background: var(--ap-panel-high);
+}
+
+html.dark .el-switch__core,
+html.dark .el-switch__core .el-switch__action {
+  border-radius: 0;
+}
+html.dark .el-switch__core .el-switch__action {
+  background-color: var(--ap-text);
+}
+
+.el-progress-bar__outer,
+.el-progress-bar__inner {
+  border-radius: 0 !important;
+}
+
+html.dark .el-drawer {
+  border-left: 1px solid var(--ap-line);
+}
+.el-drawer__header {
+  margin-bottom: 0 !important;
+  padding: 0 16px !important;
+  height: 48px;
+  border-bottom: 1px solid var(--ap-line);
+  background: var(--ap-panel-high);
+}
+.el-drawer__title,
+.el-dialog__title,
+.el-message-box__title {
+  font-family: var(--ap-font-head);
+  font-weight: 700;
+}
+html.dark .el-dialog,
+html.dark .el-message-box {
+  border: 1px solid var(--ap-faint);
+}
+
+/* ---------- 正文 ---------- */
+
+/* Markdown 渲染（分析报告、Chat 回复、skill 预览、CONTEXT.md 预览）：长段中文用无衬线字体 */
 .markdown-body {
+  font-family: var(--ap-font-sans);
   font-size: 14px;
-  line-height: 1.7;
+  line-height: 1.75;
   word-break: break-word;
+  color: var(--ap-text);
 }
 .markdown-body > :first-child {
   margin-top: 0;
@@ -22,17 +270,21 @@ body {
 .markdown-body h2,
 .markdown-body h3,
 .markdown-body h4 {
-  margin: 1em 0 0.5em;
-  font-weight: 600;
+  margin: 1.1em 0 0.5em;
+  font-family: var(--ap-font-head);
+  font-weight: 700;
 }
 .markdown-body h1 {
-  font-size: 1.5em;
+  font-size: 1.45em;
 }
 .markdown-body h2 {
-  font-size: 1.3em;
+  padding-bottom: 0.25em;
+  border-bottom: 1px solid var(--ap-line);
+  font-size: 1.25em;
 }
 .markdown-body h3 {
   font-size: 1.1em;
+  color: var(--ap-brand);
 }
 .markdown-body p,
 .markdown-body ul,
@@ -46,17 +298,23 @@ body {
 .markdown-body ol {
   padding-left: 1.5em;
 }
+.markdown-body strong {
+  color: #fff;
+}
+.markdown-body a {
+  color: var(--ap-brand);
+}
 .markdown-body code {
   padding: 0.1em 0.3em;
-  border-radius: 3px;
-  background: var(--el-fill-color);
-  font-size: 0.9em;
+  background: var(--ap-panel-high);
+  font-family: var(--ap-font-mono);
+  font-size: 0.88em;
 }
 .markdown-body pre {
   padding: 0.6em 0.8em;
   overflow: auto;
-  border-radius: 4px;
-  background: var(--el-fill-color-light);
+  border: 1px solid var(--ap-line);
+  background: var(--ap-sunken);
 }
 .markdown-body pre code {
   padding: 0;
@@ -64,14 +322,51 @@ body {
 }
 .markdown-body blockquote {
   padding-left: 0.8em;
-  border-left: 3px solid var(--el-border-color);
-  color: var(--el-text-color-secondary);
+  border-left: 3px solid var(--ap-brand);
+  color: var(--ap-muted);
 }
 .markdown-body table {
   border-collapse: collapse;
+  font-family: var(--ap-font-mono);
+  font-size: 12px;
 }
 .markdown-body th,
 .markdown-body td {
-  padding: 0.3em 0.6em;
-  border: 1px solid var(--el-border-color);
+  padding: 0.35em 0.7em;
+  border: 1px solid var(--ap-line);
+}
+.markdown-body th {
+  background: var(--ap-panel-high);
+  color: var(--ap-muted);
+  font-weight: 500;
+}
+.markdown-body hr {
+  border: 0;
+  border-top: 1px solid var(--ap-line);
+}
+
+/* 逐行差异（新闻修订、skill 版本） */
+.diff-add {
+  background: color-mix(in srgb, var(--ap-up) 14%, transparent);
+}
+.diff-del {
+  background: color-mix(in srgb, var(--ap-down) 14%, transparent);
+  color: var(--ap-muted);
+  text-decoration: line-through;
+}
+
+/* 折叠面板：标题和内容留出内边距，标题过长时截断 */
+.el-collapse-item__header {
+  gap: 8px;
+  padding: 0 10px 0 12px;
+}
+.el-collapse-item__title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.el-collapse-item__content {
+  padding: 0 12px 12px;
 }

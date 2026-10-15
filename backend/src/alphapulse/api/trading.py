@@ -32,11 +32,15 @@ SNAPSHOT_FRESH_SECONDS = 30
 LIVE_PLAN_STATUSES = ("pending", "open", "closing")
 
 
-class TodayUsage(BaseModel):
+class TodayStats(BaseModel):
     analyses: int
     limit: int
     input_tokens: int
     output_tokens: int
+    # 今日结束（平仓）的计划：笔数、净盈亏为正的笔数、净盈亏合计（含手续费）
+    trades: int
+    wins: int
+    net_pnl: Decimal
 
 
 class StatusOut(BaseModel):
@@ -50,7 +54,7 @@ class StatusOut(BaseModel):
     reasoning_effort: str | None
     # trader 进程的心跳快照；进程离线时为空
     snapshot: dict | None
-    today: TodayUsage
+    today: TodayStats
 
 
 class ConfigIn(BaseModel):
@@ -156,6 +160,10 @@ async def get_status(session: Annotated[AsyncSession, Depends(get_session)]) -> 
             func.coalesce(func.sum(TradingAnalysis.usage["output_tokens"].as_integer()), 0),
         ).where(TradingAnalysis.started_at >= today)
     )).one()
+    # 计划 closed 时 executor.finish 一定写了 result
+    nets = [Decimal(r["net"]) for r in (await session.scalars(
+        select(TradingAnalysis.result).where(TradingAnalysis.plan_status == "closed", TradingAnalysis.closed_at >= today)
+    )).all()]
     snapshot = await read_snapshot()
     equity = snapshot and snapshot["account"] and Decimal(snapshot["account"]["margin_balance"])
     return StatusOut(
@@ -163,7 +171,8 @@ async def get_status(session: Annotated[AsyncSession, Depends(get_session)]) -> 
         running_changed_at=account.running_changed_at, capital_usdt=account.capital_usdt,
         effective_capital=min(account.capital_usdt, equity) if account.capital_usdt and equity else None,
         provider_id=account.provider_id, reasoning_effort=account.reasoning_effort, snapshot=snapshot,
-        today=TodayUsage(analyses=count, limit=DAILY_ANALYSIS_LIMIT, input_tokens=input_tokens, output_tokens=output_tokens),
+        today=TodayStats(analyses=count, limit=DAILY_ANALYSIS_LIMIT, input_tokens=input_tokens, output_tokens=output_tokens,
+                         trades=len(nets), wins=sum(n > 0 for n in nets), net_pnl=sum(nets, Decimal(0))),
     )
 
 

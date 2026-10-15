@@ -1,7 +1,8 @@
 <script lang="ts" setup>
 import type { Analysis, OrderRow, PlanCondition, TradingSymbol } from "@/apis/trading"
+import { Clock, Cpu, Refresh, TopRight, Warning } from "@element-plus/icons-vue"
 import { CLOSE_REASON_LABELS, PLAN_STATUS_LABELS, TAKE_PROFIT_STEPS } from "@/apis/trading"
-import { formatTime } from "@/utils/text"
+import { formatDuration, formatTime } from "@/utils/text"
 
 /** analysis：执行中的计划，没有时为最近一次分析；latest：最近一次分析（与 analysis 不同时另行提示） */
 const props = defineProps<{ symbol: TradingSymbol, analysis: Analysis | null, latest: Analysis | null, orders: OrderRow[], requesting: boolean }>()
@@ -20,6 +21,7 @@ const decision = computed(() => props.analysis?.decision ?? null)
 const sizing = computed(() => props.analysis?.sizing ?? null)
 const busy = computed(() => props.requesting || props.symbol.analyzing || !!props.symbol.analysis_requested_at)
 const elapsed = computed(() => props.analysis ? Math.max(0, Math.round((now.value - new Date(props.analysis.started_at).getTime()) / 1000)) : 0)
+const duration = computed(() => props.analysis?.finished_at ? formatDuration(props.analysis.started_at, props.analysis.finished_at) : "")
 
 function filled(purpose: "entry" | "tp", leg: number) {
   const total = props.orders.filter(o => o.purpose === purpose && o.leg === leg).reduce((sum, o) => sum + Number(o.filled_qty), 0)
@@ -55,55 +57,64 @@ const ladder = computed(() => sizing.value?.entry && entryRow.value
 </script>
 
 <template>
-  <div class="border border-[var(--el-border-color)] rounded border-solid p-3">
-    <div class="mb-2 flex items-center gap-2">
-      <span class="font-bold">{{ symbol.symbol }}</span>
-      <span class="text-xs text-[var(--el-text-color-secondary)]">短线做波动（区间内挂限价单，最长持仓 4 小时）</span>
+  <div class="border border-ap-line border-solid bg-ap-panel-low p-4">
+    <div class="mb-3 flex items-center gap-2 border-b border-b-ap-line border-b-solid pb-2.5">
+      <el-icon class="text-ap-brand" :size="18">
+        <Cpu />
+      </el-icon>
+      <span class="font-head text-base font-bold">{{ symbol.symbol }}</span>
+      <span class="text-xs text-ap-muted">短线做波动（区间内挂限价单，最长持仓 4 小时）</span>
       <div class="flex-1" />
-      <el-button v-if="analysis && analysis.status !== 'running'" link type="primary" @click="emit('detail', analysis.id)">
+      <el-link v-if="analysis && analysis.status !== 'running'" type="primary" @click="emit('detail', analysis.id)">
         查看完整分析
-      </el-button>
-      <el-button size="small" type="primary" :loading="busy" @click="emit('analyze')">
+        <el-icon class="ml-0.5">
+          <TopRight />
+        </el-icon>
+      </el-link>
+      <el-button type="primary" :loading="busy" @click="emit('analyze')">
         {{ busy ? "分析中" : "立即分析" }}
       </el-button>
     </div>
 
-    <div v-if="!analysis" class="text-sm text-[var(--el-text-color-secondary)]">
+    <div v-if="!analysis" class="state-strip">
       还没有分析。引擎停止时点「立即分析」为试运行：计划只记录，不下单。
     </div>
-    <div v-else-if="analysis.status === 'running'" class="text-sm text-[var(--el-text-color-secondary)]">
-      模型分析中，已用 {{ elapsed }} 秒（通常 1–3 分钟）…
+    <div v-else-if="analysis.status === 'running'" class="state-strip">
+      <i class="mr-2.5 inline-block h-1.5 w-1.5 animate-ping bg-ap-brand" />模型分析中，已用 {{ elapsed }} 秒（通常 1–3 分钟）…
     </div>
     <el-alert v-else-if="analysis.status === 'failed'" type="error" :closable="false" show-icon>
       {{ formatTime(analysis.started_at) }} 分析失败：{{ analysis.error }}
     </el-alert>
 
-    <div v-else-if="decision" class="flex flex-col gap-2 text-sm">
+    <div v-else-if="decision" class="flex flex-col gap-3">
       <div class="flex flex-wrap items-center gap-2">
-        <el-tag v-if="analysis.dry_run" type="info" size="small">
+        <el-tag v-if="analysis.dry_run" type="info">
           试运行
         </el-tag>
-        <el-tag v-if="analysis.plan_status" type="success" effect="dark" size="small">
+        <el-tag v-if="analysis.plan_status" type="success">
           {{ PLAN_STATUS_LABELS[analysis.plan_status] }}
         </el-tag>
-        <el-tag size="small">
+        <el-tag type="primary">
           {{ ACTION_LABELS[decision.action] }}
         </el-tag>
-        <el-tag v-if="decision.direction" :type="decision.direction === 'long' ? 'success' : 'danger'" size="small">
+        <el-tag v-if="decision.direction" :type="decision.direction === 'long' ? 'success' : 'danger'">
           {{ decision.direction === "long" ? "做多" : "做空" }}
         </el-tag>
-        <el-tag v-if="decision.confidence" type="warning" size="small">
+        <el-tag v-if="decision.confidence" type="warning">
           置信度{{ CONFIDENCE_LABELS[decision.confidence] }}
         </el-tag>
-        <span class="text-xs text-[var(--el-text-color-secondary)]">
+        <span class="text-[11px] text-ap-muted">
           {{ formatTime(analysis.started_at) }} · {{ analysis.reasons.join("；") }} · {{ analysis.model }}{{ analysis.reasoning_effort ? ` / ${analysis.reasoning_effort}` : "" }}
+          {{ duration ? `· 耗时 ${duration}` : "" }}
           · {{ analysis.usage?.input_tokens.toLocaleString() }} / {{ analysis.usage?.output_tokens.toLocaleString() }} token
         </span>
       </div>
-      <div class="font-bold">
+
+      <div class="border-l-4 border-l-ap-brand border-l-solid bg-ap-panel px-3 py-2.5 font-sans text-[15px] font-bold">
         {{ decision.summary }}
       </div>
-      <div v-if="latest && latest.id !== analysis.id" class="text-xs text-[var(--el-text-color-secondary)]">
+
+      <div v-if="latest && latest.id !== analysis.id" class="text-xs text-ap-muted">
         最近一次分析 #{{ latest.id }}（{{ formatTime(latest.started_at) }}）：
         <template v-if="latest.status === 'done'">
           {{ latest.decision?.summary }}
@@ -111,56 +122,106 @@ const ladder = computed(() => sizing.value?.entry && entryRow.value
         <template v-else>
           {{ latest.status === "running" ? "分析中" : `失败：${latest.error}` }}
         </template>
-        <el-link type="primary" underline="never" class="ml-1 text-xs!" @click="emit('detail', latest.id)">
+        <el-link type="primary" class="ml-1 text-xs!" @click="emit('detail', latest.id)">
           查看
         </el-link>
       </div>
-      <div v-if="analysis.valid_until || analysis.close_deadline" class="flex flex-wrap gap-x-6">
-        <span v-if="analysis.plan_status === 'pending' && analysis.valid_until"><span class="label">限价单有效至</span>{{ formatTime(analysis.valid_until, "MM-DD HH:mm") }}（剩 {{ countdown(analysis.valid_until) }}）</span>
-        <span v-if="analysis.first_fill_at"><span class="label">入场</span>{{ formatTime(analysis.first_fill_at, "MM-DD HH:mm") }}</span>
-        <span v-if="analysis.close_deadline"><span class="label">最晚平仓</span>{{ formatTime(analysis.close_deadline, "MM-DD HH:mm") }}（剩 {{ countdown(analysis.close_deadline) }}）</span>
+
+      <div v-if="analysis.valid_until || analysis.first_fill_at || analysis.close_deadline" class="flex flex-wrap items-center gap-x-5 gap-y-1 border border-ap-line border-solid bg-ap-sunken px-3 py-1.5 text-xs">
+        <el-icon class="text-ap-up" :size="15">
+          <Clock />
+        </el-icon>
+        <span v-if="analysis.plan_status === 'pending' && analysis.valid_until">
+          限价单有效至 {{ formatTime(analysis.valid_until, "MM-DD HH:mm") }}<b class="ml-1 text-ap-brand">（剩 {{ countdown(analysis.valid_until) }}）</b>
+        </span>
+        <span v-if="analysis.first_fill_at">入场 {{ formatTime(analysis.first_fill_at, "MM-DD HH:mm") }}</span>
+        <span v-if="analysis.close_deadline">
+          最晚平仓 {{ formatTime(analysis.close_deadline, "MM-DD HH:mm") }}<b class="ml-1 text-ap-brand">（剩 {{ countdown(analysis.close_deadline) }}）</b>
+        </span>
       </div>
-      <div v-if="analysis.result">
-        <span class="label">结果</span>{{ CLOSE_REASON_LABELS[analysis.close_reason ?? ""] ?? analysis.close_reason }}，净盈亏 {{ analysis.result.net }} USDT（手续费 {{ analysis.result.commission }}）
+
+      <div v-if="analysis.result" class="text-sm">
+        <span class="label">结果</span>{{ CLOSE_REASON_LABELS[analysis.close_reason ?? ""] ?? analysis.close_reason }}，净盈亏
+        <b :class="Number(analysis.result.net) >= 0 ? 'text-ap-up' : 'text-ap-down'">{{ analysis.result.net }} USDT</b>（手续费 {{ analysis.result.commission }}）
       </div>
-      <div><span class="label">为什么</span>{{ decision.reasons }}</div>
+
+      <div class="font-sans text-[13px] leading-relaxed">
+        <span class="label">为什么</span>{{ decision.reasons }}
+      </div>
 
       <template v-if="decision.action === 'plan' && decision.setup && sizing?.entry">
-        <div class="grid grid-cols-2 gap-x-6 gap-y-1">
-          <div>
-            <span class="label">{{ long ? "支撑区" : "压力区" }}</span>{{ sizing.setup.zone_low }} – {{ sizing.setup.zone_high }} · {{ decision.setup.basis }}
+        <div class="grid grid-cols-2 border border-ap-line border-solid bg-ap-panel-high text-xs">
+          <div class="flex flex-col gap-1.5 p-3">
+            <div class="param">
+              <span>{{ long ? "支撑区" : "压力区" }}</span>
+              <b :class="long ? 'text-ap-up' : 'text-ap-down'">{{ sizing.setup.zone_low }} – {{ sizing.setup.zone_high }}</b>
+            </div>
+            <div class="font-sans text-[11px] text-ap-muted">
+              {{ decision.setup.basis }}
+            </div>
+            <div class="param">
+              <span>限价{{ long ? "做多" : "做空" }}</span>
+              <b>{{ sizing.entry.price }} × {{ sizing.entry.quantity }}</b>
+            </div>
+            <div class="text-[11px] text-ap-muted">
+              已成交 {{ filled("entry", 0) }}{{ entryRow?.avg_price ? `，均价 ${entryRow.avg_price}` : "" }}；名义 {{ sizing.entry.notional }} USDT，{{ sizing.entry.leverage }} 倍交易资金
+            </div>
           </div>
-          <div>
-            <span class="label">限价{{ long ? "做多" : "做空" }}</span>{{ sizing.entry.price }} × {{ sizing.entry.quantity }}，已成交 {{ filled("entry", 0) }}{{ entryRow?.avg_price ? `，均价 ${entryRow.avg_price}` : "" }}
-            （名义 {{ sizing.entry.notional }} USDT，{{ sizing.entry.leverage }} 倍交易资金）
-          </div>
-          <div>
-            <span class="label">止损</span>{{ currentStop ?? sizing.entry.stop }}（初始 {{ sizing.entry.stop }}，距挂单价 {{ sizing.entry.stop_pct }}%；区间远端外 0.5×ATR(5m)、距挂单价至少 1×ATR(5m)，止盈 1 后移到保本价）
-          </div>
-          <div>
-            <span class="label">止损亏损</span>{{ sizing.entry.risk_at_stop }} USDT（交易资金的 {{ sizing.entry.risk_pct }}%）{{ sizing.entry.capped_by_leverage ? "，受 3 倍上限限制" : "" }}
+          <div class="flex flex-col gap-1.5 border-l border-l-ap-line border-l-solid p-3">
+            <div class="param">
+              <span>止损</span>
+              <b class="text-ap-down">{{ currentStop ?? sizing.entry.stop }}</b>
+            </div>
+            <div class="param">
+              <span>初始止损 / 距挂单价</span>
+              <span>{{ sizing.entry.stop }} / {{ sizing.entry.stop_pct }}%</span>
+            </div>
+            <div class="param">
+              <span>止损亏损</span>
+              <b class="text-ap-down">{{ sizing.entry.risk_at_stop }} USDT（交易资金的 {{ sizing.entry.risk_pct }}%）</b>
+            </div>
+            <div class="text-[11px] text-ap-muted">
+              区间远端外 0.5×ATR(5m)、距挂单价至少 1×ATR(5m)；止盈 1 后移到保本价{{ sizing.entry.capped_by_leverage ? "；受 3 倍上限限制" : "" }}
+            </div>
           </div>
         </div>
-        <el-table v-if="ladder.length" :data="ladder" border size="small">
-          <el-table-column label="分批止盈" min-width="90">
-            <template #default="{ row }">
-              止盈 {{ row.leg + 1 }}
-            </template>
-          </el-table-column>
-          <el-table-column prop="move" label="距成交均价" min-width="90" />
-          <el-table-column prop="ratio" label="平仓比例" min-width="80" />
-          <el-table-column prop="price" label="价格" min-width="100" />
-          <el-table-column prop="filled" label="已成交" min-width="80" />
-        </el-table>
+
+        <div v-if="ladder.length">
+          <div class="panel-title mb-1.5">
+            分批止盈
+          </div>
+          <el-table :data="ladder" border size="small">
+            <el-table-column label="分批止盈" min-width="90">
+              <template #default="{ row }">
+                <b class="text-ap-up">止盈 {{ row.leg + 1 }}</b>
+              </template>
+            </el-table-column>
+            <el-table-column prop="move" label="距成交均价" min-width="90" align="right" />
+            <el-table-column prop="ratio" label="平仓比例" min-width="80" align="right" />
+            <el-table-column label="价格" min-width="100" align="right">
+              <template #default="{ row }">
+                <b>{{ row.price }}</b>
+              </template>
+            </el-table-column>
+            <el-table-column prop="filled" label="已成交" min-width="80" align="center" />
+          </el-table>
+        </div>
       </template>
 
-      <div v-if="decision.reevaluate.length">
-        <span class="label">重新判断</span>
-        <div v-for="(c, i) in decision.reevaluate" :key="i" class="ml-2">
-          · {{ condition(c) }}：{{ c.basis }}
+      <div class="flex flex-col gap-1.5 border border-ap-line border-solid bg-ap-sunken p-2.5 font-sans text-xs">
+        <div v-for="(c, i) in decision.reevaluate" :key="i" class="flex items-start gap-1.5 text-ap-brand">
+          <el-icon class="mt-0.5 shrink-0">
+            <Refresh />
+          </el-icon>
+          <span><b>重新判断：</b>{{ condition(c) }}：{{ c.basis }}</span>
+        </div>
+        <div class="flex items-start gap-1.5 text-ap-down" :class="{ 'border-t border-t-ap-line border-t-solid pt-1.5': decision.reevaluate.length }">
+          <el-icon class="mt-0.5 shrink-0">
+            <Warning />
+          </el-icon>
+          <span><b>风险：</b>{{ decision.risks }}</span>
         </div>
       </div>
-      <div><span class="label">风险</span>{{ decision.risks }}</div>
     </div>
   </div>
 </template>
@@ -168,7 +229,28 @@ const ladder = computed(() => sizing.value?.entry && entryRow.value
 <style scoped>
 .label {
   margin-right: 8px;
-  color: var(--el-text-color-secondary);
+  color: var(--ap-muted);
+  font-family: var(--ap-font-mono);
   font-size: 12px;
+}
+.state-strip {
+  display: flex;
+  align-items: center;
+  padding: 8px 12px;
+  border: 1px solid var(--ap-line);
+  background: var(--ap-panel-highest);
+  color: var(--ap-muted);
+  font-size: 12px;
+}
+.param {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid color-mix(in srgb, var(--ap-line) 60%, transparent);
+}
+.param > span:first-child {
+  color: var(--ap-muted);
+  font-size: 11px;
 }
 </style>

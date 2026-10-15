@@ -124,7 +124,7 @@ loadLatest()
         {{ formatTime(source.last_success_at) }}
       </el-descriptions-item>
       <el-descriptions-item label="连续失败">
-        <span :class="{ 'text-red-500 font-bold': source.consecutive_failures > 0 }">{{ source.consecutive_failures }}</span>
+        <span :class="{ 'text-ap-down font-bold': source.consecutive_failures > 0 }">{{ source.consecutive_failures }}</span>
       </el-descriptions-item>
       <el-descriptions-item label="下次运行">
         {{ formatTime(source.paused_until && source.paused_until > (source.process?.next_run_at ?? "") ? source.paused_until : source.process?.next_run_at) }}
@@ -157,7 +157,7 @@ loadLatest()
         </div>
       </el-descriptions-item>
       <el-descriptions-item v-if="source.last_error" label="最近错误" :span="4">
-        <span class="whitespace-pre-wrap text-xs text-red-500">{{ source.last_error }}</span>
+        <span class="whitespace-pre-wrap text-xs text-ap-down">{{ source.last_error }}</span>
       </el-descriptions-item>
     </el-descriptions>
 
@@ -171,7 +171,7 @@ loadLatest()
         </template>
         <div v-for="item in latest" :key="item.id" class="mb-2 text-sm">
           <span class="mr-2 text-xs text-[var(--el-text-color-secondary)]">{{ formatTime(item.published_at, "MM-DD HH:mm") }}</span>
-          <el-link :href="item.url" target="_blank">
+          <el-link :href="item.url" target="_blank" class="font-sans">
             {{ item.title || item.excerpt.slice(0, 60) }}
           </el-link>
         </div>
@@ -189,10 +189,10 @@ loadLatest()
             <el-switch v-model="autoScroll" active-text="自动滚动" size="small" />
           </div>
         </template>
-        <div ref="logBox" class="min-h-0 flex-1 overflow-auto rounded bg-[#1e1e1e] p-2 text-xs text-[#d4d4d4] font-mono leading-5">
+        <div ref="logBox" class="min-h-0 flex-1 overflow-auto border border-ap-line border-solid bg-ap-sunken p-2 text-xs text-ap-text font-mono leading-5">
           <div v-for="log in visibleLogs" :key="log.id" class="whitespace-pre-wrap break-all">
-            <span class="text-[#808080]">{{ formatTime(log.ts) }}</span>
-            <span :class="{ 'text-yellow-400': log.level === 'WARNING', 'text-red-400': log.level === 'ERROR' || log.level === 'CRITICAL' }" class="mx-2">{{ log.level }}</span>{{ log.message }}
+            <span class="text-ap-faint">{{ formatTime(log.ts) }}</span>
+            <span :class="{ 'text-ap-warn': log.level === 'WARNING', 'text-ap-down': log.level === 'ERROR' || log.level === 'CRITICAL' }" class="mx-2">{{ log.level }}</span>{{ log.message }}
           </div>
         </div>
       </el-card>

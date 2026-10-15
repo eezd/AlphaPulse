@@ -2,6 +2,7 @@
 import type { NewsDetail, Revision } from "@/apis/news"
 import { getNews, listRevisions } from "@/apis/news"
 import { useSourceNames } from "@/composables/useSourceNames"
+import { PALETTE } from "@/styles/palette"
 import { diffLines, formatTime, htmlToLines } from "@/utils/text"
 
 const newsId = defineModel<number | null>({ required: true })
@@ -27,7 +28,7 @@ watch(newsId, async (id) => {
 // 第三方正文放进无脚本权限的 sandbox iframe，避免其中的脚本访问本站
 const srcdoc = computed(() => detail.value && `<!doctype html><html><head><meta charset="utf-8">
 <meta name="referrer" content="no-referrer"><base target="_blank">
-<style>body{font:15px/1.8 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;color:#303133;margin:0 4px}img{max-width:100%;height:auto}</style>
+<style>:root{color-scheme:dark;background:${PALETTE.panel}}body{font:15px/1.8 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;color:${PALETTE.text};margin:0 4px}a{color:${PALETTE.brand}}img{max-width:100%;height:auto}</style>
 </head><body>${detail.value.content_html}</body></html>`)
 
 const diff = computed(() => {
@@ -44,11 +45,11 @@ const diff = computed(() => {
 <template>
   <el-drawer :model-value="newsId != null" size="50%" :with-header="false" @close="newsId = null">
     <div v-if="detail" class="h-full flex flex-col gap-3">
-      <div class="text-lg font-bold">
+      <div class="font-sans text-lg font-bold">
         {{ detail.title || detail.excerpt.slice(0, 60) }}
       </div>
       <div class="flex flex-wrap items-center gap-2 text-sm text-[var(--el-text-color-secondary)]">
-        <el-tag size="small">
+        <el-tag size="small" type="info">
           {{ sourceNames[detail.source_code] ?? detail.source_code }}
         </el-tag>
         <span>{{ formatTime(detail.published_at, "YYYY-MM-DD HH:mm:ss") }}</span>
@@ -76,7 +77,7 @@ const diff = computed(() => {
           <div class="text-sm leading-7">
             <div
               v-for="(line, i) in diff" :key="i"
-              :class="{ 'bg-green-100': line.type === 'add', 'bg-red-100 line-through': line.type === 'del' }"
+              :class="{ 'diff-add': line.type === 'add', 'diff-del': line.type === 'del' }"
               class="px-2"
             >
               {{ line.type === "add" ? "+ " : line.type === "del" ? "- " : "  " }}{{ line.text }}
