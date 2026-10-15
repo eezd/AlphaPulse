@@ -240,7 +240,7 @@ async def test_exchange(session: Annotated[AsyncSession, Depends(get_session)]) 
             info = await client.request("GET", "/fapi/v3/account")
             mode = await client.request("GET", "/fapi/v1/positionSide/dual")
     except ExchangeError as e:
-        hint = "（key 无效、未开启合约交易权限，或限制了 IP）" if e.code == -2015 else ""
+        hint = "（key 须在币安模拟交易里创建，实盘 key 不能用；或未开启合约权限、服务器 IP 不在白名单）" if e.code == -2015 else ""
         return ExchangeTestResult(ok=False, elapsed_ms=round((time.monotonic() - started) * 1000), error=f"{e}{hint}")
     return ExchangeTestResult(
         ok=True, elapsed_ms=round((time.monotonic() - started) * 1000),
