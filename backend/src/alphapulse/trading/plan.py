@@ -1,7 +1,7 @@
 """交易计划的纯计算：模型提交的区间和限价、校验、止损与仓位、止盈阶梯、应有订单。
 
 只做短线做波动：模型划出支撑区（压力区）并给出区内的限价，采纳后立即挂限价单（maker 手续费）；
-止损放在区间远端外，与入场单一起挂；止盈按成交均价的固定比例。
+止损放在区间远端外（且离挂单价至少 1×ATR），与入场单一起挂；止盈按成交均价的固定比例。
 下方常量与 main/README 的数字重复，并写进了分析器的提示词；改 README 时要同步修改。
 """
 
@@ -24,8 +24,10 @@ SETUP_VALID_HOURS = 2
 MAX_HOLD_HOURS = 4
 ATR_INTERVAL = "5m"
 ATR_PERIOD = 14
-# 止损放在区间远端外 STOP_ATR_FACTOR × ATR14(5m)；离挂单价超过 MAX_STOP_PCT 的计划不做
+# 止损放在区间远端外 STOP_ATR_FACTOR × ATR14(5m)，且离挂单价至少 MIN_STOP_ATR × ATR：
+# 挂单价贴近远端时，只按远端算的止损会落在 5m 正常波动里（#34 只有 0.11%）。离挂单价超过 MAX_STOP_PCT 的计划不做
 STOP_ATR_FACTOR = Decimal("0.5")
+MIN_STOP_ATR = Decimal("1")
 MAX_STOP_PCT = Decimal("0.01")
 # 止盈阶梯：（距成交均价的涨跌幅，平仓比例）。牛市里空单不恋战，第一档就平掉大部分
 TAKE_PROFIT_STEPS: dict[str, tuple[tuple[Decimal, Decimal], ...]] = {
@@ -145,11 +147,11 @@ def atr(bars: list[Bar], period: int = ATR_PERIOD) -> Decimal:
     return sum(ranges, Decimal(0)) / period
 
 
-def setup_stop(direction: Direction, far_edge: Decimal, atr_value: Decimal, tick: Decimal) -> Decimal:
-    """止损 = 区间远端外 STOP_ATR_FACTOR × ATR，向远离入场的方向取整"""
+def setup_stop(direction: Direction, entry: Decimal, far_edge: Decimal, atr_value: Decimal, tick: Decimal) -> Decimal:
+    """止损 = 区间远端外 STOP_ATR_FACTOR × ATR 与挂单价外 MIN_STOP_ATR × ATR 中离挂单价更远的一个，向远离入场的方向取整"""
     if direction == "long":
-        return round_to_step(far_edge - STOP_ATR_FACTOR * atr_value, tick, ROUND_FLOOR)
-    return round_to_step(far_edge + STOP_ATR_FACTOR * atr_value, tick, ROUND_CEILING)
+        return round_to_step(min(far_edge - STOP_ATR_FACTOR * atr_value, entry - MIN_STOP_ATR * atr_value), tick, ROUND_FLOOR)
+    return round_to_step(max(far_edge + STOP_ATR_FACTOR * atr_value, entry + MIN_STOP_ATR * atr_value), tick, ROUND_CEILING)
 
 
 def size_entry(direction: Direction, price: Decimal, stop: Decimal, *, capital: Decimal, other_notional: Decimal,
@@ -242,12 +244,13 @@ def check_setup(plan: TradePlan, ctx: PlanContext) -> dict:
         errors.append(f"valid_hours 不能超过 {SETUP_VALID_HOURS}")
     if errors:
         raise PlanError(errors)
-    stop = setup_stop(direction, setup.zone_low if long else setup.zone_high, ctx.atr, rules.tick_size)
+    stop = setup_stop(direction, entry, setup.zone_low if long else setup.zone_high, ctx.atr, rules.tick_size)
     try:
         sizing = size_entry(direction, entry, stop, capital=ctx.capital, other_notional=ctx.other_notional,
                             confidence=plan.confidence, rules=rules)
     except PlanError as e:
-        raise PlanError([f"止损放在区间{'下沿' if long else '上沿'}外 {STOP_ATR_FACTOR}×ATR(5m)={stop}：{e}。"
+        raise PlanError([f"止损 {stop}（区间{'下沿' if long else '上沿'}外 {STOP_ATR_FACTOR}×ATR(5m)，且距挂单价至少 "
+                         f"{MIN_STOP_ATR}×ATR(5m)，ATR={ctx.atr.quantize(rules.tick_size)}）：{e}。"
                          "区间太宽或挂单价离区间远端太远，请收窄区间或调整挂单价"]) from e
     return {
         "direction": direction,

@@ -61,7 +61,7 @@ INSTRUCTIONS = f"""你是 AlphaPulse 的模拟盘交易分析器：为一个币�
 
 ## 程序如何执行
 - 计划（action=plan）被采纳后，程序立即在 entry_price 挂限价单（maker 手续费），同时在交易所挂只减仓止损（按标记价触发）。到 valid_hours 仍未成交则撤单，并重新请你分析。
-- 止损：区间远端外 {rules.STOP_ATR_FACTOR}×ATR14(5m)，做多放在 zone_low 下方，做空放在 zone_high 上方。
+- 止损：区间远端外 {rules.STOP_ATR_FACTOR}×ATR14(5m)，做多放在 zone_low 下方，做空放在 zone_high 上方；且距挂单价至少 {rules.MIN_STOP_ATR}×ATR14(5m)，挂单价贴近远端时按这条算。
 - 止盈：按成交均价，做多 {_ladder("long")}；做空 {_ladder("short")}。止盈 1 成交后撤销未成交的入场部分，止损移到保本价。
 - 首次成交后最长持仓 {rules.MAX_HOLD_HOURS} 小时，到时市价平仓。平仓后程序会请你重新分析。
 - 仓位：单笔风险为交易资金的 {_pct(rules.RISK_PCT)}，置信度低时减半；名义仓位合计不超过 {rules.MAX_LEVERAGE} 倍交易资金。

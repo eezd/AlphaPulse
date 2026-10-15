@@ -135,7 +135,7 @@ const ladder = computed(() => sizing.value?.entry && entryRow.value
             （名义 {{ sizing.entry.notional }} USDT，{{ sizing.entry.leverage }} 倍交易资金）
           </div>
           <div>
-            <span class="label">止损</span>{{ currentStop ?? sizing.entry.stop }}（初始 {{ sizing.entry.stop }}，距挂单价 {{ sizing.entry.stop_pct }}%；区间远端外 0.5×ATR(5m)，止盈 1 后移到保本价）
+            <span class="label">止损</span>{{ currentStop ?? sizing.entry.stop }}（初始 {{ sizing.entry.stop }}，距挂单价 {{ sizing.entry.stop_pct }}%；区间远端外 0.5×ATR(5m)、距挂单价至少 1×ATR(5m)，止盈 1 后移到保本价）
           </div>
           <div>
             <span class="label">止损亏损</span>{{ sizing.entry.risk_at_stop }} USDT（交易资金的 {{ sizing.entry.risk_pct }}%）{{ sizing.entry.capped_by_leverage ? "，受 3 倍上限限制" : "" }}

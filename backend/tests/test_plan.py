@@ -82,14 +82,21 @@ def test_atr_and_stop_from_example():
     value = atr(bars_until("10:25"))
     assert value.quantize(Decimal("0.0001")) == Decimal("302.9714")
     # 做多：支撑区 80200–80700 内挂 80500；止损 80200 − 0.5 × 302.97 = 80048.51 → 向下取整 80048.5，距挂单价 0.56%
-    stop = setup_stop("long", Decimal("80200"), value, BTC.tick_size)
+    stop = setup_stop("long", Decimal("80500"), Decimal("80200"), value, BTC.tick_size)
     assert stop == Decimal("80048.5")
     entry = size_entry("long", Decimal("80500"), stop, capital=Decimal("1000"), other_notional=Decimal("0"), confidence="medium", rules=BTC)
     assert entry["stop_pct"] == "0.56"
     # 10 ÷ (451.5 + (80500 + 80048.5) × 0.0004 = 515.72) = 0.01939… → 0.0193
     assert entry["quantity"] == "0.0193"
-    # 做空：压力区上沿 81700 + 0.5 × 362.56 = 81881.28 → 向上取整 81881.3
-    assert setup_stop("short", Decimal("81700"), atr(bars_until("10:55")), BTC.tick_size) == Decimal("81881.3")
+    # 做空：区间上沿 81700 + 0.5 × 362.56 = 81881.28 离挂单价 81600 不到 1×ATR，取 81600 + 362.56 = 81962.56 → 向上取整 81962.6
+    assert setup_stop("short", Decimal("81600"), Decimal("81700"), atr(bars_until("10:55")), BTC.tick_size) == Decimal("81962.6")
+
+
+def test_stop_keeps_one_atr_from_entry():
+    # 计划 #34：做空挂 81690，区间上沿 81720.9，ATR 118.5。按远端算是 81780.2（0.11%），至少 1×ATR 后为 81808.5
+    assert setup_stop("short", Decimal("81690"), Decimal("81720.9"), Decimal("118.5"), BTC.tick_size) == Decimal("81808.5")
+    # 做多挂在下沿上方 50：80250 − 302.97 = 79947.03 → 向下取整 79947.0
+    assert setup_stop("long", Decimal("80250"), Decimal("80200"), atr(bars_until("10:25")), BTC.tick_size) == Decimal("79947.0")
 
 
 def test_size_entry_rejects_far_stop_and_halves_low_confidence():
