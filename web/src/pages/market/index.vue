@@ -189,9 +189,9 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="market h-full flex flex-col overflow-hidden border border-ap-line border-solid bg-ap-panel text-ap-text">
+  <div class="market h-full flex flex-col overflow-hidden rounded bg-[#161a1e] text-[#eaecef]">
     <!-- 顶栏：交易对与 24h 行情 -->
-    <div class="flex flex-wrap items-center gap-6 border-b border-b-solid border-ap-line px-4 py-2">
+    <div class="flex flex-wrap items-center gap-6 border-b border-b-solid border-[#2b3139] px-4 py-2">
       <el-select
         :model-value="`${selection.market}:${selection.symbol}`" filterable class="symbol-select w-52"
         @change="selectSymbol"
@@ -202,7 +202,7 @@ onBeforeUnmount(() => {
             :value="`${s.market}:${s.symbol}`" :label="`${s.base}/${s.quote}${s.market === 'um' ? ' 永续' : ''}`"
           >
             <span>{{ s.base }}/{{ s.quote }}</span>
-            <span v-if="s.status !== 'ready'" class="float-right text-xs text-ap-brand">{{ s.status === "error" ? "出错" : "补齐中" }}</span>
+            <span v-if="s.status !== 'ready'" class="float-right text-xs text-[#f0b90b]">{{ s.status === "error" ? "出错" : "补齐中" }}</span>
           </el-option>
         </el-option-group>
       </el-select>
@@ -232,8 +232,8 @@ onBeforeUnmount(() => {
         <div>{{ formatBig(ticker.quoteVolume) }}</div>
       </div>
       <div class="flex-1" />
-      <span class="text-xs" :class="connected ? 'text-ap-up' : 'text-ap-down'">● {{ connected ? "实时" : "断开" }}</span>
-      <el-button size="small" type="primary" @click="addVisible = true">
+      <span class="text-xs" :class="connected ? 'text-[#0ecb81]' : 'text-[#f6465d]'">● {{ connected ? "实时" : "断开" }}</span>
+      <el-button size="small" type="warning" @click="addVisible = true">
         新增交易对
       </el-button>
       <el-button size="small" @click="managerVisible = true">
@@ -242,7 +242,7 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- 周期与指标工具栏 -->
-    <div class="flex items-center gap-1 border-b border-b-solid border-ap-line px-3 py-1 text-sm">
+    <div class="flex items-center gap-1 border-b border-b-solid border-[#2b3139] px-3 py-1 text-sm">
       <span
         v-for="i in favorites.filter(f => intervals.includes(f))" :key="i"
         class="tool" :class="{ active: interval === i }" @click="interval = i"
@@ -318,18 +318,18 @@ onBeforeUnmount(() => {
         </el-radio-group>
       </el-popover>
       <div class="flex-1" />
-      <span v-if="backfillProgress !== null" class="text-xs text-ap-brand">
+      <span v-if="backfillProgress !== null" class="text-xs text-[#f0b90b]">
         {{ INTERVAL_LABELS[dataInterval] }} 历史数据补齐中 {{ backfillProgress }}%，最新部分暂未完整
       </span>
     </div>
 
     <div class="min-h-0 flex flex-1">
       <!-- 画线工具栏 -->
-      <div class="flex flex-col gap-1 border-r border-r-solid border-ap-line p-1 text-xs">
+      <div class="flex flex-col gap-1 border-r border-r-solid border-[#2b3139] p-1 text-xs">
         <span v-for="tool in DRAW_TOOLS" :key="tool.name" class="tool text-center" :title="tool.label" @click="chart?.createOverlay(tool.name)">
           {{ tool.label }}
         </span>
-        <span class="tool text-center text-ap-down" title="清除全部画线" @click="chart?.removeOverlay()">清除</span>
+        <span class="tool text-center text-[#f6465d]" title="清除全部画线" @click="chart?.removeOverlay()">清除</span>
       </div>
       <div ref="chartEl" class="min-w-0 flex-1" />
     </div>
@@ -344,27 +344,28 @@ onBeforeUnmount(() => {
   font-size: 12px;
 }
 .stat > div:first-child {
-  color: var(--ap-muted);
+  color: #848e9c;
 }
 .tool {
   padding: 2px 8px;
-  color: var(--ap-muted);
+  border-radius: 4px;
+  color: #848e9c;
   cursor: pointer;
   white-space: nowrap;
 }
 .tool:hover {
-  color: var(--ap-text);
-  background: var(--ap-panel-highest);
+  color: #eaecef;
+  background: #2b3139;
 }
 .tool.active {
-  color: var(--ap-brand);
+  color: #f0b90b;
 }
 .symbol-select :deep(.el-select__wrapper) {
-  background: var(--ap-panel-high);
+  background: #2b3139;
   box-shadow: none;
 }
 .symbol-select :deep(.el-select__selected-item) {
-  color: var(--ap-text);
+  color: #eaecef;
   font-weight: 600;
 }
 </style>

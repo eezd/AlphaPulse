@@ -64,16 +64,7 @@ export interface TradingStatus {
   reasoning_effort: Effort | null
   /** trader 进程离线时为空 */
   snapshot: Snapshot | null
-  today: {
-    analyses: number
-    limit: number
-    input_tokens: number
-    output_tokens: number
-    /** 今日结束的计划笔数、其中净盈亏为正的笔数、净盈亏合计（含手续费） */
-    trades: number
-    wins: number
-    net_pnl: string
-  }
+  today: { analyses: number, limit: number, input_tokens: number, output_tokens: number }
 }
 
 export interface TradingSymbol {

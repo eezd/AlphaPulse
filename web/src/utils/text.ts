@@ -4,12 +4,6 @@ export function formatTime(value: string | null | undefined, pattern = "MM-DD HH
   return value ? dayjs(value).format(pattern) : "-"
 }
 
-/** 两个时间点之间的耗时，如「1m 52s」 */
-export function formatDuration(from: string, to: string) {
-  const seconds = Math.round((new Date(to).getTime() - new Date(from).getTime()) / 1000)
-  return seconds >= 60 ? `${Math.floor(seconds / 60)}m ${seconds % 60}s` : `${seconds}s`
-}
-
 /** HTML 转纯文本行；DOMParser 解析的文档不会执行脚本 */
 export function htmlToLines(html: string): string[] {
   const marked = html.replace(/<br\s*\/?>|<\/(?:p|div|li|h\d)>/gi, "\n")

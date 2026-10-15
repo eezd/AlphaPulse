@@ -51,7 +51,7 @@ function prettyResult(result: string) {
 <template>
   <div class="flex flex-col gap-4">
     <div v-for="item in items" :key="item.key" :class="item.kind === 'user' ? 'self-end max-w-3/4' : 'self-stretch'">
-      <div v-if="item.kind === 'user'" class="whitespace-pre-wrap border-l-2 border-l-ap-brand border-l-solid bg-ap-panel-high px-3 py-2 font-sans text-sm">
+      <div v-if="item.kind === 'user'" class="whitespace-pre-wrap rounded-lg bg-[var(--el-color-primary-light-9)] px-3 py-2 text-sm">
         {{ item.text }}
       </div>
       <div v-else class="flex flex-col gap-2">
@@ -71,7 +71,7 @@ function prettyResult(result: string) {
                 <span class="truncate text-[var(--el-text-color-secondary)] font-mono">{{ JSON.stringify(call.arguments) }}</span>
               </div>
             </template>
-            <pre class="m-0 max-h-80 overflow-auto whitespace-pre-wrap break-all border border-ap-line border-solid bg-ap-panel-low p-2 text-xs">{{ call.result === null ? "等待结果…" : prettyResult(call.result) }}</pre>
+            <pre class="m-0 max-h-80 overflow-auto whitespace-pre-wrap break-all rounded bg-[var(--el-fill-color-light)] p-2 text-xs">{{ call.result === null ? "等待结果…" : prettyResult(call.result) }}</pre>
           </el-collapse-item>
         </el-collapse>
         <div v-if="item.stopped" class="text-xs text-[var(--el-text-color-secondary)]">
@@ -84,9 +84,6 @@ function prettyResult(result: string) {
 </template>
 
 <style scoped>
-.tool-cards {
-  border: 1px solid var(--ap-line);
-}
 .tool-cards :deep(.el-collapse-item__header) {
   height: 32px;
   line-height: 32px;

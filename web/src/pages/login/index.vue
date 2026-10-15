@@ -1,5 +1,4 @@
 <script lang="ts" setup>
-import { DataLine } from "@element-plus/icons-vue"
 import { useUserStore } from "@/pinia/user"
 
 const route = useRoute()
@@ -21,20 +20,14 @@ async function submit() {
 </script>
 
 <template>
-  <div class="login-bg h-full flex-center">
-    <div class="w-90 border border-ap-line border-solid bg-ap-panel">
-      <div class="h-14 flex flex-col justify-center border-b border-b-ap-line border-b-solid bg-ap-panel-high px-4">
-        <div class="flex items-center gap-2 font-head text-lg text-ap-brand font-bold tracking-wider">
-          <el-icon :size="20">
-            <DataLine />
-          </el-icon>
-          ALPHAPULSE
+  <div class="h-full flex-center">
+    <el-card class="w-90">
+      <template #header>
+        <div class="text-center text-lg font-bold">
+          AlphaPulse
         </div>
-        <div class="text-[10px] text-ap-muted tracking-[0.2em]">
-          新闻 · 行情 · AI 分析 · 模拟盘
-        </div>
-      </div>
-      <el-form :model="form" class="p-5" @submit.prevent="submit">
+      </template>
+      <el-form :model="form" @submit.prevent="submit">
         <el-form-item>
           <el-input v-model="form.username" placeholder="用户名" autocomplete="username" />
         </el-form-item>
@@ -45,16 +38,6 @@ async function submit() {
           登录
         </el-button>
       </el-form>
-    </div>
+    </el-card>
   </div>
 </template>
-
-<style scoped>
-.login-bg {
-  background-color: var(--ap-bg);
-  background-image:
-    linear-gradient(color-mix(in srgb, var(--ap-line) 25%, transparent) 1px, transparent 1px),
-    linear-gradient(90deg, color-mix(in srgb, var(--ap-line) 25%, transparent) 1px, transparent 1px);
-  background-size: 32px 32px;
-}
-</style>

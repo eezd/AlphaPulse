@@ -1,13 +1,9 @@
 import type { DeepPartial, Period, Styles } from "klinecharts"
-import { PALETTE } from "@/styles/palette"
 
-export const UP = PALETTE.candleUp
-export const DOWN = PALETTE.candleDown
-const GRID = PALETTE.panelHighest
-const AXIS = PALETTE.line
-const TEXT = PALETTE.faint
-// canvas 读不到 CSS 变量，字体直接写；未设置时 KLineChart 默认 Helvetica Neue，缺字体时会回退成衬线体
-const FONT = `"JetBrains Mono Variable", ui-monospace, "PingFang SC", "Microsoft YaHei", monospace`
+export const UP = "#0ecb81"
+export const DOWN = "#f6465d"
+const GRID = "#2b3139"
+const TEXT = "#848e9c"
 
 /** “分时”用 1m 数据画面积图，与币安一致 */
 export const TIME_LINE = "time"
@@ -63,7 +59,7 @@ export function toPeriod(interval: string): Period {
   return { type, span }
 }
 
-/** 在内置 dark 主题上覆盖：币安涨跌色 + 站点配色与字体 */
+/** 在内置 dark 主题上覆盖币安配色 */
 export const BINANCE_STYLES: DeepPartial<Styles> = {
   grid: {
     horizontal: { color: GRID },
@@ -82,22 +78,13 @@ export const BINANCE_STYLES: DeepPartial<Styles> = {
       noChangeWickColor: TEXT
     },
     priceMark: {
-      high: { textFamily: FONT },
-      low: { textFamily: FONT },
-      last: { upColor: UP, downColor: DOWN, noChangeColor: TEXT, text: { family: FONT } }
-    },
-    tooltip: { title: { family: FONT }, legend: { family: FONT } }
+      last: { upColor: UP, downColor: DOWN, noChangeColor: TEXT }
+    }
   },
   indicator: {
-    ohlc: { upColor: UP, downColor: DOWN, noChangeColor: TEXT },
-    lastValueMark: { text: { family: FONT } },
-    tooltip: { title: { family: FONT }, legend: { family: FONT } }
+    ohlc: { upColor: UP, downColor: DOWN, noChangeColor: TEXT }
   },
-  xAxis: { axisLine: { color: AXIS }, tickText: { color: TEXT, family: FONT } },
-  yAxis: { axisLine: { color: AXIS }, tickText: { color: TEXT, family: FONT } },
-  crosshair: {
-    horizontal: { text: { family: FONT } },
-    vertical: { text: { family: FONT } }
-  },
-  separator: { color: AXIS }
+  xAxis: { axisLine: { color: GRID }, tickText: { color: TEXT } },
+  yAxis: { axisLine: { color: GRID }, tickText: { color: TEXT } },
+  separator: { color: GRID }
 }

@@ -145,9 +145,9 @@ loadTree()
         <div class="min-h-0 flex flex-1 gap-3">
           <textarea
             v-model="content" placeholder="用 Markdown 写下投资经验、判断流程或输出规范"
-            class="box-border flex-1 resize-none border border-ap-line border-solid bg-ap-sunken p-3 text-sm text-ap-text leading-6 font-mono outline-none focus:border-ap-brand"
+            class="box-border flex-1 resize-none border rounded border-solid border-[var(--el-border-color)] p-3 text-sm leading-6 font-mono outline-none focus:border-[var(--el-color-primary)]"
           />
-          <el-scrollbar class="flex-1 border border-ap-line border-solid bg-ap-panel-low">
+          <el-scrollbar class="flex-1 border rounded border-solid border-[var(--el-border-color-lighter)]">
             <!-- markdown-it 已关闭 html，内容中的标签按文本显示 -->
             <div class="markdown-body p-3" v-html="preview" />
           </el-scrollbar>
