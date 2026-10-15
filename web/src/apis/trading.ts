@@ -253,6 +253,8 @@ export const CLOSE_REASON_LABELS: Record<string, string> = {
   external: "外部平仓",
   stop_failed: "止损挂单失败",
   close: "市价平仓",
+  // 计划 3.1 之前的旧原因，历史仓位里还会出现
+  invalidation: "短线失效条件触发",
   replaced: "被新计划替换",
   expired: "限价单到期未成交",
   stopped: "已停止交易",
@@ -263,6 +265,28 @@ export const CLOSE_REASON_LABELS: Record<string, string> = {
 export const TAKE_PROFIT_STEPS: Record<"long" | "short", [number, number][]> = {
   long: [[0.005, 0.6], [0.0075, 0.3], [0.01, 0.1]],
   short: [[0.005, 0.8], [0.0075, 0.2]]
+}
+
+/** 已平仓的仓位：一个计划从首次入场到持仓归零；数值为十进制字符串 */
+export interface PositionHistory {
+  analysis_id: number
+  symbol: string
+  direction: "long" | "short"
+  opened_at: string
+  closed_at: string
+  close_reason: string
+  /** 计划被替换后接管持仓的新计划没有自己的入场成交，为空 */
+  quantity: string | null
+  entry_price: string | null
+  /** 外部平仓没有成交记录，为空 */
+  exit_price: string | null
+  realized_pnl: string
+  commission: string
+  net: string
+}
+
+export function listPositionHistory(params: { before?: number, limit?: number }): Promise<PositionHistory[]> {
+  return http.get("/trading/positions/history", { params })
 }
 
 export function getSymbolPlan(symbol: string): Promise<{ plan: Analysis | null, orders: OrderRow[] }> {

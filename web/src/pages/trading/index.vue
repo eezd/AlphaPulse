@@ -1,7 +1,7 @@
 <script lang="ts" setup>
 import type { Effort, Provider } from "@/apis/settings"
 import type { Analysis, OrderRow, SnapshotPosition, TradingEvent, TradingStatus, TradingSymbol } from "@/apis/trading"
-import { Edit, Plus } from "@element-plus/icons-vue"
+import { Clock, Edit, Plus } from "@element-plus/icons-vue"
 import { EFFORTS, listProviders } from "@/apis/settings"
 import { deleteSymbol, getStatus, getSymbolPlan, isOwnOrder, listAnalyses, listEvents, listSymbols, patchConfig, requestAnalysis, startTrading, stopTrading } from "@/apis/trading"
 import { usePersisted } from "@/utils/storage"
@@ -9,6 +9,7 @@ import { formatTime } from "@/utils/text"
 import AddSymbolDialog from "./components/AddSymbolDialog.vue"
 import AnalysisDrawer from "./components/AnalysisDrawer.vue"
 import PlanCard from "./components/PlanCard.vue"
+import PositionHistoryDrawer from "./components/PositionHistoryDrawer.vue"
 
 const STATUS_REFRESH_MS = 3000
 const EVENTS_PAGE = 50
@@ -28,6 +29,7 @@ const planOrders = ref<OrderRow[]>([])
 const requesting = ref(false)
 const drawerVisible = ref(false)
 const drawerAnalysisId = ref<number | null>(null)
+const historyVisible = ref(false)
 
 const snapshot = computed(() => status.value?.snapshot ?? null)
 const account = computed(() => snapshot.value?.account ?? null)
@@ -373,7 +375,12 @@ onBeforeUnmount(() => clearInterval(timer))
     <!-- 持仓 -->
     <el-card shadow="never" body-class="p-0">
       <template #header>
-        持仓（{{ positions.length }}）
+        <div class="flex items-center justify-between">
+          持仓（{{ positions.length }}）
+          <el-button link type="primary" :icon="Clock" @click="historyVisible = true">
+            历史仓位
+          </el-button>
+        </div>
       </template>
       <el-table :data="positions" empty-text="没有持仓" cell-class-name="num">
         <el-table-column label="币种" min-width="120">
@@ -563,6 +570,7 @@ onBeforeUnmount(() => clearInterval(timer))
     </div>
 
     <AddSymbolDialog v-model="addVisible" @added="onAdded" />
+    <PositionHistoryDrawer v-model="historyVisible" @detail="openAnalysis" />
     <AnalysisDrawer v-model="drawerVisible" :analysis-id="drawerAnalysisId" />
   </div>
 </template>

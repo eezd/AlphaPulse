@@ -1,6 +1,7 @@
 """模拟盘页：引擎状态、启停、交易币种、时间线。账户和持仓来自 trader 进程写入 Redis 的快照"""
 
 import json
+from collections import defaultdict
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Annotated
@@ -139,6 +140,23 @@ class EventOut(BaseModel):
     level: str
     message: str
     data: dict | None
+
+
+class PositionHistoryOut(BaseModel):
+    analysis_id: int
+    symbol: str
+    direction: str
+    opened_at: datetime
+    closed_at: datetime
+    close_reason: str
+    # 本计划的入场成交；计划被替换时持仓由新计划接管，新计划没有自己的入场成交，这两项为空
+    quantity: Decimal | None
+    entry_price: Decimal | None
+    # 止盈、止损、市价平仓的成交均价；外部平仓（如网页手动平仓）没有成交记录，为空
+    exit_price: Decimal | None
+    realized_pnl: Decimal
+    commission: Decimal
+    net: Decimal
 
 
 async def get_account(session: AsyncSession) -> TradingAccount:
@@ -325,6 +343,43 @@ async def list_events(
     if before:
         query = query.where(TradingEvent.id < before)
     return [EventOut.model_validate(e, from_attributes=True) for e in await session.scalars(query)]
+
+
+def average_fill(rows: list[TradingOrder]) -> tuple[Decimal, Decimal] | None:
+    """成交数量与按量加权的均价；没有成交时为空"""
+    qty = sum((r.filled_qty for r in rows), Decimal(0))
+    if not qty:
+        return None
+    return qty, sum((r.filled_qty * r.avg_price for r in rows), Decimal(0)) / qty
+
+
+@router.get("/positions/history")
+async def list_position_history(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    before: int | None = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> list[PositionHistoryOut]:
+    """已平仓的计划（入场成交过、持仓已归零），按计划 id 倒序分页；closed 的计划一定有 first_fill_at 和 result"""
+    query = select(TradingAnalysis).where(TradingAnalysis.plan_status == "closed").order_by(TradingAnalysis.id.desc()).limit(limit)
+    if before:
+        query = query.where(TradingAnalysis.id < before)
+    plans = list(await session.scalars(query))
+    fills: dict[int, list[TradingOrder]] = defaultdict(list)
+    for order in await session.scalars(
+        select(TradingOrder).where(TradingOrder.analysis_id.in_([p.id for p in plans]), TradingOrder.filled_qty > 0)
+    ):
+        fills[order.analysis_id].append(order)
+    items = []
+    for plan in plans:
+        entry = average_fill([o for o in fills[plan.id] if o.purpose == "entry"])
+        exit_fill = average_fill([o for o in fills[plan.id] if o.purpose != "entry"])
+        items.append(PositionHistoryOut(
+            analysis_id=plan.id, symbol=plan.symbol, direction=plan.sizing["direction"],
+            opened_at=plan.first_fill_at, closed_at=plan.closed_at, close_reason=plan.close_reason,
+            quantity=entry[0] if entry else None, entry_price=entry[1] if entry else None,
+            exit_price=exit_fill[1] if exit_fill else None, **plan.result,
+        ))
+    return items
 
 
 @router.post("/symbols/{symbol}/analyze", status_code=status.HTTP_202_ACCEPTED)
