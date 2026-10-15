@@ -2,10 +2,11 @@
 
 import json
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,6 +42,9 @@ class StatusOut(BaseModel):
     configured: bool
     running: bool
     running_changed_at: datetime | None
+    capital_usdt: Decimal | None
+    # 实际用于仓位计算的资金：min(交易资金, 账户权益)；没有快照时无法计算
+    effective_capital: Decimal | None
     provider_id: int | None
     reasoning_effort: str | None
     # trader 进程的心跳快照；进程离线时为空
@@ -49,6 +53,7 @@ class StatusOut(BaseModel):
 
 
 class ConfigIn(BaseModel):
+    capital_usdt: Annotated[Decimal, Field(gt=0, decimal_places=2)] | None = None
     provider_id: int | None = None
     reasoning_effort: llm.Effort | None = None
 
@@ -108,10 +113,13 @@ async def get_status(session: Annotated[AsyncSession, Depends(get_session)]) -> 
             func.coalesce(func.sum(TradingAnalysis.usage["output_tokens"].as_integer()), 0),
         ).where(TradingAnalysis.started_at >= today)
     )).one()
+    snapshot = await read_snapshot()
+    equity = snapshot and snapshot["account"] and Decimal(snapshot["account"]["margin_balance"])
     return StatusOut(
         configured=account.api_key_encrypted is not None, running=account.running,
-        running_changed_at=account.running_changed_at, provider_id=account.provider_id,
-        reasoning_effort=account.reasoning_effort, snapshot=await read_snapshot(),
+        running_changed_at=account.running_changed_at, capital_usdt=account.capital_usdt,
+        effective_capital=min(account.capital_usdt, equity) if account.capital_usdt and equity else None,
+        provider_id=account.provider_id, reasoning_effort=account.reasoning_effort, snapshot=snapshot,
         today=TodayUsage(analyses=count, limit=DAILY_ANALYSIS_LIMIT, input_tokens=input_tokens, output_tokens=output_tokens),
     )
 
@@ -120,6 +128,8 @@ async def set_running(session: AsyncSession, running: bool) -> StatusOut:
     account = await get_account(session)
     if running and account.api_key_encrypted is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "还没有填写模拟盘 key，请先到环境变量页填写")
+    if running and account.capital_usdt is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "还没有设置交易资金")
     if account.running != running:
         account.running = running
         account.running_changed_at = datetime.now(LOCAL_TZ)
@@ -148,6 +158,19 @@ async def patch_config(body: ConfigIn, session: Annotated[AsyncSession, Depends(
     fields = body.model_dump(exclude_unset=True)
     if fields.get("provider_id") is not None and await session.get(AiProvider, fields["provider_id"]) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "模型配置不存在")
+    if "capital_usdt" in fields:
+        capital = fields["capital_usdt"]
+        if capital is None and account.running:
+            raise HTTPException(status.HTTP_409_CONFLICT, "交易中不能清空交易资金")
+        snapshot = await read_snapshot()
+        equity = snapshot and snapshot["account"] and Decimal(snapshot["account"]["margin_balance"])
+        if capital is not None and equity and capital > equity:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"交易资金不能超过账户权益 {equity:.2f} USDT")
+        if capital != account.capital_usdt:
+            session.add(TradingEvent(
+                kind="capital_changed",
+                message=f"交易资金设为 {capital} USDT" if capital is not None else "清空交易资金",
+            ))
     for key, value in fields.items():
         setattr(account, key, value)
     session.add(account)

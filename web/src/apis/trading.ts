@@ -60,6 +60,10 @@ export interface TradingStatus {
   configured: boolean
   running: boolean
   running_changed_at: string | null
+  /** 设定的交易资金，十进制字符串；未设置时不能开始交易 */
+  capital_usdt: string | null
+  /** 实际用于仓位计算的资金：min(交易资金, 账户权益) */
+  effective_capital: string | null
   provider_id: number | null
   reasoning_effort: Effort | null
   /** trader 进程离线时为空 */
@@ -109,7 +113,7 @@ export function stopTrading(): Promise<TradingStatus> {
   return http.post("/trading/stop")
 }
 
-export function patchConfig(body: { provider_id?: number | null, reasoning_effort?: Effort | null }): Promise<TradingStatus> {
+export function patchConfig(body: { capital_usdt?: string | null, provider_id?: number | null, reasoning_effort?: Effort | null }): Promise<TradingStatus> {
   return http.patch("/trading/config", body)
 }
 

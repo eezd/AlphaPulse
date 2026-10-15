@@ -20,6 +20,8 @@ class TradingAccount(Base):
     api_key_hint: Mapped[str | None] = mapped_column(String(8))
     running: Mapped[bool] = mapped_column(Boolean, default=False)
     running_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # 交易资金：仓位计算按 min(交易资金, 账户权益)，不动用账户的全部余额；未设置时不能开始交易
+    capital_usdt: Mapped[Decimal | None] = mapped_column(Numeric)
     # 交易分析用的模型配置；为空时用默认配置
     provider_id: Mapped[int | None] = mapped_column(ForeignKey("ai_providers.id", ondelete="SET NULL"))
     reasoning_effort: Mapped[str | None] = mapped_column(String(8))

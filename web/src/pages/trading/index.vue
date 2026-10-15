@@ -139,6 +139,22 @@ async function toggleRunning() {
   }
 }
 
+async function editCapital() {
+  const { value } = await ElMessageBox.prompt(
+    `仓位按交易资金计算：单笔风险短线 1%、长线 2%，所有仓位名义价值合计不超过 3 倍（逐仓 3 倍时保证金合计不超过交易资金）。不能超过账户权益 ${money(account.value?.margin_balance)} USDT；账户权益低于它时按权益计算。`,
+    "设置交易资金（USDT）",
+    {
+      inputValue: status.value!.capital_usdt ? num(status.value!.capital_usdt) : "",
+      inputPattern: /^(?:[1-9]\d*|0)(?:\.\d{1,2})?$/,
+      inputErrorMessage: "请输入正数，最多两位小数",
+      confirmButtonText: "保存"
+    }
+  )
+  status.value = await patchConfig({ capital_usdt: value })
+  ElMessage.success("已保存")
+  await refreshEvents()
+}
+
 async function changeProvider(providerId: number | null) {
   status.value = await patchConfig({ provider_id: providerId })
 }
@@ -191,14 +207,28 @@ onBeforeUnmount(() => clearInterval(timer))
           {{ status.running ? "交易中" : "已停止" }}
         </el-tag>
         <el-button
-          :type="status.running ? 'danger' : 'primary'" :loading="toggling" :disabled="!status.configured"
+          :type="status.running ? 'danger' : 'primary'" :loading="toggling"
+          :disabled="!status.running && (!status.configured || !status.capital_usdt)"
           @click="toggleRunning"
         >
           {{ status.running ? "停止" : "开始行情交易" }}
         </el-button>
       </div>
       <div class="stat">
-        <span>权益</span>{{ money(account?.margin_balance) }} USDT
+        <span>交易资金</span>
+        <template v-if="status.capital_usdt">
+          {{ money(status.capital_usdt) }} USDT
+          <span v-if="status.effective_capital && Number(status.effective_capital) < Number(status.capital_usdt)" class="text-[var(--el-color-warning)]!">
+            （权益不足，按 {{ money(status.effective_capital) }}）
+          </span>
+        </template>
+        <b v-else class="text-[var(--el-color-danger)]">未设置</b>
+        <el-link type="primary" underline="never" class="ml-1" @click="editCapital">
+          设置
+        </el-link>
+      </div>
+      <div class="stat">
+        <span>账户权益</span>{{ money(account?.margin_balance) }} USDT
       </div>
       <div class="stat">
         <span>可用</span>{{ money(account?.available_balance) }} USDT
@@ -228,6 +258,9 @@ onBeforeUnmount(() => clearInterval(timer))
 
     <el-alert v-if="!status.configured" type="warning" :closable="false" show-icon>
       还没有填写币安模拟盘 key，请先到「环境变量」页填写。
+    </el-alert>
+    <el-alert v-else-if="!status.capital_usdt" type="warning" :closable="false" show-icon>
+      还没有设置交易资金。引擎只按交易资金计算仓位，不会动用账户的全部余额；设置后才能开始行情交易。
     </el-alert>
     <el-alert v-else-if="snapshot?.error" type="error" :closable="false" show-icon>
       同步模拟盘失败：{{ snapshot.error }}{{ snapshot.synced_at ? `（以下为 ${formatTime(snapshot.synced_at, "HH:mm:ss")} 的数据）` : "" }}
