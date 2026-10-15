@@ -2,9 +2,9 @@
 
 每轮对交易列表里的每个币：
 1. 同步订单流水与交易所（成交、撤销、触发）。
-2. 采纳分析器提交的新计划（按最新持仓核对，过时则作废重算）。
-3. 推进计划状态，执行程序规则：到期、时间止损、失效条件、复核条件、无计划持仓。
-4. 算出应有订单与现有订单对比：先挂止损，再撤多余，最后补缺（撤了旧入场单的这一轮不挂新入场单）。
+2. 采纳分析器提交的待确认入场（有持仓或当前计划已触发时作废）。
+3. 推进计划状态，执行程序规则：5m 收盘确认入场、破位撤销、到期、时间止损、复核条件、无计划持仓。
+4. 算出应有订单与现有订单对比：先挂止损，再撤多余，最后补缺（撤了旧入场单的这一轮不下新入场单）。
 """
 
 import asyncio
@@ -23,7 +23,10 @@ from alphapulse.core.db import SessionLocal
 from alphapulse.market.binance import BinanceClient
 from alphapulse.models import TradingAccount, TradingAnalysis, TradingEvent, TradingOrder, TradingSymbol
 from alphapulse.trading.client import OWN_CLIENT_ID, DemoClient, ExchangeError, mark_price, symbol_rules
-from alphapulse.trading.plan import MAX_HOLD_HOURS, OrderSpec, SymbolRules, condition_met, desired_orders, diff_orders, round_to_step
+from alphapulse.trading.plan import (
+    CONFIRM_INTERVAL, MAX_HOLD_HOURS, TAKE_PROFIT_STEPS, Bar, OrderSpec, PlanError, SymbolRules, atr, condition_met, desired_orders,
+    diff_orders, parse_bars, round_to_step, scan_setup, setup_stop, size_entry,
+)
 from alphapulse.trading.schedule import request_analysis
 
 logger = logging.getLogger("alphapulse.trading.executor")
@@ -37,12 +40,15 @@ SUBMIT_GRACE_SECONDS = 10
 STOP_FAILURE_LIMIT = 3
 # 同一错误的时间线事件间隔，避免刷屏
 ERROR_EVENT_SECONDS = 600
+# 每次取的 5m K 线根数：覆盖待确认入场的最长有效期（24 根）和 ATR14
+CONFIRM_BARS = 40
 ORDER_STATUSES = {"NEW": "new", "PARTIALLY_FILLED": "partially_filled", "FILLED": "filled", "CANCELED": "canceled",
                   "EXPIRED": "expired", "EXPIRED_IN_MATCH": "expired", "REJECTED": "rejected"}
 PURPOSE_LABELS = {"entry": "入场", "tp": "止盈", "stop": "止损", "close": "市价平仓"}
-CLOSE_REASON_LABELS = {"stop": "止损", "take_profit": "止盈", "time": "到达持仓时限", "invalidation": "短线失效条件触发",
-                       "exit": "模型决定结束", "external": "外部平仓（如在网页手动平仓）", "stop_failed": "止损挂单失败",
-                       "close": "市价平仓"}
+CLOSE_REASON_LABELS = {"stop": "止损", "take_profit": "止盈", "time": "到达持仓时限", "exit": "模型决定结束",
+                       "external": "外部平仓（如在网页手动平仓）", "stop_failed": "止损挂单失败", "close": "市价平仓"}
+CANCEL_REASON_LABELS = {"expired": "到期未触发", "stopped": "已停止交易", "broken": "区间被突破", "missed": "错过确认",
+                        "skipped": "放弃入场", "entry_failed": "入场失败"}
 
 
 @dataclass
@@ -74,8 +80,10 @@ class Executor:
         self.error_events: dict[str, float] = {}
         # (symbol, 周期) -> (下一根收盘时间 ms, 最近收盘价)
         self.kline_cache: dict[tuple[str, str], tuple[int, Decimal]] = {}
-        # 已请模型接管的无计划持仓：symbol -> 持仓均价，同一笔持仓只请求一次
-        self.takeover_requested: dict[str, Decimal] = {}
+        # symbol -> (下一根收盘时间 ms, 最近的 5m K 线)
+        self.bars_cache: dict[str, tuple[int, list[Bar]]] = {}
+        # 已提示过的无计划持仓：symbol -> 持仓均价，同一笔持仓只提示一次
+        self.unmanaged_noticed: dict[str, Decimal] = {}
 
     # ---------- 基础 ----------
 
@@ -113,6 +121,16 @@ class Executor:
         next_close = rows[-1][6] + 1 if rows[-1][6] >= now_ms else now_ms
         self.kline_cache[(symbol, interval)] = (next_close, Decimal(closed[4]))
         return Decimal(closed[4])
+
+    async def confirm_bars(self, symbol: str) -> list[Bar]:
+        """实盘最近的 5m K 线（最后一根可能未收盘），缓存到下一根收盘"""
+        now_ms = int(time.time() * 1000)
+        cached = self.bars_cache.get(symbol)
+        if cached and now_ms < cached[0]:
+            return cached[1]
+        bars = parse_bars(await self.market.get("um", "klines", {"symbol": symbol, "interval": CONFIRM_INTERVAL, "limit": CONFIRM_BARS}))
+        self.bars_cache[symbol] = (bars[-1].close_time + 1, bars)
+        return bars
 
     async def condition_met(self, symbol: str, condition: dict, mark: Decimal) -> tuple[bool, Decimal]:
         price = mark if condition["timeframe"] == "mark" else await self.last_close(symbol, condition["timeframe"])
@@ -223,15 +241,13 @@ class Executor:
             return
         if row.filled_qty > before:
             delta = row.filled_qty - before
-            leg = f"第 {row.leg + 1} 档" if row.purpose == "entry" else (f" {row.leg + 1} " if row.purpose == "tp" else "")
+            leg = f" {row.leg + 1} " if row.purpose == "tp" else ""
             session.add(TradingEvent(
                 symbol=row.symbol, analysis_id=row.analysis_id, kind=f"{row.purpose}_filled",
                 level="warn" if row.purpose == "stop" else "info",
                 message=f"{PURPOSE_LABELS[row.purpose]}{leg}成交 {fmt(delta)} @ {row.avg_price}",
                 data={"order_id": row.id, "quantity": fmt(delta)},
             ))
-            if row.purpose == "tp":
-                await request_analysis(session, row.symbol, f"止盈 {row.leg + 1} 成交")
 
     # ---------- 计划 ----------
 
@@ -260,27 +276,26 @@ class Executor:
                 close_side = "SELL" if position.side == "long" else "BUY"
                 await self.place(session, client, symbol.symbol, proposal.id, "close", OrderSpec("close", None, close_side, "MARKET", None, None, position.qty))
             return current
+        # 分析期间可能已经入场：持仓中或已触发的计划不能被替换（持仓由程序管理，平仓后会重新分析）
         qty = position.qty if position else Decimal(0)
-        expected = Decimal(proposal.sizing["position_qty"])
-        if qty != expected or (current is not None and current.plan_status == "closing"):
+        if qty > 0 or (current is not None and (current.plan_status != "pending" or "entry" in current.sizing)):
             proposal.plan_status = "stale"
-            reason = "计划正在平仓" if current is not None and current.plan_status == "closing" else f"持仓已从 {fmt(expected)} 变为 {fmt(qty)}"
+            reason = f"已有持仓 {fmt(qty)}" if qty > 0 else ("计划正在平仓" if current.plan_status == "closing" else "当前计划已触发入场")
             session.add(TradingEvent(symbol=symbol.symbol, analysis_id=proposal.id, kind="plan_stale", level="warn",
                                      message=f"计划未采纳：{reason}"))
-            await request_analysis(session, symbol.symbol, "持仓变化，计划作废重算")
             return current
         if current is not None:
             current.plan_status, current.close_reason, current.closed_at = "replaced", "replaced", now
-        if qty > 0:
-            proposal.plan_status = "open"
-            proposal.first_fill_at = current.first_fill_at if current and current.first_fill_at else now
-            # 持仓时限沿用原计划，不延长；接管无计划持仓时从现在起算
-            proposal.close_deadline = current.close_deadline if current and current.close_deadline else now + timedelta(hours=MAX_HOLD_HOURS[symbol.angle])
-        else:
-            proposal.plan_status = "pending"
-            proposal.valid_until = now + timedelta(hours=float(proposal.decision["entry_valid_hours"]))
-        session.add(TradingEvent(symbol=symbol.symbol, analysis_id=proposal.id, kind="plan_adopted",
-                                 message=f"采纳计划 #{proposal.id}" + (f"，替换 #{current.id}" if current else "")))
+        proposal.plan_status = "pending"
+        proposal.valid_until = now + timedelta(hours=float(proposal.decision["valid_hours"]))
+        setup = proposal.sizing["setup"]
+        side = "做多" if proposal.sizing["direction"] == "long" else "做空"
+        session.add(TradingEvent(
+            symbol=symbol.symbol, analysis_id=proposal.id, kind="plan_adopted",
+            message=f"采纳计划 #{proposal.id}" + (f"，替换 #{current.id}" if current else "")
+            + f"：等待 5m 确认{side}（区间 {setup['zone_low']}–{setup['zone_high']}，确认价 {setup['confirm_price']}），"
+            f"有效至 {proposal.valid_until.astimezone(LOCAL_TZ).strftime('%H:%M')}",
+        ))
         return proposal
 
     async def realized(self, client: DemoClient, symbol: str, since: datetime | None) -> dict | None:
@@ -306,6 +321,13 @@ class Executor:
                                  message=f"计划 #{plan.id} 结束：{label}{net}", data=plan.result))
         await request_analysis(session, plan.symbol, f"平仓（{label}）")
 
+    async def cancel_plan(self, session: AsyncSession, plan: TradingAnalysis, reason: str, detail: str, level: str = "info") -> None:
+        """未入场的计划撤销，排队重新分析（停止交易时 request_analysis 不排队）"""
+        plan.plan_status, plan.close_reason, plan.closed_at = "canceled", reason, utcnow()
+        session.add(TradingEvent(symbol=plan.symbol, analysis_id=plan.id, kind="plan_canceled", level=level,
+                                 message=f"计划 #{plan.id} 撤销：{detail}"))
+        await request_analysis(session, plan.symbol, f"计划撤销（{CANCEL_REASON_LABELS[reason]}）")
+
     async def start_closing(self, session: AsyncSession, plan: TradingAnalysis, reason: str, detail: str = "") -> None:
         plan.plan_status, plan.close_reason = "closing", reason
         session.add(TradingEvent(symbol=plan.symbol, analysis_id=plan.id, kind="plan_closing", level="warn",
@@ -323,7 +345,8 @@ class Executor:
 
     # ---------- 对账 ----------
 
-    async def reconcile(self, session: AsyncSession, client: DemoClient, symbol: TradingSymbol, running: bool, position: Position | None) -> None:
+    async def reconcile(self, session: AsyncSession, client: DemoClient, symbol: TradingSymbol, running: bool, position: Position | None,
+                        other_notional: Decimal) -> None:
         name = symbol.symbol
         rules = await symbol_rules(name)
         open_orders = {o["clientOrderId"]: o for o in await client.request("GET", "/fapi/v1/openOrders", {"symbol": name})}
@@ -362,7 +385,7 @@ class Executor:
                 if row.purpose == "stop":
                     await self.cancel(client, row)
             if position is None:
-                self.takeover_requested.pop(name, None)
+                self.unmanaged_noticed.pop(name, None)
             elif running:
                 await self.unmanaged(session, client, name, position, open_algos)
             if running:
@@ -380,32 +403,33 @@ class Executor:
         plan_rows = list((await session.scalars(select(TradingOrder).where(TradingOrder.analysis_id == plan.id))).all())
 
         if plan.plan_status == "pending":
-            if qty > 0:
+            entry_rows = [r for r in plan_rows if r.purpose == "entry"]
+            # 入场成交后持仓可能已被止损或手动平掉：照样转入持仓，下一轮按持仓归零结束
+            if qty > 0 or any(r.filled_qty > 0 for r in entry_rows):
                 plan.plan_status, plan.first_fill_at = "open", now
-                plan.close_deadline = now + timedelta(hours=float(plan.decision["max_hold_hours"]))
+                plan.close_deadline = now + timedelta(hours=MAX_HOLD_HOURS)
                 session.add(TradingEvent(symbol=name, analysis_id=plan.id, kind="plan_open",
-                                         message=f"首档成交，计划 #{plan.id} 进入持仓；最晚 {plan.close_deadline.astimezone(LOCAL_TZ).strftime('%m-%d %H:%M')} 平仓"))
-                await request_analysis(session, name, "首档成交")
-            elif now >= plan.valid_until or not running:
-                plan.plan_status, plan.closed_at = "canceled", now
-                plan.close_reason = "expired" if running else "stopped"
-                session.add(TradingEvent(symbol=name, analysis_id=plan.id, kind="plan_canceled",
-                                         message=f"计划 #{plan.id} 撤销：{'入场单到期未成交' if running else '已停止交易，撤销未成交的入场单'}"))
-                if running:
-                    await request_analysis(session, name, "计划到期未成交")
+                                         message=f"入场成交，计划 #{plan.id} 进入持仓；最晚 {plan.close_deadline.astimezone(LOCAL_TZ).strftime('%m-%d %H:%M')} 平仓"))
+            elif "entry" in plan.sizing:
+                if entry_rows and all(r.status not in ACTIVE_ORDER_STATUSES for r in entry_rows):
+                    await self.cancel_plan(session, plan, "entry_failed", f"市价入场失败：{entry_rows[-1].error or entry_rows[-1].status}", "error")
+            elif not running:
+                await self.cancel_plan(session, plan, "stopped", "已停止交易")
+            elif now >= plan.valid_until:
+                await self.cancel_plan(session, plan, "expired", "到期未触发")
+            else:
+                await self.check_setup(session, client, plan, rules, other_notional)
         elif plan.plan_status == "open":
             if qty == 0:
                 await self.finish(session, client, plan, plan_rows)
             elif now >= plan.close_deadline:
                 await self.start_closing(session, plan, "time")
-            else:
-                await self.check_invalidation(session, plan, position)
         elif plan.plan_status == "closing" and qty == 0:
             await self.finish(session, client, plan, plan_rows)
         await session.commit()
 
         if plan.plan_status in LIVE_PLAN_STATUSES:
-            await self.sync_orders(session, client, plan, plan_rows, position, running, rules, stale_entry_canceled)
+            await self.sync_orders(session, client, plan, plan_rows, position, rules, stale_entry_canceled)
         else:
             # 计划已结束：只减仓止损不会被交易所自动撤销，必须主动撤，以免作用到之后的新仓位
             for row in plan_rows:
@@ -418,17 +442,48 @@ class Executor:
             await self.check_reevaluate(session, name, position.mark if position else None)
         await session.commit()
 
-    async def check_invalidation(self, session: AsyncSession, plan: TradingAnalysis, position: Position) -> None:
-        condition = plan.decision["invalidation"]
-        met, price = await self.condition_met(plan.symbol, condition, position.mark)
-        if not met:
+    async def check_setup(self, session: AsyncSession, client: DemoClient, plan: TradingAnalysis, rules: SymbolRules, other_notional: Decimal) -> None:
+        """待确认入场：5m 收盘确认后算止损和数量，写入 sizing.entry，由 sync_orders 先挂止损再市价入场。
+        other_notional：交易列表中其他币的持仓名义价值"""
+        now_ms = int(time.time() * 1000)
+        bars = await self.confirm_bars(plan.symbol)
+        sizing = plan.sizing
+        direction, setup = sizing["direction"], sizing["setup"]
+        scan = scan_setup(direction, setup, bars, int(plan.finished_at.timestamp() * 1000), now_ms)
+        if scan.state == "waiting":
             return
-        detail = f"（{condition['timeframe']} 收盘 {fmt(price)} {'高于' if condition['direction'] == 'above' else '低于'} {condition['price']}）"
-        if plan.angle == "short":
-            await self.start_closing(session, plan, "invalidation", detail)
-        else:
-            await self.review_once(session, plan.id, plan.symbol, "invalidation_review", 0,
-                                   f"长线失效条件触发{detail}，请模型复核", f"失效条件触发{detail}")
+        long = direction == "long"
+        at = datetime.fromtimestamp((scan.bar.close_time + 1) / 1000, LOCAL_TZ).strftime("%H:%M")
+        if scan.state == "broken":
+            edge = f"跌破区间下沿 {setup['zone_low']}" if long else f"突破区间上沿 {setup['zone_high']}"
+            await self.cancel_plan(session, plan, "broken", f"{at} 5m 收盘 {fmt(scan.bar.close)} {edge}")
+            return
+        if scan.state == "missed":
+            await self.cancel_plan(session, plan, "missed", f"{at} 的 5m 收盘已满足确认，但程序没有及时执行，不补做", "warn")
+            return
+
+        # 触发很少发生，直接查最新权益，不依赖快照循环
+        account = await session.get(TradingAccount, 1)
+        equity = Decimal((await client.request("GET", "/fapi/v3/account"))["totalMarginBalance"])
+        capital = min(account.capital_usdt, equity)
+        atr_value = atr([b for b in bars if b.close_time < now_ms])
+        stop = setup_stop(direction, scan.extreme, atr_value, rules.tick_size)
+        mark = await mark_price(plan.symbol)
+        confirm = f"5m 收盘 {fmt(scan.bar.close)}，{'最低' if long else '最高'} {fmt(scan.extreme)}"
+        try:
+            entry = size_entry(direction, mark, stop, capital=capital, other_notional=other_notional,
+                               confidence=plan.decision["confidence"], rules=rules)
+        except PlanError as e:
+            await self.cancel_plan(session, plan, "skipped", f"{at} {confirm} 已确认，但{e}，放弃入场", "warn")
+            return
+        plan.sizing = {**sizing, "entry": {**entry, "triggered_at": utcnow().isoformat(), "bar_close": fmt(scan.bar.close),
+                                           "extreme": fmt(scan.extreme), "atr": fmt(atr_value.quantize(rules.tick_size))}}
+        session.add(TradingEvent(
+            symbol=plan.symbol, analysis_id=plan.id, kind="setup_triggered",
+            message=f"{at} {confirm}，确认{'做多' if long else '做空'}：市价入场 {entry['quantity']}（现价 {fmt(mark)}），"
+                    f"止损 {entry['stop']}（{entry['stop_pct']}%），止损亏损 {entry['risk_at_stop']} USDT",
+            data={"bar_open_time": scan.bar.open_time},
+        ))
 
     async def check_reevaluate(self, session: AsyncSession, symbol: str, mark: Decimal | None) -> None:
         """最近一次交易中分析给出的 reevaluate 条件：满足任一个就排队分析"""
@@ -447,15 +502,14 @@ class Executor:
                 await self.review_once(session, latest.id, symbol, "reevaluate_triggered", i, f"复核条件满足：{text}", f"复核条件满足：{text}")
 
     async def unmanaged(self, session: AsyncSession, client: DemoClient, symbol: str, position: Position, open_algos: dict) -> None:
-        """有持仓但没有计划：有止损就请模型接管，没有止损就市价平仓"""
+        """有持仓但没有计划：有止损就只提示，没有止损就市价平仓"""
         close_side = "SELL" if position.side == "long" else "BUY"
         has_stop = any(o["side"] == close_side and o["orderType"].startswith("STOP") for o in open_algos.values())
         if has_stop:
-            if self.takeover_requested.get(symbol) != position.entry:
-                self.takeover_requested[symbol] = position.entry
+            if self.unmanaged_noticed.get(symbol) != position.entry:
+                self.unmanaged_noticed[symbol] = position.entry
                 session.add(TradingEvent(symbol=symbol, kind="unmanaged_position", level="warn",
-                                         message=f"{symbol} 有持仓 {fmt(position.qty)} 和止损但没有计划，请模型接管"))
-                await request_analysis(session, symbol, "有持仓但没有计划，请接管")
+                                         message=f"{symbol} 有持仓 {fmt(position.qty)} 和止损但没有计划：程序不管理，由止损保护"))
             return
         closing = await session.scalar(select(func.count()).where(
             TradingOrder.symbol == symbol, TradingOrder.purpose == "close", TradingOrder.status.in_(ACTIVE_ORDER_STATUSES),
@@ -467,22 +521,11 @@ class Executor:
         await self.place(session, client, symbol, None, "close", OrderSpec("close", None, close_side, "MARKET", None, None, position.qty))
 
     async def sync_orders(self, session: AsyncSession, client: DemoClient, plan: TradingAnalysis, plan_rows: list[TradingOrder],
-                          position: Position | None, running: bool, rules: SymbolRules, block_entries: bool) -> None:
+                          position: Position | None, rules: SymbolRules, block_entries: bool) -> None:
         sizing = plan.sizing
         qty = position.qty if position else Decimal(0)
-        n_entries, n_tps = len(sizing["entries"]), len(sizing["take_profits"])
-        entry_filled = [sum((r.filled_qty for r in plan_rows if r.purpose == "entry" and r.leg == i), Decimal(0)) for i in range(n_entries)]
-        tp_filled = [sum((r.filled_qty for r in plan_rows if r.purpose == "tp" and r.leg == j), Decimal(0)) for j in range(n_tps)]
-        tp1_hit = tp_filled[0] > 0
-        stop = Decimal(sizing["stop"])
-        if tp1_hit and position is not None:
-            # 止盈 1 后止损移到保本价：做多向上取整、做空向下取整，保证不亏；只收紧不放宽
-            long = sizing["direction"] == "long"
-            break_even = round_to_step(position.break_even, rules.tick_size, ROUND_CEILING if long else ROUND_FLOOR)
-            stop = max(stop, break_even) if long else min(stop, break_even)
-
-        active = [r for r in plan_rows if r.status in ACTIVE_ORDER_STATUSES and r.purpose in ("entry", "stop", "tp")]
         long = sizing["direction"] == "long"
+        active = [r for r in plan_rows if r.status in ACTIVE_ORDER_STATUSES and r.purpose in ("entry", "stop", "tp")]
         if plan.plan_status == "closing":
             # 平仓中：撤入场和止盈，保留已有止损直到市价平仓成交（止损可能正因越过现价挂不上，不再补挂）
             for row in active:
@@ -492,10 +535,23 @@ class Executor:
                 close_side = "SELL" if long else "BUY"
                 await self.place(session, client, plan.symbol, plan.id, "close", OrderSpec("close", None, close_side, "MARKET", None, None, qty))
             return
+        if "entry" not in sizing:
+            # 还在等 5m 确认，交易所上没有本计划的单
+            return
 
-        entries_open = running and utcnow() < (plan.valid_until or utcnow()) and not tp1_hit
-        desired = desired_orders(sizing, entries_open=entries_open, entry_filled=entry_filled, tp_filled=tp_filled,
-                                 position_qty=qty, stop_price=stop, step_size=rules.step_size)
+        entry_rows = [r for r in plan_rows if r.purpose == "entry"]
+        filled = sum((r.filled_qty for r in entry_rows), Decimal(0))
+        average = next((r.avg_price for r in entry_rows if r.filled_qty > 0 and r.avg_price), None)
+        tp_filled = [sum((r.filled_qty for r in plan_rows if r.purpose == "tp" and r.leg == j), Decimal(0))
+                     for j in range(len(TAKE_PROFIT_STEPS[sizing["direction"]]))]
+        stop = Decimal(sizing["entry"]["stop"])
+        if tp_filled[0] > 0 and position is not None:
+            # 止盈 1 后止损移到保本价：做多向上取整、做空向下取整，保证不亏；只收紧不放宽
+            break_even = round_to_step(position.break_even, rules.tick_size, ROUND_CEILING if long else ROUND_FLOOR)
+            stop = max(stop, break_even) if long else min(stop, break_even)
+
+        desired = desired_orders(sizing, entry_sent=bool(entry_rows), entry_fill=(filled, average) if average else None,
+                                 tp_filled=tp_filled, position_qty=qty, stop_price=stop, rules=rules)
         actual = [(r, OrderSpec(r.purpose, r.leg, r.side, r.type, r.price, r.trigger_price, r.quantity - r.filled_qty)) for r in active]
         to_cancel, to_place = diff_orders(desired, actual)
 
@@ -515,7 +571,7 @@ class Executor:
         for row in to_cancel:
             await self.cancel(client, row)
             canceled_entry = canceled_entry or row.purpose == "entry"
-        # 3. 补止盈；入场单只在本轮没有撤旧入场单、且止损在场时挂
+        # 3. 补止盈；入场单只在本轮没有撤旧入场单、且止损在场时下
         has_stop = any(r.purpose == "stop" for r in active if r not in to_cancel) or any(d.purpose == "stop" for d in to_place)
         for spec in [d for d in to_place if d.purpose == "tp"]:
             await self.place(session, client, plan.symbol, plan.id, "tp", spec)
@@ -552,9 +608,11 @@ class Executor:
                         side="long" if amount > 0 else "short", qty=abs(amount), entry=Decimal(p["entryPrice"]),
                         break_even=Decimal(p["breakEvenPrice"]), mark=Decimal(p["markPrice"]),
                     )
+            names = {s.symbol for s in symbols}
             for symbol in symbols:
+                other_notional = sum((p.qty * p.mark for name, p in positions.items() if name != symbol.symbol and name in names), Decimal(0))
                 try:
-                    await self.reconcile(session, client, symbol, account.running, positions.get(symbol.symbol))
+                    await self.reconcile(session, client, symbol, account.running, positions.get(symbol.symbol), other_notional)
                 except ExchangeError as e:
                     await session.rollback()
                     await self.report(session, symbol.symbol, f"对账失败：{e}")

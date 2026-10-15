@@ -1,10 +1,6 @@
 import type { Effort } from "@/apis/settings"
 import { http } from "@/http"
 
-export type Angle = "short" | "long"
-
-export const ANGLE_LABELS: Record<Angle, string> = { short: "短线（24h 内平仓）", long: "长线（12–48h 平仓）" }
-
 /** 以下数值字段都是币安返回的十进制字符串，避免浮点误差 */
 export interface SnapshotPosition {
   symbol: string
@@ -73,7 +69,6 @@ export interface TradingStatus {
 
 export interface TradingSymbol {
   symbol: string
-  angle: Angle
   added_at: string
   analysis_requested_at: string | null
   analyzing: boolean
@@ -128,12 +123,8 @@ export function listSymbols(): Promise<TradingSymbol[]> {
   return http.get("/trading/symbols")
 }
 
-export function addSymbol(symbol: string, angle: Angle): Promise<void> {
-  return http.post("/trading/symbols", { symbol, angle })
-}
-
-export function patchSymbol(symbol: string, angle: Angle): Promise<void> {
-  return http.patch(`/trading/symbols/${symbol}`, { angle })
+export function addSymbol(symbol: string): Promise<void> {
+  return http.post("/trading/symbols", { symbol })
 }
 
 export function deleteSymbol(symbol: string): Promise<void> {
@@ -147,7 +138,7 @@ export function listEvents(params: { symbol?: string, before?: number, limit?: n
 export interface PlanCondition {
   direction: "above" | "below"
   price: string
-  timeframe: "mark" | "1m" | "15m" | "1h" | "4h"
+  timeframe: "mark" | "1m" | "5m" | "15m" | "1h" | "4h"
   basis: string
 }
 
@@ -160,42 +151,39 @@ export interface TradeDecision {
   reevaluate: PlanCondition[]
   direction: "long" | "short" | null
   confidence: "high" | "medium" | "low" | null
-  entries: { price: string, ratio: string, basis: string }[] | null
-  stop: string | null
-  stop_basis: string | null
-  take_profits: { price: string, basis: string }[] | null
-  entry_valid_hours: string | null
-  max_hold_hours: string | null
-  invalidation: PlanCondition | null
+  /** 待确认入场；计划 3.1 之前的分析没有这个字段 */
+  setup?: { zone_low: string, zone_high: string, confirm_price: string, basis: string } | null
+  valid_hours?: string | null
 }
 
-/** 程序按交易资金算出的数量和风险 */
-export interface Sizing {
-  direction: "long" | "short"
-  entries: { price: string, ratio: string, quantity: string, notional: string }[]
+/** 程序按止损和交易资金算出的数量与风险 */
+export interface EntrySizing {
+  price: string
   stop: string
-  take_profits: { price: string, ratio: string, quantity: string }[]
-  average_price: string
+  stop_pct: string
   quantity: string
   notional: string
-  capital: string
   leverage: string
   risk_amount: string
   risk_at_stop: string
   risk_pct: string
   capped_by_leverage: boolean
-  reward_risk: string
-  reward_risk_first_only: string
-  /** 采纳前核对用：提交时的持仓数量 */
+}
+
+export interface Sizing {
+  direction: "long" | "short"
+  setup: { zone_low: string, zone_high: string, confirm_price: string }
+  /** 提交时按确认价入场、止损放在区间远端外估算 */
+  estimate: EntrySizing
+  atr: string
   position_qty: string
-  /** 持仓中调整的计划：不加仓 */
-  managed: boolean
+  /** 5m 确认后由执行器写入；有它表示已触发 */
+  entry?: EntrySizing & { triggered_at: string, bar_close: string, extreme: string, atr: string }
 }
 
 export interface Analysis {
   id: number
   symbol: string
-  angle: Angle
   reasons: string[]
   dry_run: boolean
   status: "running" | "done" | "failed"
@@ -232,7 +220,7 @@ export type PlanStatus = "proposed" | "pending" | "open" | "closing" | "closed" 
 
 export const PLAN_STATUS_LABELS: Record<PlanStatus, string> = {
   proposed: "待采纳",
-  pending: "挂单中",
+  pending: "等待确认",
   open: "持仓中",
   closing: "平仓中",
   closed: "已结束",
@@ -257,6 +245,29 @@ export interface OrderRow {
   avg_price: string | null
   error: string | null
   created_at: string
+}
+
+export const CLOSE_REASON_LABELS: Record<string, string> = {
+  stop: "止损",
+  take_profit: "止盈",
+  time: "到达持仓时限",
+  exit: "模型决定结束",
+  external: "外部平仓",
+  stop_failed: "止损挂单失败",
+  close: "市价平仓",
+  replaced: "被新计划替换",
+  expired: "到期未触发",
+  stopped: "已停止交易",
+  broken: "区间被突破",
+  missed: "错过确认",
+  skipped: "止损过远，放弃入场",
+  entry_failed: "入场失败"
+}
+
+/** 止盈阶梯（与后端 plan.TAKE_PROFIT_STEPS 一致）：[距成交均价的涨跌幅, 平仓比例] */
+export const TAKE_PROFIT_STEPS: Record<"long" | "short", [number, number][]> = {
+  long: [[0.005, 0.6], [0.0075, 0.3], [0.01, 0.1]],
+  short: [[0.005, 0.8], [0.0075, 0.2]]
 }
 
 export function getSymbolPlan(symbol: string): Promise<{ plan: Analysis | null, orders: OrderRow[] }> {

@@ -3,7 +3,7 @@
 import json
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Annotated, Literal
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -24,11 +24,9 @@ from alphapulse.trading.snapshot import read_snapshot
 
 router = APIRouter(prefix="/api/trading", tags=["trading"], dependencies=[Depends(require_admin)])
 
-Angle = Literal["short", "long"]
-ANGLE_LABELS = {"short": "短线", "long": "长线"}
 SYMBOLS_CACHE_KEY = f"{KEY_PREFIX}trading:symbols"
 SYMBOLS_CACHE_SECONDS = 3600
-# 删除或切换角度前要求快照足够新，否则无法确认没有仓位和挂单
+# 删除前要求快照足够新，否则无法确认没有仓位和挂单
 SNAPSHOT_FRESH_SECONDS = 30
 # 执行器正在管理的计划状态
 LIVE_PLAN_STATUSES = ("pending", "open", "closing")
@@ -68,7 +66,6 @@ class SymbolOption(BaseModel):
 
 class SymbolOut(BaseModel):
     symbol: str
-    angle: str
     added_at: datetime
     analysis_requested_at: datetime | None
     analyzing: bool
@@ -80,17 +77,11 @@ class SymbolOut(BaseModel):
 
 class SymbolIn(BaseModel):
     symbol: str
-    angle: Angle
-
-
-class SymbolPatch(BaseModel):
-    angle: Angle
 
 
 class AnalysisOut(BaseModel):
     id: int
     symbol: str
-    angle: str
     reasons: list[str]
     dry_run: bool
     status: str
@@ -267,7 +258,7 @@ async def list_symbols(session: Annotated[AsyncSession, Depends(get_session)]) -
     )}
     return [
         SymbolOut(
-            symbol=s.symbol, angle=s.angle, added_at=s.added_at, analysis_requested_at=s.analysis_requested_at,
+            symbol=s.symbol, added_at=s.added_at, analysis_requested_at=s.analysis_requested_at,
             analyzing=s.symbol in analyzing, plan_id=plans[s.symbol].id if s.symbol in plans else None,
             plan_status=plans[s.symbol].plan_status if s.symbol in plans else None,
             close_deadline=plans[s.symbol].close_deadline if s.symbol in plans else None,
@@ -281,8 +272,8 @@ async def add_symbol(body: SymbolIn, session: Annotated[AsyncSession, Depends(ge
     symbol = body.symbol.strip().upper()
     if not any(o["symbol"] == symbol for o in await symbol_options()):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{symbol} 不是模拟盘和实盘都在交易的加密货币 USDT 永续合约")
-    session.add(TradingSymbol(symbol=symbol, angle=body.angle))
-    session.add(TradingEvent(symbol=symbol, kind="symbol_added", message=f"加入交易列表，角度：{ANGLE_LABELS[body.angle]}"))
+    session.add(TradingSymbol(symbol=symbol))
+    session.add(TradingEvent(symbol=symbol, kind="symbol_added", message="加入交易列表"))
     try:
         await session.commit()
     except IntegrityError:
@@ -290,7 +281,7 @@ async def add_symbol(body: SymbolIn, session: Annotated[AsyncSession, Depends(ge
 
 
 async def ensure_idle(session: AsyncSession, symbol: str, action: str) -> TradingSymbol:
-    """只有空仓、没有本程序的挂单、没有进行中的计划和分析时，才能删除或切换角度"""
+    """只有空仓、没有本程序的挂单、没有进行中的计划和分析时，才能删除"""
     s = await session.get(TradingSymbol, symbol)
     if s is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"{symbol} 不在交易列表中")
@@ -309,16 +300,6 @@ async def ensure_idle(session: AsyncSession, symbol: str, action: str) -> Tradin
     if any(o["symbol"] == symbol and OWN_CLIENT_ID.match(o["client_id"]) for o in snapshot["orders"] + snapshot["algo_orders"]):
         raise HTTPException(status.HTTP_409_CONFLICT, f"{symbol} 有本程序的挂单，不能{action}")
     return s
-
-
-@router.patch("/symbols/{symbol}")
-async def patch_symbol(symbol: str, body: SymbolPatch, session: Annotated[AsyncSession, Depends(get_session)]) -> None:
-    s = await ensure_idle(session, symbol, "切换角度")
-    if s.angle != body.angle:
-        session.add(TradingEvent(symbol=symbol, kind="angle_changed",
-                                 message=f"角度从{ANGLE_LABELS[s.angle]}改为{ANGLE_LABELS[body.angle]}"))
-        s.angle = body.angle
-        await session.commit()
 
 
 @router.delete("/symbols/{symbol}")

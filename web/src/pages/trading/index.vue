@@ -1,8 +1,8 @@
 <script lang="ts" setup>
 import type { Effort, Provider } from "@/apis/settings"
-import type { Analysis, Angle, OrderRow, SnapshotPosition, TradingEvent, TradingStatus, TradingSymbol } from "@/apis/trading"
+import type { Analysis, OrderRow, SnapshotPosition, TradingEvent, TradingStatus, TradingSymbol } from "@/apis/trading"
 import { EFFORTS, listProviders } from "@/apis/settings"
-import { ANGLE_LABELS, deleteSymbol, getStatus, getSymbolPlan, isOwnOrder, listAnalyses, listEvents, listSymbols, patchConfig, patchSymbol, requestAnalysis, startTrading, stopTrading } from "@/apis/trading"
+import { deleteSymbol, getStatus, getSymbolPlan, isOwnOrder, listAnalyses, listEvents, listSymbols, patchConfig, requestAnalysis, startTrading, stopTrading } from "@/apis/trading"
 import { usePersisted } from "@/utils/storage"
 import { formatTime } from "@/utils/text"
 import AddSymbolDialog from "./components/AddSymbolDialog.vue"
@@ -11,7 +11,6 @@ import PlanCard from "./components/PlanCard.vue"
 
 const STATUS_REFRESH_MS = 3000
 const EVENTS_PAGE = 50
-const SHORT_ANGLE_LABELS: Record<Angle, string> = { short: "短线", long: "长线" }
 const LEVEL_TYPES = { info: "primary", warn: "warning", error: "danger" } as const
 
 const status = ref<TradingStatus>()
@@ -88,7 +87,7 @@ function symbolState(s: TradingSymbol) {
   if (positions.value.some(p => p.symbol === s.symbol))
     return { label: "持仓中", type: "success" } as const
   if (s.plan_status === "pending")
-    return { label: "挂单中", type: "primary" } as const
+    return { label: "等待确认", type: "primary" } as const
   return { label: "空仓", type: "info" } as const
 }
 
@@ -171,7 +170,7 @@ watch(selected, () => {
 async function toggleRunning() {
   if (status.value!.running) {
     await ElMessageBox.confirm(
-      "停止后不再做新的分析，并撤销未成交的入场单。已有持仓保留，止损、止盈、到期平仓、短线失效平仓等程序规则继续执行。",
+      "停止后不再做新的分析，并撤销还在等待确认的计划。已有持仓保留，止损、止盈、到期平仓等程序规则继续执行。",
       "停止行情交易",
       { type: "warning", confirmButtonText: "停止" }
     )
@@ -213,13 +212,6 @@ async function changeProvider(providerId: number | null) {
 
 async function changeEffort(effort: Effort | null) {
   status.value = await patchConfig({ reasoning_effort: effort })
-}
-
-async function switchAngle(s: TradingSymbol) {
-  const angle: Angle = s.angle === "short" ? "long" : "short"
-  await ElMessageBox.confirm(`把 ${s.symbol} 从${SHORT_ANGLE_LABELS[s.angle]}改为${SHORT_ANGLE_LABELS[angle]}？`, "切换角度")
-  await patchSymbol(s.symbol, angle)
-  await Promise.all([refresh(), refreshEvents()])
 }
 
 async function remove(s: TradingSymbol) {
@@ -397,12 +389,10 @@ onBeforeUnmount(() => clearInterval(timer))
                 {{ symbolState(s).label }}
               </el-tag>
             </div>
-            <div class="mt-1 flex items-center justify-between text-xs text-[var(--el-text-color-secondary)]">
-              <span>{{ ANGLE_LABELS[s.angle] }}</span>
-              <span>
-                <el-link type="primary" underline="never" class="text-xs!" @click.stop="switchAngle(s)">切换角度</el-link>
-                <el-link type="danger" underline="never" class="ml-2 text-xs!" @click.stop="remove(s)">删除</el-link>
-              </span>
+            <div class="mt-1 flex justify-end text-xs">
+              <el-link type="danger" underline="never" class="text-xs!" @click.stop="remove(s)">
+                删除
+              </el-link>
             </div>
           </div>
           <el-empty v-if="!symbols.length" description="还没有交易币种" :image-size="60" />

@@ -1,12 +1,11 @@
 <script lang="ts" setup>
-import type { Angle, SymbolOption } from "@/apis/trading"
-import { addSymbol, ANGLE_LABELS, listSymbolOptions } from "@/apis/trading"
+import type { SymbolOption } from "@/apis/trading"
+import { addSymbol, listSymbolOptions } from "@/apis/trading"
 
 const emit = defineEmits<{ added: [symbol: string] }>()
 const visible = defineModel<boolean>({ required: true })
 
 const symbol = ref("")
-const angle = ref<Angle>("long")
 const symbolOptions = ref<SymbolOption[]>([])
 const loading = ref(false)
 const submitting = ref(false)
@@ -28,7 +27,7 @@ watch(visible, async (open) => {
 async function submit() {
   submitting.value = true
   try {
-    await addSymbol(symbol.value, angle.value)
+    await addSymbol(symbol.value)
     ElMessage.success(`已加入 ${symbol.value}`)
     emit("added", symbol.value)
     visible.value = false
@@ -49,13 +48,6 @@ async function submit() {
         <div class="text-xs text-[var(--el-text-color-secondary)]">
           只列出模拟盘和实盘都在交易的加密货币 USDT 永续合约
         </div>
-      </el-form-item>
-      <el-form-item label="角度">
-        <el-radio-group v-model="angle">
-          <el-radio v-for="(label, value) in ANGLE_LABELS" :key="value" :value="value">
-            {{ label }}
-          </el-radio>
-        </el-radio-group>
       </el-form-item>
     </el-form>
     <template #footer>

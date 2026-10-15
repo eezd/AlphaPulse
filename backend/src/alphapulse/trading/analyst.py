@@ -1,4 +1,4 @@
-"""模拟盘分析器：为一个币的一个角度调用模型，产出经程序校验、可自动执行的交易计划。
+"""模拟盘分析器：为一个币调用模型，划出经程序校验、由执行器在 5m 收盘确认后自动入场的短线计划。
 
 只开放只读工具和 submit_trade_plan；行情预先取好放进用户消息，减少工具往返。
 """
@@ -16,11 +16,12 @@ from sqlalchemy import select
 from alphapulse.ai import llm
 from alphapulse.ai.prompt import data_overview, estimate_tokens, skills_section
 from alphapulse.ai.tools import TOOLS, dump, local, run_tool
+from alphapulse.api.market import client as market_client
 from alphapulse.core.db import SessionLocal
 from alphapulse.models import AiProvider, TradingAccount, TradingAnalysis, TradingEvent, TradingOrder, TradingSymbol
 from alphapulse.trading import plan as rules
-from alphapulse.trading.client import OWN_CLIENT_ID, ExchangeError, mark_price, symbol_rules
-from alphapulse.trading.plan import PlanContext, PlanError, TradePlan, size_plan
+from alphapulse.trading.client import ExchangeError, mark_price, symbol_rules
+from alphapulse.trading.plan import PlanContext, PlanError, TradePlan, atr, check_setup, parse_bars
 from alphapulse.trading.snapshot import read_snapshot
 
 logger = logging.getLogger("alphapulse.trading.analyst")
@@ -29,54 +30,54 @@ READ_TOOLS = ("search_news", "get_news", "search_symbols", "get_klines", "get_ti
 # 最后一轮只开放 submit_trade_plan，逼模型给出结论
 MAX_ROUNDS = 6
 RECENT_DECISIONS = 2
-ANGLE_LABELS = {"short": "短线（24 小时内平仓）", "long": "长线（12–48 小时内平仓）"}
 DIRECTION_LABELS = {"long": "做多", "short": "做空"}
 CONFIDENCE_LABELS = {"high": "高", "medium": "中", "low": "低"}
 ACTION_LABELS = {"plan": "新计划", "keep": "维持当前计划", "exit": "结束当前计划", "wait": "观望"}
-# 与 README 第 1 节一致：定方向和找区的周期、衍生品参数
-KLINE_INTERVALS = {"short": ("4h", "1h", "15m"), "long": ("1d", "4h", "1h")}
-DERIVATIVES_PARAMS = {"short": ("1h", 24), "long": ("4h", 18)}
+# 找区、确认的周期和衍生品参数（与 README 一致）
+KLINE_INTERVALS = ("1d", "4h", "1h", "15m", "5m")
+DERIVATIVES_PARAMS = ("1h", 24)
 
 
 def _pct(value: Decimal) -> str:
     return f"{(value * 100).normalize()}%"
 
 
-INSTRUCTIONS = f"""你是 AlphaPulse 的模拟盘交易分析器：为一个币种的一个角度给出由程序自动执行的交易计划。
+def _ladder(direction: str) -> str:
+    sign = "+" if direction == "long" else "−"
+    steps = rules.TAKE_PROFIT_STEPS[direction]
+    return f"{' / '.join(sign + _pct(p) for p, _ in steps)} 分别平 {' / '.join(_pct(r) for _, r in steps)}"
+
+
+INSTRUCTIONS = f"""你是 AlphaPulse 的模拟盘交易分析器：为一个币种划出短线「待确认入场」，由程序在 5m 收盘确认后自动入场并管理持仓。
 
 ## 任务
-- 只分析用户消息指定的币种和角度（短线或长线），不给另一个角度。
 - 下方 Skills 是交易规范。以下几处按本节执行，与 Skills 冲突时以本节为准：
-  - main/README 第 1 节「每次同时给出两个角度」不适用，只给指定角度。
-  - main/README 第 8 节的输出表格不适用：用简短中文写出结论、用到的支撑区与压力区、依据（新闻、结构、衍生品）和风险；计划的数字只通过 submit_trade_plan 提交。
-  - main/README 第 9 节不适用：没有 CONTEXT.md，不要写。之前的结论见用户消息里的「最近决策」，按 README 第 6 节做实时复核，不直接沿用旧点位。
-  - main/README 5.4 的条件计划（突破回踩、事件落地后再入场等）不能直接挂单，改写成 reevaluate 条件：价格到达后程序会重新请你分析。
-  - 数量由程序按交易资金计算，你只给价格、档位比例和置信度。
-- 用户消息里已预先取好实盘行情（ticker、K 线、衍生品），不要用相同参数重复调用；需要其他周期或其他币时再调用。
-- 新闻没有预取，必须按 main/README 第 3 节第 3 步用 search_news 检索相关新闻，并查清持仓时限内的重大数据及公布时间。
+  - main/README 第 8 节的输出表格不适用：用简短中文写出结论、所用的区间、依据（新闻、结构、衍生品）和风险；数字只通过 submit_trade_plan 提交。
+  - main/README 第 9 节不适用：没有 CONTEXT.md，不要写。之前的结论见用户消息里的「最近决策」，要按实时数据复核，不直接沿用旧点位。
+  - 数量、止损、止盈由程序计算，你只给方向、区间、确认价、有效期和置信度。
+- 用户消息里已预先取好实盘行情（ticker、{' / '.join(KLINE_INTERVALS)} K 线、衍生品），不要用相同参数重复调用；需要其他周期或其他币时再调用。
+- 新闻没有预取，必须用 search_news 检索相关新闻，并查清有效期和持仓时限内的重大数据及公布时间。
 - 最后必须调用一次 submit_trade_plan。校验不通过会返回原因，按原因修正后重新提交。
 
-## 程序如何执行计划
-- 入场：每档一张限价单；到 entry_valid_hours 仍未成交的档位撤销。买单价高于现价（卖单价低于现价）会立即成交。
-- 止损：与入场单同时在交易所挂只减仓止损单（按标记价触发），首档成交即受保护。
-- 止盈：短线止盈 1 平一半、止盈 2 平剩余；长线 3 个止盈依次平 50% / 30% / 20%。止盈 1 成交后撤销剩余入场单，止损移到保本价。
-- invalidation（失效条件）：短线用 1m 或 15m 收盘，触发后程序立即市价平仓；长线只能用 4h 收盘，触发后程序请你复核。
-- reevaluate：任一条件满足时程序重新请你分析（最多 {rules.MAX_REEVALUATE} 个）。用来表达另一侧方向、条件计划和需要复核的位置。
-- max_hold_hours 从首档成交起算，到时程序市价平仓。
+## 程序如何执行
+- 待确认入场（action=plan）：程序在每根 5m K 线收盘时检查，只看计划生效后收盘的 K 线，交易所上不预挂入场单。
+  - 做多：某根 5m 的最低价进入区间（≤ zone_high）之后，出现一根收盘 ≥ confirm_price（可以是同一根）→ 立即市价做多。在此之前若有 5m 收盘 < zone_low，视为支撑破位，计划撤销并重新请你分析。
+  - 做空：某根 5m 的最高价进入区间（≥ zone_low）之后，出现一根收盘 ≤ confirm_price → 立即市价做空。在此之前若有 5m 收盘 > zone_high，视为压力突破，撤销。
+  - 到 valid_hours 仍未触发则作废，并重新请你分析。
+- 止损：触发时由程序计算，放在进区以来的最低价（做空为最高价）外 {rules.STOP_ATR_FACTOR}×ATR14(5m)，在市价入场前挂到交易所（按标记价触发）。止损距现价超过 {_pct(rules.MAX_STOP_PCT)} 就放弃这次入场。
+- 止盈：按成交均价，做多 {_ladder("long")}；做空 {_ladder("short")}。止盈 1 成交后止损移到保本价。
+- 持仓最长 {rules.MAX_HOLD_HOURS} 小时，到时市价平仓。平仓后程序会请你重新分析。
+- 仓位：单笔风险为交易资金的 {_pct(rules.RISK_PCT)}，置信度低时减半；名义仓位合计不超过 {rules.MAX_LEVERAGE} 倍交易资金。
+- reevaluate：任一条件满足时程序重新请你分析（最多 {rules.MAX_REEVALUATE} 个），用来表达另一侧方向、需要重新划区的位置。
 
 ## 程序的硬性校验
-- 短线 1 档入场、2 个止盈；长线 1–3 档入场、3 个止盈；入场比例之和为 1。
-- 做多：止损 < 失效价 < 所有入场价 < 止盈 1 < 止盈 2 < 止盈 3，且止损低于现价、止盈 1 高于现价；做空反过来。
-- 盈亏比 ≥ {rules.MIN_REWARD_RISK}：短线按止盈 1，长线按 50/30/20 加权（全部档位成交时）。
-- entry_valid_hours：短线 ≤ {rules.ENTRY_VALID_HOURS['short']}，长线 ≤ {rules.ENTRY_VALID_HOURS['long']}；max_hold_hours：短线 ≤ {rules.MAX_HOLD_HOURS['short']}，长线 ≤ {rules.MAX_HOLD_HOURS['long']}。
-- 每档入场的名义价值不低于交易所最小下单金额，不足时合并或删档。
-- 单笔风险为交易资金的 {_pct(rules.RISK_PCT['short'])}（短线）或 {_pct(rules.RISK_PCT['long'])}（长线），置信度低时减半；名义仓位合计不超过 {rules.MAX_LEVERAGE} 倍交易资金。这两条由程序计算数量来保证。
-- 有持仓时新计划的方向必须与持仓一致；要反手先用 exit。
+- zone_low < zone_high。做多：confirm_price ≥ zone_high，现价 ≥ zone_low；做空：confirm_price ≤ zone_low，现价 ≤ zone_high。确认就是「进区后收盘回到区间外侧」。
+- 按确认价入场、止损放在区间远端外 {rules.STOP_ATR_FACTOR}×ATR 估算：止损距离不超过 {_pct(rules.MAX_STOP_PCT)}，数量不低于交易所最小下单金额。
+- valid_hours ≤ {rules.SETUP_VALID_HOURS}。
 
 ## 有持仓时
-- action=plan 只用来调整止损（只能收紧）、止盈、失效条件和 reevaluate：entries 留空，不加仓（README 第 10 节禁止计划外加仓）。止盈按当前持仓数量拆分；平仓截止时间沿用首档成交时确定的，不延长。
-- 计划仍然合适就用 keep；要提前结束用 exit（撤销未成交的入场单并市价平仓）。
-- 计划提交后由执行器在下一轮（约 2 秒内）按最新持仓核对后生效；期间持仓变了，计划作废并重新请你分析。
+- 持仓由程序按止损、止盈和持仓时限管理，你只能 keep（继续持有）或 exit（立即市价平仓），不能提交新计划。
+- 只有出现与持仓方向明显相反的重大消息或结构破坏时才 exit。
 """
 
 SUBMIT_SPEC = llm.ToolSpec(
@@ -95,34 +96,42 @@ class Prepared:
     provider: AiProvider
     effort: str | None
     dry_run: bool
-    angle: str
     system: str
     user_text: str
     context: PlanContext
-    # 当前计划的仓位计算结果，提交时重算当前止损用
-    current_sizing: dict | None
 
 
 def plan_brief(decision: dict, sizing: dict | None) -> dict:
     """给模型看的计划摘要：只留价格和状态，不带长段文字"""
-    brief = {k: decision.get(k) for k in ("action", "summary", "direction", "confidence", "stop", "entry_valid_hours", "max_hold_hours")}
-    brief["entries"] = [{"price": e["price"], "ratio": e["ratio"]} for e in decision.get("entries") or []]
-    brief["take_profits"] = [t["price"] for t in decision.get("take_profits") or []]
-    brief["invalidation"] = decision.get("invalidation")
+    brief = {k: decision.get(k) for k in ("action", "summary", "direction", "confidence", "setup", "valid_hours")}
     brief["reevaluate"] = [{k: c[k] for k in ("direction", "price", "timeframe")} for c in decision.get("reevaluate") or []]
-    if sizing:
-        brief["sizing"] = {k: sizing.get(k) for k in ("quantity", "notional", "risk_at_stop", "reward_risk")}
+    if sizing and "entry" in sizing:
+        brief["entry"] = {k: sizing["entry"][k] for k in ("triggered_at", "price", "stop", "quantity", "risk_at_stop")}
     return brief
 
 
-async def prefetch(symbol: str, angle: str) -> str:
+async def confirm_atr(symbol: str) -> Decimal:
+    """最近已收盘 5m K 线的 ATR14，用于预估止损"""
+    bars = parse_bars(await market_client.get("um", "klines", {"symbol": symbol, "interval": rules.CONFIRM_INTERVAL, "limit": rules.ATR_PERIOD + 2}))
+    now_ms = datetime.now(UTC).timestamp() * 1000
+    return atr([b for b in bars if b.close_time < now_ms])
+
+
+async def prefetch(symbol: str) -> str:
     """预取行情：工具出错时把错误原样放进消息，不中断分析"""
-    period, limit = DERIVATIVES_PARAMS[angle]
+    period, limit = DERIVATIVES_PARAMS
     calls = [("get_ticker", {"symbol": symbol})]
-    calls += [("get_klines", {"symbol": symbol, "interval": i, "limit": 200}) for i in KLINE_INTERVALS[angle]]
+    calls += [("get_klines", {"symbol": symbol, "interval": i, "limit": 200}) for i in KLINE_INTERVALS]
     calls.append(("get_derivatives", {"symbol": symbol, "period": period, "limit": limit}))
     outcomes = await asyncio.gather(*(run_tool(name, args) for name, args in calls))
     return "\n\n".join(f"### {name} {json.dumps(args, ensure_ascii=False)}\n{o.result}" for (name, args), o in zip(calls, outcomes, strict=True))
+
+
+def position_side(snapshot: dict, symbol: str) -> str | None:
+    position = next((p for p in snapshot["positions"] if p["symbol"] == symbol), None)
+    if position is None:
+        return None
+    return "long" if position["side"] == "LONG" else "short"
 
 
 async def prepare(symbol: str, reasons: list[str], analysis_id: int) -> Prepared:
@@ -157,7 +166,7 @@ async def prepare(symbol: str, reasons: list[str], analysis_id: int) -> Prepared
             )).all()
         ] if current else []
         system = "\n\n".join([INSTRUCTIONS, "## 数据概况", await data_overview(session), await skills_section(session)])
-        angle, dry_run = target.angle, not account.running
+        dry_run = not account.running
         effort = account.reasoning_effort or provider.reasoning_effort
 
     snapshot = await read_snapshot()
@@ -170,26 +179,25 @@ async def prepare(symbol: str, reasons: list[str], analysis_id: int) -> Prepared
     symbol_rules_ = await symbol_rules(symbol)
     mark = await mark_price(symbol)
     context = PlanContext(
-        angle=angle, mark_price=mark, capital=capital, other_notional=other_notional, rules=symbol_rules_, has_plan=current is not None,
-        position_side=None,
+        mark_price=mark, capital=capital, other_notional=other_notional, rules=symbol_rules_, atr=await confirm_atr(symbol),
+        has_plan=current is not None, position_side=position_side(snapshot, symbol),
     )
-    apply_position(context, snapshot, symbol, current.sizing if current else None)
 
     orders = [o for o in snapshot["orders"] + snapshot["algo_orders"] if o["symbol"] == symbol]
-    risk = capital * rules.RISK_PCT[angle]
+    risk = capital * rules.RISK_PCT
     lines = [
         "## 任务",
         f"- 币种：{symbol}（币安 U 本位永续）",
-        f"- 角度：{ANGLE_LABELS[angle]}",
         f"- 触发原因：{'；'.join(reasons)}",
         f"- 运行模式：{'试运行（引擎已停止，计划只记录、不下单）' if dry_run else '交易中（计划会在模拟盘执行）'}",
         "",
         "## 账户（程序据此计算数量）",
         f"- 交易资金：{capital:.2f} USDT（设定 {account.capital_usdt} USDT，账户权益 {equity:.2f} USDT，取较小者）",
-        f"- 本次单笔风险金额：{risk:.2f} USDT（{_pct(rules.RISK_PCT[angle])}；置信度低时 {risk * rules.LOW_CONFIDENCE_FACTOR:.2f}）",
+        f"- 本次单笔风险金额：{risk:.2f} USDT（{_pct(rules.RISK_PCT)}；置信度低时 {risk * rules.LOW_CONFIDENCE_FACTOR:.2f}）",
         f"- 可用名义仓位：{capital * rules.MAX_LEVERAGE - other_notional:.2f} USDT（{rules.MAX_LEVERAGE} 倍交易资金减去交易列表其他币的持仓 {other_notional:.2f}）",
         f"- 模拟盘交易规则：价格精度 {symbol_rules_.tick_size}，数量精度 {symbol_rules_.step_size}，最小下单金额 {symbol_rules_.min_notional} USDT",
         f"- 模拟盘标记价：{mark}（校验以此为准；行情数据来自实盘，两者通常相差不到 0.1%）",
+        f"- 最近已收盘 5m K 线的 ATR14：{context.atr:.{max(0, -symbol_rules_.tick_size.as_tuple().exponent)}f}（程序按它计算止损）",
         "",
         "## 当前持仓与挂单（模拟盘）",
         f"- 持仓：{dump(position) if position else '无'}",
@@ -201,7 +209,6 @@ async def prepare(symbol: str, reasons: list[str], analysis_id: int) -> Prepared
             "valid_until": current.valid_until and local(current.valid_until),
             "first_fill_at": current.first_fill_at and local(current.first_fill_at),
             "close_deadline": current.close_deadline and local(current.close_deadline),
-            "current_stop": str(context.current_stop) if context.current_stop else None,
             "fills": fills,
             **plan_brief(current.decision, current.sizing),
         }) if current else "无",
@@ -210,30 +217,9 @@ async def prepare(symbol: str, reasons: list[str], analysis_id: int) -> Prepared
         *([f"- {local(a.started_at)}{'（试运行）' if a.dry_run else ''}：{dump(plan_brief(a.decision, a.sizing))}" for a in recent] or ["无"]),
         "",
         "## 预取的行情（实盘数据，已取，不要用相同参数重复调用）",
-        await prefetch(symbol, angle),
+        await prefetch(symbol),
     ]
-    return Prepared(provider=provider, effort=effort, dry_run=dry_run, angle=angle, system=system, user_text="\n".join(lines),
-                    context=context, current_sizing=current.sizing if current else None)
-
-
-def apply_position(context: PlanContext, snapshot: dict, symbol: str, current_sizing: dict | None) -> None:
-    """按快照填入持仓与当前止损。当前止损取交易所上本程序止损单里最紧的一张（可能已移到保本价），没有则取当前计划的止损"""
-    position = next((p for p in snapshot["positions"] if p["symbol"] == symbol), None)
-    if position is None:
-        context.position_side, context.position_qty, context.position_entry, context.current_stop = None, Decimal(0), None, None
-        return
-    side = "long" if position["side"] == "LONG" else "short"
-    close_side = "SELL" if side == "long" else "BUY"
-    stops = [
-        Decimal(o["trigger_price"]) for o in snapshot["algo_orders"]
-        if o["symbol"] == symbol and o["side"] == close_side and o["type"].startswith("STOP") and OWN_CLIENT_ID.match(o["client_id"])
-    ]
-    if stops:
-        current_stop = max(stops) if side == "long" else min(stops)
-    else:
-        current_stop = Decimal(current_sizing["stop"]) if current_sizing else None
-    context.position_side, context.position_qty = side, Decimal(position["amount"])
-    context.position_entry, context.current_stop = Decimal(position["entry_price"]), current_stop
+    return Prepared(provider=provider, effort=effort, dry_run=dry_run, system=system, user_text="\n".join(lines), context=context)
 
 
 async def complete(prepared: Prepared, messages: list[dict], tools: list[llm.ToolSpec]) -> llm.Completion:
@@ -253,12 +239,11 @@ def describe(plan: TradePlan, sizing: dict, dry_run: bool) -> str:
     prefix = "试运行" if dry_run else ""
     if plan.action != "plan":
         return f"{prefix}{ACTION_LABELS[plan.action]}：{plan.summary}"
-    entries = "、".join(f"{e['price']}×{e['quantity']}" for e in sizing["entries"])
-    targets = " / ".join(t["price"] for t in sizing["take_profits"])
+    setup, estimate = sizing["setup"], sizing["estimate"]
     return (
-        f"{prefix}计划：{DIRECTION_LABELS[plan.direction]}，置信度{CONFIDENCE_LABELS[plan.confidence]}；入场 {entries}，"
-        f"止损 {sizing['stop']}，止盈 {targets}；止损亏损 {sizing['risk_at_stop']} USDT（交易资金的 {sizing['risk_pct']}%），"
-        f"盈亏比 {sizing['reward_risk']}（仅首档 {sizing['reward_risk_first_only']}）。{plan.summary}"
+        f"{prefix}待确认入场：{DIRECTION_LABELS[plan.direction]}，置信度{CONFIDENCE_LABELS[plan.confidence]}；"
+        f"区间 {setup['zone_low']}–{setup['zone_high']}，5m 收盘{'≥' if plan.direction == 'long' else '≤'} {setup['confirm_price']} 入场，"
+        f"有效 {plan.valid_hours} 小时；按确认价预估止损 {estimate['stop']}（{estimate['stop_pct']}%）、数量 {estimate['quantity']}。{plan.summary}"
     )
 
 
@@ -267,13 +252,14 @@ async def submit(prepared: Prepared, symbol: str, analysis_id: int, arguments: d
         plan = TradePlan.model_validate(arguments)
     except ValidationError as e:
         return dump({"error": "参数无效", "details": e.errors(include_url=False)}), None
-    # 分析可能持续几分钟，按提交时的标记价和持仓校验
+    # 分析可能持续几分钟，按提交时的标记价、持仓和 ATR 校验
     prepared.context.mark_price = await mark_price(symbol)
+    prepared.context.atr = await confirm_atr(symbol)
     snapshot = await read_snapshot()
     if snapshot:
-        apply_position(prepared.context, snapshot, symbol, prepared.current_sizing)
+        prepared.context.position_side = position_side(snapshot, symbol)
     try:
-        sizing = size_plan(plan, prepared.context)
+        sizing = check_setup(plan, prepared.context)
     except PlanError as e:
         await add_event(symbol, analysis_id, "plan_rejected", f"计划未通过校验，已退回模型修正：{'；'.join(e.errors)}", "warn")
         return dump({"error": "计划未通过校验", "details": e.errors, "mark_price": str(prepared.context.mark_price)}), None
@@ -284,11 +270,7 @@ async def run_analysis(symbol: str, reasons: list[str]) -> None:
     """一次完整的分析；结果和失败原因都写进 trading_analyses 和时间线，不向外抛出"""
     async with SessionLocal() as session:
         account = await session.get(TradingAccount, 1)
-        target = await session.get(TradingSymbol, symbol)
-        analysis = TradingAnalysis(
-            symbol=symbol, angle=target.angle if target else "long", reasons=reasons,
-            dry_run=not (account and account.running), status="running",
-        )
+        analysis = TradingAnalysis(symbol=symbol, reasons=reasons, dry_run=not (account and account.running), status="running")
         session.add(analysis)
         await session.commit()
         analysis_id, dry_run = analysis.id, analysis.dry_run

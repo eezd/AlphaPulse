@@ -58,7 +58,7 @@ async def routine_requests() -> None:
             )).all()
             if recent and recent[0].status == "running":
                 continue
-            if not recent or now >= next_routine_at(recent[0].started_at, target.angle):
+            if not recent or now >= next_routine_at(recent[0].started_at):
                 await request_analysis(session, target.symbol, "例行分析")
                 continue
             last = recent[0]

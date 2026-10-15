@@ -32,8 +32,6 @@ class TradingSymbol(Base):
     __tablename__ = "trading_symbols"
 
     symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
-    # short：24h 内平仓；long：12–48h 平仓
-    angle: Mapped[str] = mapped_column(String(8))
     added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     # 待执行的分析请求：多个触发在执行前合并为一次
     analysis_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -48,7 +46,6 @@ class TradingAnalysis(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     symbol: Mapped[str] = mapped_column(String(32))
-    angle: Mapped[str] = mapped_column(String(8))
     reasons: Mapped[list[str]] = mapped_column(JSONB)
     # 停止状态下的分析只记录计划、不下单
     dry_run: Mapped[bool] = mapped_column(Boolean)
@@ -69,8 +66,8 @@ class TradingAnalysis(Base):
     error: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # proposed（待执行器采纳）/ pending（挂单中）/ open（持仓中）/ closing（平仓中）/ closed / canceled（未成交即结束）
-    # / replaced（被新计划替换）/ stale（采纳前持仓已变，作废）/ applied（exit 决定已执行）
+    # proposed（待执行器采纳）/ pending（等待 5m 确认，sizing 有 entry 表示已触发）/ open（持仓中）/ closing（平仓中）
+    # / closed / canceled（未入场即结束）/ replaced（被新计划替换）/ stale（采纳前已有持仓或已触发，作废）/ applied（exit 决定已执行）
     plan_status: Mapped[str | None] = mapped_column(String(16))
     valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     first_fill_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
