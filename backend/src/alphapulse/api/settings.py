@@ -1,4 +1,4 @@
-"""环境变量页：模型接入配置。api_key 只写不读，接口只返回末 4 位"""
+"""环境变量页：模型接入配置、币安模拟盘 key。密钥只写不读，接口只返回末 4 位"""
 
 import time
 from datetime import datetime
@@ -12,9 +12,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from alphapulse.ai import llm
 from alphapulse.core.auth import require_admin
-from alphapulse.core.crypto import encrypt
+from alphapulse.core.crypto import decrypt, encrypt
 from alphapulse.core.db import get_session
-from alphapulse.models import AiProvider
+from alphapulse.models import AiProvider, TradingAccount
+from alphapulse.trading.client import DemoClient, ExchangeError
 
 router = APIRouter(prefix="/api/settings", tags=["settings"], dependencies=[Depends(require_admin)])
 
@@ -22,6 +23,7 @@ Protocol = Literal["openai", "anthropic"]
 # 从页面粘贴时容易带上首尾空格，模型名带空格会被上游当成另一个模型（404）
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]
 Model = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
+ApiCredential = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
 
 
 class ProviderOut(BaseModel):
@@ -157,3 +159,91 @@ async def test_provider(provider_id: int, session: Annotated[AsyncSession, Depen
     except llm.LlmError as e:
         return TestResult(ok=False, elapsed_ms=round((time.monotonic() - started) * 1000), error=str(e))
     return TestResult(ok=True, elapsed_ms=round((time.monotonic() - started) * 1000), reply=completion.text[:200])
+
+
+# ---------- 币安模拟盘 ----------
+
+class ExchangeOut(BaseModel):
+    configured: bool
+    api_key_hint: str | None
+    running: bool
+    updated_at: datetime | None
+
+
+class ExchangeIn(BaseModel):
+    # key 和 secret 成对生效，修改时两个都要填
+    api_key: ApiCredential
+    api_secret: ApiCredential
+
+
+class ExchangeTestResult(BaseModel):
+    ok: bool
+    elapsed_ms: int
+    available_usdt: str | None = None
+    wallet_usdt: str | None = None
+    # 双向持仓模式；引擎使用单向持仓，启动时会切换
+    dual_side_position: bool | None = None
+    error: str | None = None
+
+
+def exchange_out(account: TradingAccount | None) -> ExchangeOut:
+    if account is None:
+        return ExchangeOut(configured=False, api_key_hint=None, running=False, updated_at=None)
+    return ExchangeOut(
+        configured=account.api_key_encrypted is not None, api_key_hint=account.api_key_hint,
+        running=account.running, updated_at=account.updated_at,
+    )
+
+
+async def editable_account(session: AsyncSession) -> TradingAccount:
+    account = await session.get(TradingAccount, 1)
+    if account is not None and account.running:
+        raise HTTPException(status.HTTP_409_CONFLICT, "模拟盘正在交易，请先停止再修改 key")
+    return account or TradingAccount(id=1)
+
+
+@router.get("/exchange")
+async def get_exchange(session: Annotated[AsyncSession, Depends(get_session)]) -> ExchangeOut:
+    return exchange_out(await session.get(TradingAccount, 1))
+
+
+@router.put("/exchange")
+async def put_exchange(body: ExchangeIn, session: Annotated[AsyncSession, Depends(get_session)]) -> ExchangeOut:
+    account = await editable_account(session)
+    account.api_key_encrypted = encrypt(body.api_key)
+    account.api_secret_encrypted = encrypt(body.api_secret)
+    account.api_key_hint = body.api_key[-4:]
+    session.add(account)
+    await session.commit()
+    await session.refresh(account)
+    return exchange_out(account)
+
+
+@router.delete("/exchange")
+async def delete_exchange(session: Annotated[AsyncSession, Depends(get_session)]) -> ExchangeOut:
+    account = await editable_account(session)
+    account.api_key_encrypted = account.api_secret_encrypted = account.api_key_hint = None
+    session.add(account)
+    await session.commit()
+    await session.refresh(account)
+    return exchange_out(account)
+
+
+@router.post("/exchange/test")
+async def test_exchange(session: Annotated[AsyncSession, Depends(get_session)]) -> ExchangeTestResult:
+    account = await session.get(TradingAccount, 1)
+    if account is None or account.api_key_encrypted is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "还没有填写模拟盘 key")
+    started = time.monotonic()
+    try:
+        async with DemoClient(decrypt(account.api_key_encrypted), decrypt(account.api_secret_encrypted)) as client:
+            info = await client.request("GET", "/fapi/v3/account")
+            mode = await client.request("GET", "/fapi/v1/positionSide/dual")
+    except ExchangeError as e:
+        hint = "（key 无效、未开启合约交易权限，或限制了 IP）" if e.code == -2015 else ""
+        return ExchangeTestResult(ok=False, elapsed_ms=round((time.monotonic() - started) * 1000), error=f"{e}{hint}")
+    return ExchangeTestResult(
+        ok=True, elapsed_ms=round((time.monotonic() - started) * 1000),
+        available_usdt=info["availableBalance"], wallet_usdt=info["totalWalletBalance"],
+        dual_side_position=mode["dualSidePosition"],
+    )

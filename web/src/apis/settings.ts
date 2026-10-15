@@ -63,3 +63,37 @@ export function testProvider(id: number): Promise<TestResult> {
   // 模型接口读超时 600s 且 SDK 会重试 2 次，前端放宽等待时间
   return http.post(`/settings/providers/${id}/test`, null, { timeout: 1900000 })
 }
+
+export interface Exchange {
+  configured: boolean
+  api_key_hint: string | null
+  running: boolean
+  updated_at: string | null
+}
+
+export interface ExchangeTestResult {
+  ok: boolean
+  elapsed_ms: number
+  available_usdt: string | null
+  wallet_usdt: string | null
+  /** 双向持仓模式；引擎使用单向持仓，启动时会切换 */
+  dual_side_position: boolean | null
+  error: string | null
+}
+
+export function getExchange(): Promise<Exchange> {
+  return http.get("/settings/exchange")
+}
+
+export function putExchange(body: { api_key: string, api_secret: string }): Promise<Exchange> {
+  return http.put("/settings/exchange", body)
+}
+
+export function deleteExchange(): Promise<Exchange> {
+  return http.delete("/settings/exchange")
+}
+
+export function testExchange(): Promise<ExchangeTestResult> {
+  // 后端串行请求两个接口，单次超时 10s
+  return http.post("/settings/exchange/test", null, { timeout: 30000 })
+}

@@ -1,6 +1,6 @@
 <script lang="ts" setup>
-import type { Provider, ProviderForm } from "@/apis/settings"
-import { createProvider, deleteProvider, EFFORTS, listProviders, patchProvider, testProvider } from "@/apis/settings"
+import type { Exchange, Provider, ProviderForm } from "@/apis/settings"
+import { createProvider, deleteExchange, deleteProvider, EFFORTS, getExchange, listProviders, patchProvider, putExchange, testExchange, testProvider } from "@/apis/settings"
 import { formatTime } from "@/utils/text"
 
 const PROTOCOL_LABELS = { openai: "OpenAI 格式（/v1/chat/completions）", anthropic: "Claude 格式（/v1/messages）" } as const
@@ -76,6 +76,57 @@ async function test(p: Provider) {
 }
 
 load()
+
+// ---------- 币安模拟盘 ----------
+
+const exchange = ref<Exchange>()
+const exchangeDialogVisible = ref(false)
+const exchangeForm = ref({ api_key: "", api_secret: "" })
+const exchangeSaving = ref(false)
+const exchangeTesting = ref(false)
+
+async function loadExchange() {
+  exchange.value = await getExchange()
+}
+
+function openExchangeEdit() {
+  exchangeForm.value = { api_key: "", api_secret: "" }
+  exchangeDialogVisible.value = true
+}
+
+async function saveExchange() {
+  exchangeSaving.value = true
+  try {
+    exchange.value = await putExchange(exchangeForm.value)
+    exchangeDialogVisible.value = false
+    ElMessage.success("已保存")
+  } finally {
+    exchangeSaving.value = false
+  }
+}
+
+async function removeExchange() {
+  await ElMessageBox.confirm("删除模拟盘 API key？", "删除确认", { type: "warning" })
+  exchange.value = await deleteExchange()
+  ElMessage.success("已删除")
+}
+
+async function runExchangeTest() {
+  exchangeTesting.value = true
+  try {
+    const r = await testExchange()
+    if (r.ok) {
+      const mode = r.dual_side_position ? "双向持仓（开始交易时会切换为单向）" : "单向持仓"
+      ElMessage.success({ message: `连接成功，用时 ${r.elapsed_ms}ms；可用 ${r.available_usdt} USDT，钱包余额 ${r.wallet_usdt} USDT；${mode}`, duration: 8000 })
+    } else {
+      ElMessage.error({ message: `连接失败（${r.elapsed_ms}ms）：${r.error}`, duration: 8000 })
+    }
+  } finally {
+    exchangeTesting.value = false
+  }
+}
+
+loadExchange()
 </script>
 
 <template>
@@ -189,6 +240,60 @@ load()
           取消
         </el-button>
         <el-button type="primary" :loading="saving" @click="save">
+          保存
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <div class="mt-4 flex items-center justify-between">
+      <div>
+        <span class="text-lg font-bold">币安模拟盘</span>
+        <span class="ml-3 text-xs text-[var(--el-text-color-secondary)]">只连接币安模拟盘（demo-fapi.binance.com）；在 demo.binance.com 的 API 管理创建 key，并开启合约交易权限</span>
+      </div>
+      <div>
+        <el-button :disabled="!exchange?.configured" :loading="exchangeTesting" @click="runExchangeTest">
+          测试连接
+        </el-button>
+        <el-button type="primary" :disabled="exchange?.running" @click="openExchangeEdit">
+          {{ exchange?.configured ? "修改 key" : "填写 key" }}
+        </el-button>
+        <el-button v-if="exchange?.configured" type="danger" plain :disabled="exchange.running" @click="removeExchange">
+          删除
+        </el-button>
+      </div>
+    </div>
+    <el-descriptions v-if="exchange" :column="3" border>
+      <el-descriptions-item label="API Key">
+        {{ exchange.configured ? `****${exchange.api_key_hint}` : "未配置" }}
+      </el-descriptions-item>
+      <el-descriptions-item label="状态">
+        <el-tag v-if="exchange.running" type="success" size="small">
+          交易中（停止后才能修改 key）
+        </el-tag>
+        <span v-else>未运行</span>
+      </el-descriptions-item>
+      <el-descriptions-item label="更新时间">
+        {{ exchange.updated_at ? formatTime(exchange.updated_at, "MM-DD HH:mm") : "-" }}
+      </el-descriptions-item>
+    </el-descriptions>
+
+    <el-dialog v-model="exchangeDialogVisible" title="币安模拟盘 API key" width="560px">
+      <el-form :model="exchangeForm" label-width="100px">
+        <el-form-item label="API Key" required>
+          <el-input v-model="exchangeForm.api_key" type="password" show-password autocomplete="new-password" />
+        </el-form-item>
+        <el-form-item label="Secret Key" required>
+          <el-input v-model="exchangeForm.api_secret" type="password" show-password autocomplete="new-password" />
+          <div class="text-xs text-[var(--el-text-color-secondary)]">
+            两项都要填；加密保存，之后不再显示
+          </div>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="exchangeDialogVisible = false">
+          取消
+        </el-button>
+        <el-button type="primary" :loading="exchangeSaving" :disabled="!exchangeForm.api_key.trim() || !exchangeForm.api_secret.trim()" @click="saveExchange">
           保存
         </el-button>
       </template>
