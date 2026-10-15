@@ -69,7 +69,8 @@ class TradingAnalysis(Base):
     error: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # pending（挂单中）/ open（持仓中）/ closed / canceled（未成交即结束）/ replaced（被新计划替换）
+    # proposed（待执行器采纳）/ pending（挂单中）/ open（持仓中）/ closing（平仓中）/ closed / canceled（未成交即结束）
+    # / replaced（被新计划替换）/ stale（采纳前持仓已变，作废）/ applied（exit 决定已执行）
     plan_status: Mapped[str | None] = mapped_column(String(16))
     valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     first_fill_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

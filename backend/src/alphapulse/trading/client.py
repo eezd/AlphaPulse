@@ -7,14 +7,18 @@ import hashlib
 import hmac
 import re
 import time
+from decimal import Decimal
 from typing import Any
 from urllib.parse import urlencode
 
 import httpx
 
+from alphapulse.trading.plan import SymbolRules
+
 BASE_URL = "https://demo-fapi.binance.com"
 RECV_WINDOW_MS = 5000
 TIMEOUT_SECONDS = 10
+EXCHANGE_INFO_SECONDS = 3600
 # 本程序下的单 clientOrderId / clientAlgoId 为 ap{流水 id}；其他（含用户手动下的）不动
 OWN_CLIENT_ID = re.compile(r"^ap\d+$")
 
@@ -96,3 +100,35 @@ class DemoClient:
                 continue
             raise ExchangeError(resp.status_code, code, body.get("msg", resp.text[:200]) if isinstance(body, dict) else resp.text[:200])
         raise AssertionError("unreachable")
+
+
+_exchange_info: tuple[float, dict[str, SymbolRules]] | None = None
+
+
+def step_decimal(raw: str) -> Decimal:
+    """去掉多余的 0（"0.10" → 0.1），但整数步长不能变成 1E+2 这类指数形式，否则按它取整的价格和数量也会是指数形式"""
+    value = Decimal(raw).normalize()
+    return value.quantize(Decimal(1)) if value.as_tuple().exponent > 0 else value
+
+
+async def symbol_rules(symbol: str) -> SymbolRules:
+    """模拟盘的价格精度、数量精度、最小下单金额，按小时缓存"""
+    global _exchange_info
+    if _exchange_info is None or time.monotonic() - _exchange_info[0] > EXCHANGE_INFO_SECONDS:
+        info = await public_get("/fapi/v1/exchangeInfo")
+        parsed = {}
+        for s in info["symbols"]:
+            filters = {f["filterType"]: f for f in s["filters"]}
+            parsed[s["symbol"]] = SymbolRules(
+                tick_size=step_decimal(filters["PRICE_FILTER"]["tickSize"]),
+                step_size=step_decimal(filters["LOT_SIZE"]["stepSize"]),
+                min_notional=Decimal(filters["MIN_NOTIONAL"]["notional"]),
+            )
+        _exchange_info = (time.monotonic(), parsed)
+    if symbol not in _exchange_info[1]:
+        raise ExchangeError(None, None, f"模拟盘没有交易对 {symbol}")
+    return _exchange_info[1][symbol]
+
+
+async def mark_price(symbol: str) -> Decimal:
+    return Decimal((await public_get("/fapi/v1/premiumIndex", {"symbol": symbol}))["markPrice"])

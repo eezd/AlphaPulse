@@ -1,9 +1,10 @@
 <script lang="ts" setup>
-import type { Analysis, PlanCondition, TradingSymbol } from "@/apis/trading"
-import { ANGLE_LABELS } from "@/apis/trading"
+import type { Analysis, OrderRow, PlanCondition, TradingSymbol } from "@/apis/trading"
+import { ANGLE_LABELS, PLAN_STATUS_LABELS } from "@/apis/trading"
 import { formatTime } from "@/utils/text"
 
-const props = defineProps<{ symbol: TradingSymbol, analysis: Analysis | null, requesting: boolean }>()
+/** analysis：执行中的计划，没有时为最近一次分析；latest：最近一次分析（与 analysis 不同时另行提示） */
+const props = defineProps<{ symbol: TradingSymbol, analysis: Analysis | null, latest: Analysis | null, orders: OrderRow[], requesting: boolean }>()
 const emit = defineEmits<{ analyze: [], detail: [id: number] }>()
 
 const ACTION_LABELS = { plan: "新计划", keep: "维持当前计划", exit: "结束当前计划", wait: "观望" } as const
@@ -18,6 +19,20 @@ const decision = computed(() => props.analysis?.decision ?? null)
 const sizing = computed(() => props.analysis?.sizing ?? null)
 const busy = computed(() => props.requesting || props.symbol.analyzing || !!props.symbol.analysis_requested_at)
 const elapsed = computed(() => props.analysis ? Math.max(0, Math.round((now.value - new Date(props.analysis.started_at).getTime()) / 1000)) : 0)
+
+function filled(purpose: "entry" | "tp", leg: number) {
+  const total = props.orders.filter(o => o.purpose === purpose && o.leg === leg).reduce((sum, o) => sum + Number(o.filled_qty), 0)
+  return total ? String(Number(total.toFixed(8))) : "-"
+}
+
+function countdown(deadline: string | null) {
+  if (!deadline)
+    return ""
+  const seconds = Math.round((new Date(deadline).getTime() - now.value) / 1000)
+  if (seconds <= 0)
+    return "已到期"
+  return `${Math.floor(seconds / 3600)} 小时 ${Math.floor(seconds % 3600 / 60)} 分`
+}
 
 function condition(c: PlanCondition) {
   return `${TIMEFRAME_LABELS[c.timeframe]}${c.direction === "above" ? "高于" : "低于"} ${c.price}`
@@ -56,6 +71,9 @@ const invalidationAction = computed(() => props.analysis?.angle === "short" ? "�
         <el-tag v-if="analysis.dry_run" type="info" size="small">
           试运行
         </el-tag>
+        <el-tag v-if="analysis.plan_status" type="success" effect="dark" size="small">
+          {{ PLAN_STATUS_LABELS[analysis.plan_status] }}
+        </el-tag>
         <el-tag size="small">
           {{ ACTION_LABELS[decision.action] }}
         </el-tag>
@@ -73,10 +91,33 @@ const invalidationAction = computed(() => props.analysis?.angle === "short" ? "�
       <div class="font-bold">
         {{ decision.summary }}
       </div>
+      <div v-if="latest && latest.id !== analysis.id" class="text-xs text-[var(--el-text-color-secondary)]">
+        最近一次分析 #{{ latest.id }}（{{ formatTime(latest.started_at) }}）：
+        <template v-if="latest.status === 'done'">
+          {{ latest.decision?.summary }}
+        </template>
+        <template v-else>
+          {{ latest.status === "running" ? "分析中" : `失败：${latest.error}` }}
+        </template>
+        <el-link type="primary" underline="never" class="ml-1 text-xs!" @click="emit('detail', latest.id)">
+          查看
+        </el-link>
+      </div>
+      <div v-if="analysis.valid_until || analysis.close_deadline" class="flex flex-wrap gap-x-6">
+        <span v-if="analysis.plan_status === 'pending' && analysis.valid_until"><span class="label">入场单有效至</span>{{ formatTime(analysis.valid_until, "MM-DD HH:mm") }}（剩 {{ countdown(analysis.valid_until) }}）</span>
+        <span v-if="analysis.first_fill_at"><span class="label">首档成交</span>{{ formatTime(analysis.first_fill_at, "MM-DD HH:mm") }}</span>
+        <span v-if="analysis.close_deadline"><span class="label">最晚平仓</span>{{ formatTime(analysis.close_deadline, "MM-DD HH:mm") }}（剩 {{ countdown(analysis.close_deadline) }}）</span>
+      </div>
+      <div v-if="analysis.result">
+        <span class="label">结果</span>{{ analysis.close_reason }}，净盈亏 {{ analysis.result.net }} USDT（手续费 {{ analysis.result.commission }}）
+      </div>
       <div><span class="label">为什么</span>{{ decision.reasons }}</div>
 
+      <div v-if="sizing?.managed" class="text-xs text-[var(--el-text-color-secondary)]">
+        持仓中调整的计划：不加仓，止盈按当前持仓数量拆分
+      </div>
       <template v-if="decision.action === 'plan' && sizing">
-        <el-table :data="sizing.entries" border size="small">
+        <el-table v-if="sizing.entries.length" :data="sizing.entries" border size="small">
           <el-table-column label="入场档位" min-width="110">
             <template #default="{ $index }">
               第 {{ $index + 1 }} 档
@@ -90,6 +131,11 @@ const invalidationAction = computed(() => props.analysis?.angle === "short" ? "�
           </el-table-column>
           <el-table-column prop="quantity" label="数量" min-width="90" />
           <el-table-column prop="notional" label="名义 USDT" min-width="100" />
+          <el-table-column label="已成交" min-width="80">
+            <template #default="{ $index }">
+              {{ filled("entry", $index) }}
+            </template>
+          </el-table-column>
           <el-table-column label="依据" min-width="200">
             <template #default="{ $index }">
               {{ decision.entries?.[$index]?.basis }}
@@ -109,6 +155,11 @@ const invalidationAction = computed(() => props.analysis?.angle === "short" ? "�
             </template>
           </el-table-column>
           <el-table-column prop="quantity" label="数量" min-width="90" />
+          <el-table-column label="已成交" min-width="80">
+            <template #default="{ $index }">
+              {{ filled("tp", $index) }}
+            </template>
+          </el-table-column>
           <el-table-column label="依据" min-width="300">
             <template #default="{ $index }">
               {{ decision.take_profits?.[$index]?.basis }}

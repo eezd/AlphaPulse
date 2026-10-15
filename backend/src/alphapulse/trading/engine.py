@@ -1,4 +1,4 @@
-"""模拟盘交易进程：同步账户快照、调度分析。
+"""模拟盘交易进程：同步账户快照、执行器对账、调度分析。
 
 用法：python -m alphapulse.trading.engine
 """
@@ -12,6 +12,8 @@ from sqlalchemy import select, update
 from alphapulse.core.db import SessionLocal
 from alphapulse.models import TradingAnalysis, TradingSymbol
 from alphapulse.trading.analyst import run_analysis
+from alphapulse.trading.executor import executor_loop
+from alphapulse.trading.schedule import routine_requests
 from alphapulse.trading.snapshot import snapshot_loop
 
 logger = logging.getLogger("alphapulse.trading.engine")
@@ -57,6 +59,7 @@ async def analysis_loop() -> None:
                     del tasks[symbol]
                     if not task.cancelled() and task.exception():
                         logger.error("%s 分析任务异常退出", symbol, exc_info=task.exception())
+            await routine_requests()
             free = MAX_CONCURRENT_ANALYSES - len(tasks)
             if free > 0:
                 for symbol, reasons in await claim_requests(free, set(tasks)):
@@ -69,6 +72,7 @@ async def analysis_loop() -> None:
 async def main() -> None:
     async with asyncio.TaskGroup() as tg:
         tg.create_task(snapshot_loop())
+        tg.create_task(executor_loop())
         tg.create_task(analysis_loop())
 
 

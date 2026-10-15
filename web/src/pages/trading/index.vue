@@ -1,8 +1,8 @@
 <script lang="ts" setup>
 import type { Effort, Provider } from "@/apis/settings"
-import type { Analysis, Angle, SnapshotPosition, TradingEvent, TradingStatus, TradingSymbol } from "@/apis/trading"
+import type { Analysis, Angle, OrderRow, SnapshotPosition, TradingEvent, TradingStatus, TradingSymbol } from "@/apis/trading"
 import { EFFORTS, listProviders } from "@/apis/settings"
-import { ANGLE_LABELS, deleteSymbol, getStatus, isOwnOrder, listAnalyses, listEvents, listSymbols, patchConfig, patchSymbol, requestAnalysis, startTrading, stopTrading } from "@/apis/trading"
+import { ANGLE_LABELS, deleteSymbol, getStatus, getSymbolPlan, isOwnOrder, listAnalyses, listEvents, listSymbols, patchConfig, patchSymbol, requestAnalysis, startTrading, stopTrading } from "@/apis/trading"
 import { usePersisted } from "@/utils/storage"
 import { formatTime } from "@/utils/text"
 import AddSymbolDialog from "./components/AddSymbolDialog.vue"
@@ -23,6 +23,8 @@ const eventsExhausted = ref(false)
 const addVisible = ref(false)
 const toggling = ref(false)
 const latestAnalysis = ref<Analysis | null>(null)
+const livePlan = ref<Analysis | null>(null)
+const planOrders = ref<OrderRow[]>([])
 const requesting = ref(false)
 const drawerVisible = ref(false)
 const drawerAnalysisId = ref<number | null>(null)
@@ -81,6 +83,8 @@ function exitPrices(p: SnapshotPosition) {
 function symbolState(s: TradingSymbol) {
   if (s.analyzing)
     return { label: "分析中", type: "warning" } as const
+  if (s.plan_status === "closing")
+    return { label: "平仓中", type: "danger" } as const
   if (positions.value.some(p => p.symbol === s.symbol))
     return { label: "持仓中", type: "success" } as const
   if (s.plan_status === "pending")
@@ -97,9 +101,23 @@ async function refresh() {
 
 async function refreshAnalysis() {
   const symbol = selected.value
-  const latest = symbol ? (await listAnalyses({ symbol, limit: 1 }))[0] ?? null : null
-  if (symbol === selected.value)
-    latestAnalysis.value = latest
+  if (!symbol)
+    return
+  const [latest, { plan, orders }] = await Promise.all([listAnalyses({ symbol, limit: 1 }), getSymbolPlan(symbol)])
+  if (symbol !== selected.value)
+    return
+  latestAnalysis.value = latest[0] ?? null
+  livePlan.value = plan
+  planOrders.value = orders
+}
+
+/** 持仓的平仓倒计时：取该币执行中计划的最晚平仓时间 */
+function closeCountdown(symbol: string) {
+  const deadline = symbols.value.find(s => s.symbol === symbol)?.close_deadline
+  if (!deadline)
+    return "-"
+  const minutes = Math.round((new Date(deadline).getTime() - Date.now()) / 60000)
+  return minutes <= 0 ? "已到期" : `${Math.floor(minutes / 60)}h ${minutes % 60}m`
 }
 
 async function analyze() {
@@ -144,6 +162,8 @@ async function loadMoreEvents() {
 watch(selected, () => {
   events.value = []
   latestAnalysis.value = null
+  livePlan.value = null
+  planOrders.value = []
   refreshEvents()
   refreshAnalysis()
 })
@@ -348,6 +368,11 @@ onBeforeUnmount(() => clearInterval(timer))
           {{ exitPrices(row as SnapshotPosition).stop }} / {{ exitPrices(row as SnapshotPosition).target }}
         </template>
       </el-table-column>
+      <el-table-column label="平仓倒计时" width="100">
+        <template #default="{ row }">
+          {{ closeCountdown(row.symbol) }}
+        </template>
+      </el-table-column>
     </el-table>
 
     <div class="min-h-0 flex flex-1 gap-3">
@@ -388,7 +413,8 @@ onBeforeUnmount(() => clearInterval(timer))
       <el-scrollbar class="flex-1">
         <div class="flex flex-col gap-3 pr-2">
           <PlanCard
-            v-if="current" :symbol="current" :analysis="latestAnalysis" :requesting="requesting"
+            v-if="current" :symbol="current" :analysis="livePlan ?? latestAnalysis" :latest="latestAnalysis" :orders="planOrders"
+            :requesting="requesting"
             @analyze="analyze" @detail="openAnalysis"
           />
 

@@ -4,6 +4,7 @@
 """
 
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from typing import Annotated, Literal
 
@@ -32,6 +33,10 @@ TAKER_FEE_RATE = Decimal("0.0004")
 # 模拟盘 PERCENT_PRICE：买单价不高于标记价 × 1.05，卖单价不低于标记价 × 0.95
 PERCENT_PRICE_LIMIT = Decimal("0.05")
 RATIO_TOLERANCE = Decimal("0.001")
+# 例行分析周期（小时）：短线跟 1h、长线跟 4h 收盘
+ROUTINE_HOURS = {"short": 1, "long": 4}
+# 同一个币两次自动分析的最短间隔
+MIN_ANALYSIS_GAP = timedelta(minutes=10)
 
 Price = Annotated[Decimal, Field(gt=0)]
 
@@ -99,6 +104,11 @@ class PlanContext:
     rules: SymbolRules
     has_plan: bool
     position_side: Direction | None
+    position_qty: Decimal = Decimal(0)
+    # 持仓均价
+    position_entry: Decimal | None = None
+    # 当前生效的止损价（可能已移到保本价）；新计划只能收紧
+    current_stop: Decimal | None = None
 
 
 class PlanError(Exception):
@@ -142,14 +152,27 @@ def check_action(plan: TradePlan, ctx: PlanContext) -> list[str]:
 
 
 def check_plan_fields(plan: TradePlan, ctx: PlanContext) -> list[str]:
-    """action=plan 时的字段完整性、档数、比例、有效期"""
-    required = ("direction", "confidence", "entries", "stop", "take_profits", "entry_valid_hours", "max_hold_hours", "invalidation")
+    """action=plan 时的字段完整性、档数、比例、有效期。有持仓时只调整止损止盈等，不加仓"""
+    holding = ctx.position_side is not None
+    required = ("direction", "confidence", "stop", "take_profits", "invalidation")
+    if not holding:
+        required += ("entries", "entry_valid_hours", "max_hold_hours")
     missing = [name for name in required if getattr(plan, name) is None]
     if missing:
         return [f"action=plan 时缺少：{', '.join(missing)}"]
     errors = []
     angle = ctx.angle
     label = "短线" if angle == "short" else "长线"
+    if holding:
+        if plan.entries:
+            errors.append("已有持仓，新计划不加仓：entries 须为空，只调整止损、止盈、失效条件和 reevaluate")
+        if plan.direction != ctx.position_side:
+            errors.append(f"已有{'多' if ctx.position_side == 'long' else '空'}头持仓，新计划方向必须一致；要反手请先用 exit")
+        if len(plan.take_profits) != len(TAKE_PROFIT_RATIOS[angle]):
+            errors.append(f"{label}须给 {len(TAKE_PROFIT_RATIOS[angle])} 个止盈，现为 {len(plan.take_profits)}")
+        if plan.invalidation.timeframe not in INVALIDATION_TIMEFRAMES[angle]:
+            errors.append(f"{label}失效条件的周期只能是 {'/'.join(INVALIDATION_TIMEFRAMES[angle])}")
+        return errors
     low, high = ENTRY_COUNT[angle]
     if not low <= len(plan.entries) <= high:
         errors.append(f"{label}入场档数须为 {low}–{high}，现为 {len(plan.entries)}" if low != high else f"{label}只能 {low} 档入场，现为 {len(plan.entries)}")
@@ -163,8 +186,6 @@ def check_plan_fields(plan: TradePlan, ctx: PlanContext) -> list[str]:
         errors.append(f"{label} max_hold_hours 不能超过 {MAX_HOLD_HOURS[angle]}")
     if plan.invalidation.timeframe not in INVALIDATION_TIMEFRAMES[angle]:
         errors.append(f"{label}失效条件的周期只能是 {'/'.join(INVALIDATION_TIMEFRAMES[angle])}")
-    if ctx.position_side is not None and plan.direction != ctx.position_side:
-        errors.append(f"已有{'多' if ctx.position_side == 'long' else '空'}头持仓，新计划方向必须一致；要反手请先用 exit")
     return errors
 
 
@@ -214,6 +235,8 @@ def size_plan(plan: TradePlan, ctx: PlanContext) -> dict:
     errors += check_plan_fields(plan, ctx)
     if errors:
         raise PlanError(errors)
+    if ctx.position_side is not None:
+        return size_managed(plan, ctx)
 
     angle, direction, rules = ctx.angle, plan.direction, ctx.rules
     # 向保守方向取整：做多的入场、止损、止盈都向下（入场更低、止损更远、止盈更近），做空都向上
@@ -282,4 +305,138 @@ def size_plan(plan: TradePlan, ctx: PlanContext) -> dict:
         "capped_by_leverage": by_leverage < by_risk,
         "reward_risk": str(rr.quantize(Decimal("0.01"))),
         "reward_risk_first_only": str(rr_first.quantize(Decimal("0.01"))),
+        # 执行器采纳前核对：持仓变了说明计划基于过时状态
+        "position_qty": "0",
+        "managed": False,
     }
+
+
+def size_managed(plan: TradePlan, ctx: PlanContext) -> dict:
+    """有持仓时的新计划：不加仓，止损只能收紧，止盈按当前持仓数量拆分"""
+    direction, rules = plan.direction, ctx.rules
+    rounding = ROUND_FLOOR if direction == "long" else ROUND_CEILING
+    stop = round_to_step(plan.stop, rules.tick_size, rounding)
+    targets = [round_to_step(t.price, rules.tick_size, rounding) for t in plan.take_profits]
+    sign = 1 if direction == "long" else -1
+    mark, invalidation = ctx.mark_price, plan.invalidation.price
+
+    def below(a: Decimal, b: Decimal) -> bool:
+        return sign * (b - a) > 0
+
+    side = "做多" if direction == "long" else "做空"
+    errors = []
+    if plan.invalidation.direction != ("below" if direction == "long" else "above"):
+        errors.append(f"{side}的失效条件方向应为 {'below' if direction == 'long' else 'above'}")
+    if not (below(stop, invalidation) and below(invalidation, mark)):
+        errors.append(f"{side}时须满足 止损 {stop} → 失效价 {invalidation} → 现价 {mark} 的顺序")
+    if ctx.current_stop is not None and below(stop, ctx.current_stop):
+        errors.append(f"止损只能收紧：当前止损 {ctx.current_stop}，新止损 {stop} 更宽")
+    if targets and not below(mark, targets[0]):
+        errors.append(f"止盈 1 {targets[0]} 已越过现价 {mark}，挂单会立即成交")
+    if any(not below(a, b) for a, b in zip(targets, targets[1:], strict=False)):
+        errors.append("止盈价须按由近到远排列且不重复")
+    if errors:
+        raise PlanError(errors)
+
+    tp_ratios = TAKE_PROFIT_RATIOS[ctx.angle]
+    entry = ctx.position_entry
+    quantity = ctx.position_qty
+    rr = reward_risk(mark, stop, targets, tp_ratios) if ctx.angle == "long" else reward_risk(mark, stop, targets[:1], (Decimal(1),))
+    loss = quantity * (sign * (entry - stop) + (entry + stop) * TAKER_FEE_RATE)
+    return {
+        "direction": direction,
+        "entries": [],
+        "stop": str(stop),
+        "take_profits": [
+            {"price": str(t), "ratio": str(r), "quantity": str(q)}
+            for t, r, q in zip(targets, tp_ratios, split_take_profits(quantity, tp_ratios, rules.step_size), strict=True)
+        ],
+        "average_price": str(entry),
+        "quantity": str(quantity),
+        "notional": str((entry * quantity).quantize(Decimal("0.01"))),
+        "capital": str(ctx.capital),
+        "leverage": str((entry * quantity / ctx.capital).quantize(Decimal("0.01"))),
+        "risk_amount": "0",
+        # 止损已越过成本价时为负，表示锁定盈利
+        "risk_at_stop": str(loss.quantize(Decimal("0.01"))),
+        "risk_pct": str((loss / ctx.capital * 100).quantize(Decimal("0.01"))),
+        "capped_by_leverage": False,
+        # 按现价计算
+        "reward_risk": str(rr.quantize(Decimal("0.01"))),
+        "reward_risk_first_only": str(rr.quantize(Decimal("0.01"))),
+        "position_qty": str(quantity),
+        "managed": True,
+    }
+
+
+# ---------- 执行：应有订单 ----------
+
+@dataclass(frozen=True)
+class OrderSpec:
+    """一张应有（或现有）的订单；quantity 为剩余未成交数量"""
+
+    purpose: Literal["entry", "stop", "tp", "close"]
+    leg: int | None
+    side: Literal["BUY", "SELL"]
+    type: Literal["LIMIT", "STOP_MARKET", "MARKET"]
+    price: Decimal | None
+    trigger_price: Decimal | None
+    quantity: Decimal
+
+
+def desired_orders(
+    sizing: dict, *, entries_open: bool, entry_filled: list[Decimal], tp_filled: list[Decimal],
+    position_qty: Decimal, stop_price: Decimal, step_size: Decimal,
+) -> list[OrderSpec]:
+    """计划在当前成交状态下应挂的单。
+
+    - 入场：entries_open 时各档剩余数量。
+    - 止损：有持仓或有入场单时一张只减仓止损，数量取计划总量与持仓的较大者（数量大于持仓时交易所只平实际持仓）。
+    - 止盈：有持仓时按累计成交数量拆分，减去各档已成交。
+    """
+    long = sizing["direction"] == "long"
+    open_side, close_side = ("BUY", "SELL") if long else ("SELL", "BUY")
+    orders = []
+    if entries_open:
+        for i, e in enumerate(sizing["entries"]):
+            remaining = Decimal(e["quantity"]) - entry_filled[i]
+            if remaining > 0:
+                orders.append(OrderSpec("entry", i, open_side, "LIMIT", Decimal(e["price"]), None, remaining))
+    if position_qty > 0 or orders:
+        quantity = max(Decimal(sizing["quantity"]), position_qty)
+        orders.append(OrderSpec("stop", None, close_side, "STOP_MARKET", None, stop_price, quantity))
+    if position_qty > 0:
+        filled_total = Decimal(sizing["quantity"]) if sizing["managed"] else sum(entry_filled, Decimal(0))
+        ratios = tuple(Decimal(t["ratio"]) for t in sizing["take_profits"])
+        for j, (t, target) in enumerate(zip(sizing["take_profits"], split_take_profits(filled_total, ratios, step_size), strict=True)):
+            remaining = target - tp_filled[j]
+            if remaining > 0:
+                orders.append(OrderSpec("tp", j, close_side, "LIMIT", Decimal(t["price"]), None, remaining))
+    return orders
+
+
+def diff_orders[K](desired: list[OrderSpec], actual: list[tuple[K, OrderSpec]]) -> tuple[list[K], list[OrderSpec]]:
+    """对比应有与现有订单：返回（要撤销的现有订单，要新挂的订单）。价格、数量完全一致才算同一张"""
+    missing = list(desired)
+    cancel = []
+    for key, spec in actual:
+        if spec in missing:
+            missing.remove(spec)
+        else:
+            cancel.append(key)
+    return cancel, missing
+
+
+def condition_met(direction: Literal["above", "below"], threshold: Decimal, price: Decimal) -> bool:
+    return price > threshold if direction == "above" else price < threshold
+
+
+def next_routine_at(last_started: datetime, angle: Angle) -> datetime:
+    """例行分析时间：上次分析后约 3/4 个周期之后的第一个 K 线收盘，再加 1 分钟等收盘数据就绪。
+    任何一次分析（包括触发式）都会让例行分析重新计时"""
+    period = timedelta(hours=ROUTINE_HOURS[angle])
+    # 币安 K 线按 UTC 对齐
+    earliest = (last_started + period * 3 / 4).astimezone(UTC)
+    day = earliest.replace(hour=0, minute=0, second=0, microsecond=0)
+    boundary = day + period * -(-(earliest - day) // period)
+    return boundary + timedelta(minutes=1)

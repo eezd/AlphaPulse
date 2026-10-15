@@ -77,7 +77,10 @@ export interface TradingSymbol {
   added_at: string
   analysis_requested_at: string | null
   analyzing: boolean
-  plan_status: "pending" | "open" | null
+  /** 执行器正在管理的计划 */
+  plan_id: number | null
+  plan_status: "pending" | "open" | "closing" | null
+  close_deadline: string | null
 }
 
 export interface SymbolOption {
@@ -183,6 +186,10 @@ export interface Sizing {
   capped_by_leverage: boolean
   reward_risk: string
   reward_risk_first_only: string
+  /** 采纳前核对用：提交时的持仓数量 */
+  position_qty: string
+  /** 持仓中调整的计划：不加仓 */
+  managed: boolean
 }
 
 export interface Analysis {
@@ -201,13 +208,13 @@ export interface Analysis {
   usage: { input_tokens: number, output_tokens: number } | null
   started_at: string
   finished_at: string | null
-  plan_status: "pending" | "open" | "closed" | "canceled" | "replaced" | null
+  plan_status: PlanStatus | null
   valid_until: string | null
   first_fill_at: string | null
   close_deadline: string | null
   closed_at: string | null
   close_reason: string | null
-  result: Record<string, unknown> | null
+  result: { realized_pnl: string, commission: string, net: string } | null
 }
 
 /** 与协议无关的消息格式，同 Chat */
@@ -219,6 +226,41 @@ export type TranscriptMessage
 export interface AnalysisDetail extends Analysis {
   text: string | null
   transcript: TranscriptMessage[] | null
+}
+
+export type PlanStatus = "proposed" | "pending" | "open" | "closing" | "closed" | "canceled" | "replaced" | "stale" | "applied"
+
+export const PLAN_STATUS_LABELS: Record<PlanStatus, string> = {
+  proposed: "待采纳",
+  pending: "挂单中",
+  open: "持仓中",
+  closing: "平仓中",
+  closed: "已结束",
+  canceled: "已撤销",
+  replaced: "已被替换",
+  stale: "已作废",
+  applied: "已执行"
+}
+
+/** 执行器的订单流水 */
+export interface OrderRow {
+  id: number
+  purpose: "entry" | "stop" | "tp" | "close"
+  leg: number | null
+  side: "BUY" | "SELL"
+  type: string
+  price: string | null
+  trigger_price: string | null
+  quantity: string
+  status: string
+  filled_qty: string
+  avg_price: string | null
+  error: string | null
+  created_at: string
+}
+
+export function getSymbolPlan(symbol: string): Promise<{ plan: Analysis | null, orders: OrderRow[] }> {
+  return http.get(`/trading/symbols/${symbol}/plan`)
 }
 
 export function requestAnalysis(symbol: string): Promise<void> {

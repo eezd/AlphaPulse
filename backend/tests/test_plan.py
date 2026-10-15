@@ -1,8 +1,12 @@
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 
 import pytest
 
-from alphapulse.trading.plan import PlanContext, PlanError, SymbolRules, TradePlan, round_to_step, size_plan, split_take_profits
+from alphapulse.trading.plan import (
+    OrderSpec, PlanContext, PlanError, SymbolRules, TradePlan, desired_orders, diff_orders, next_routine_at, round_to_step,
+    size_plan, split_take_profits,
+)
 
 BTC = SymbolRules(tick_size=Decimal("0.1"), step_size=Decimal("0.0001"), min_notional=Decimal("50"))
 
@@ -137,3 +141,99 @@ def test_action_rules():
                           reevaluate=[{"direction": "above", "price": "81000", "timeframe": "1h", "basis": "x"}])
     assert "已经满足" in errors_of(satisfied, context())
     assert "方向必须一致" in errors_of(long_plan(), context(position_side="short"))
+
+
+# ---------- 有持仓时的新计划 ----------
+
+def managed_plan(**overrides) -> TradePlan:
+    values = {
+        "action": "plan", "summary": "调整", "reasons": "r", "risks": "x", "direction": "long", "confidence": "medium",
+        "stop": "80000", "take_profits": [{"price": "83000", "basis": "a"}, {"price": "84000", "basis": "b"}, {"price": "85000", "basis": "c"}],
+        "invalidation": {"direction": "below", "price": "80500", "timeframe": "4h", "basis": "x"},
+    }
+    return TradePlan.model_validate({**values, **overrides})
+
+
+def holding(**overrides) -> PlanContext:
+    return context(position_side="long", position_qty=Decimal("0.0100"), position_entry=Decimal("81000"), current_stop=Decimal("79500"), has_plan=True, **overrides)
+
+
+def test_managed_plan_does_not_add_and_splits_position():
+    sizing = size_plan(managed_plan(), holding())
+    assert sizing["managed"] is True
+    assert sizing["entries"] == []
+    assert [t["quantity"] for t in sizing["take_profits"]] == ["0.0050", "0.0030", "0.0020"]
+    assert sizing["position_qty"] == "0.0100"
+    assert "entries 须为空" in errors_of(managed_plan(entries=[{"price": "80000", "ratio": "1", "basis": "a"}]), holding())
+
+
+def test_managed_plan_only_tightens_stop():
+    assert "止损只能收紧" in errors_of(managed_plan(stop="79000", invalidation={"direction": "below", "price": "79400", "timeframe": "4h", "basis": "x"}), holding())
+
+
+# ---------- 应有订单 ----------
+
+LONG_SIZING = {
+    "direction": "long", "managed": False, "quantity": "0.0030",
+    "entries": [{"price": "81000.0", "quantity": "0.0012"}, {"price": "80000.0", "quantity": "0.0018"}],
+    "take_profits": [{"price": "83000.0", "ratio": "0.5"}, {"price": "84000.0", "ratio": "0.3"}, {"price": "85000.0", "ratio": "0.2"}],
+}
+ZERO3 = [Decimal(0)] * 3
+
+
+def test_desired_orders_before_fill_places_entries_and_stop_together():
+    orders = desired_orders(LONG_SIZING, entries_open=True, entry_filled=[Decimal(0)] * 2, tp_filled=ZERO3,
+                            position_qty=Decimal(0), stop_price=Decimal("79500"), step_size=Decimal("0.0001"))
+    assert [(o.purpose, o.leg, o.side, o.quantity) for o in orders] == [
+        ("entry", 0, "BUY", Decimal("0.0012")), ("entry", 1, "BUY", Decimal("0.0018")), ("stop", None, "SELL", Decimal("0.0030")),
+    ]
+
+
+def test_desired_orders_partial_fill_splits_take_profits_by_filled():
+    orders = desired_orders(LONG_SIZING, entries_open=True, entry_filled=[Decimal("0.0012"), Decimal("0.0004")], tp_filled=ZERO3,
+                            position_qty=Decimal("0.0016"), stop_price=Decimal("79500"), step_size=Decimal("0.0001"))
+    assert [(o.purpose, o.leg, o.quantity) for o in orders] == [
+        ("entry", 1, Decimal("0.0014")), ("stop", None, Decimal("0.0030")),
+        ("tp", 0, Decimal("0.0008")), ("tp", 1, Decimal("0.0004")), ("tp", 2, Decimal("0.0004")),
+    ]
+
+
+def test_desired_orders_after_tp1_keeps_remaining_targets_only():
+    orders = desired_orders(LONG_SIZING, entries_open=False, entry_filled=[Decimal("0.0012"), Decimal("0.0018")],
+                            tp_filled=[Decimal("0.0015"), Decimal(0), Decimal(0)], position_qty=Decimal("0.0015"),
+                            stop_price=Decimal("81050"), step_size=Decimal("0.0001"))
+    assert [(o.purpose, o.leg, o.quantity, o.trigger_price) for o in orders] == [
+        ("stop", None, Decimal("0.0030"), Decimal("81050")), ("tp", 1, Decimal("0.0009"), None), ("tp", 2, Decimal("0.0006"), None),
+    ]
+
+
+def test_desired_orders_nothing_when_flat_and_entries_closed():
+    assert desired_orders(LONG_SIZING, entries_open=False, entry_filled=[Decimal(0)] * 2, tp_filled=ZERO3,
+                          position_qty=Decimal(0), stop_price=Decimal("79500"), step_size=Decimal("0.0001")) == []
+
+
+def test_diff_orders_matches_by_value():
+    keep = OrderSpec("stop", None, "SELL", "STOP_MARKET", None, Decimal("79500.0"), Decimal("0.0030"))
+    stale = OrderSpec("entry", 0, "BUY", "LIMIT", Decimal("81000"), None, Decimal("0.0012"))
+    wanted = OrderSpec("entry", 0, "BUY", "LIMIT", Decimal("80900"), None, Decimal("0.0012"))
+    cancel, place = diff_orders([OrderSpec("stop", None, "SELL", "STOP_MARKET", None, Decimal("79500"), Decimal("0.003")), wanted],
+                                [(1, keep), (2, stale)])
+    assert cancel == [2]
+    assert place == [wanted]
+
+
+def test_next_routine_at_aligns_to_candle_close():
+    tz8 = timezone(timedelta(hours=8))
+    # 北京 10:20 = UTC 02:20；短线 +45 分钟后的第一个整点 UTC 04:00，再加 1 分钟
+    assert next_routine_at(datetime(2026, 10, 15, 10, 20, tzinfo=tz8), "short") == datetime(2026, 10, 15, 4, 1, tzinfo=UTC)
+    assert next_routine_at(datetime(2026, 10, 15, 3, 1, tzinfo=UTC), "short") == datetime(2026, 10, 15, 4, 1, tzinfo=UTC)
+    # 长线：UTC 04:01 + 3h = 07:01，下一个 4h 收盘 08:00
+    assert next_routine_at(datetime(2026, 10, 15, 4, 1, tzinfo=UTC), "long") == datetime(2026, 10, 15, 8, 1, tzinfo=UTC)
+
+
+def test_step_decimal_never_uses_exponent():
+    from alphapulse.trading.client import step_decimal
+
+    assert str(step_decimal("0.10")) == "0.1"
+    assert str(step_decimal("100")) == "100"
+    assert str(round_to_step(Decimal("12345"), step_decimal("100"), ROUND_FLOOR)) == "12300"

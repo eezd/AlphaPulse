@@ -17,7 +17,7 @@ from alphapulse.api.market import call_binance, client as market_client
 from alphapulse.core.auth import require_admin
 from alphapulse.core.db import get_session
 from alphapulse.core.redis import KEY_PREFIX, redis
-from alphapulse.models import AiProvider, TradingAccount, TradingAnalysis, TradingEvent, TradingSymbol
+from alphapulse.models import AiProvider, TradingAccount, TradingAnalysis, TradingEvent, TradingOrder, TradingSymbol
 from alphapulse.trading.client import OWN_CLIENT_ID, ExchangeError, public_get
 from alphapulse.trading.plan import DAILY_ANALYSIS_LIMIT
 from alphapulse.trading.snapshot import read_snapshot
@@ -30,6 +30,8 @@ SYMBOLS_CACHE_KEY = f"{KEY_PREFIX}trading:symbols"
 SYMBOLS_CACHE_SECONDS = 3600
 # 删除或切换角度前要求快照足够新，否则无法确认没有仓位和挂单
 SNAPSHOT_FRESH_SECONDS = 30
+# 执行器正在管理的计划状态
+LIVE_PLAN_STATUSES = ("pending", "open", "closing")
 
 
 class TodayUsage(BaseModel):
@@ -70,8 +72,10 @@ class SymbolOut(BaseModel):
     added_at: datetime
     analysis_requested_at: datetime | None
     analyzing: bool
-    # 当前计划的状态：pending / open，没有计划为空
+    # 当前计划：pending / open / closing，没有计划为空
+    plan_id: int | None
     plan_status: str | None
+    close_deadline: datetime | None
 
 
 class SymbolIn(BaseModel):
@@ -111,6 +115,28 @@ class AnalysisOut(BaseModel):
 class AnalysisDetail(AnalysisOut):
     text: str | None
     transcript: list | None
+
+
+class OrderOut(BaseModel):
+    id: int
+    purpose: str
+    leg: int | None
+    side: str
+    type: str
+    price: Decimal | None
+    trigger_price: Decimal | None
+    quantity: Decimal
+    status: str
+    filled_qty: Decimal
+    avg_price: Decimal | None
+    error: str | None
+    created_at: datetime
+
+
+class SymbolPlanOut(BaseModel):
+    # 执行器正在管理的计划；没有时为最近一次待采纳的提议
+    plan: AnalysisOut | None
+    orders: list[OrderOut]
 
 
 class EventOut(BaseModel):
@@ -236,14 +262,15 @@ async def list_symbol_options() -> list[SymbolOption]:
 async def list_symbols(session: Annotated[AsyncSession, Depends(get_session)]) -> list[SymbolOut]:
     symbols = (await session.scalars(select(TradingSymbol).order_by(TradingSymbol.added_at))).all()
     analyzing = set((await session.scalars(select(TradingAnalysis.symbol).where(TradingAnalysis.status == "running"))).all())
-    plans = dict((await session.execute(
-        select(TradingAnalysis.symbol, TradingAnalysis.plan_status)
-        .where(TradingAnalysis.plan_status.in_(("pending", "open")), TradingAnalysis.dry_run.is_(False))
-    )).all())
+    plans = {p.symbol: p for p in await session.scalars(
+        select(TradingAnalysis).where(TradingAnalysis.plan_status.in_(LIVE_PLAN_STATUSES)).order_by(TradingAnalysis.id)
+    )}
     return [
         SymbolOut(
             symbol=s.symbol, angle=s.angle, added_at=s.added_at, analysis_requested_at=s.analysis_requested_at,
-            analyzing=s.symbol in analyzing, plan_status=plans.get(s.symbol),
+            analyzing=s.symbol in analyzing, plan_id=plans[s.symbol].id if s.symbol in plans else None,
+            plan_status=plans[s.symbol].plan_status if s.symbol in plans else None,
+            close_deadline=plans[s.symbol].close_deadline if s.symbol in plans else None,
         )
         for s in symbols
     ]
@@ -269,8 +296,7 @@ async def ensure_idle(session: AsyncSession, symbol: str, action: str) -> Tradin
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"{symbol} 不在交易列表中")
     busy = await session.scalar(select(func.count()).where(
         TradingAnalysis.symbol == symbol,
-        or_(TradingAnalysis.status == "running",
-            TradingAnalysis.plan_status.in_(("pending", "open")) & TradingAnalysis.dry_run.is_(False)),
+        or_(TradingAnalysis.status == "running", TradingAnalysis.plan_status.in_(("proposed", *LIVE_PLAN_STATUSES))),
     ))
     if busy:
         raise HTTPException(status.HTTP_409_CONFLICT, f"{symbol} 有进行中的分析或计划，不能{action}")
@@ -354,3 +380,18 @@ async def get_analysis(analysis_id: int, session: Annotated[AsyncSession, Depend
     if analysis is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "分析不存在")
     return AnalysisDetail.model_validate(analysis, from_attributes=True)
+
+
+@router.get("/symbols/{symbol}/plan")
+async def get_symbol_plan(symbol: str, session: Annotated[AsyncSession, Depends(get_session)]) -> SymbolPlanOut:
+    plan = await session.scalar(
+        select(TradingAnalysis).where(TradingAnalysis.symbol == symbol, TradingAnalysis.plan_status.in_(("proposed", *LIVE_PLAN_STATUSES)))
+        .order_by(TradingAnalysis.id.desc()).limit(1)
+    )
+    if plan is None:
+        return SymbolPlanOut(plan=None, orders=[])
+    orders = await session.scalars(select(TradingOrder).where(TradingOrder.analysis_id == plan.id).order_by(TradingOrder.id))
+    return SymbolPlanOut(
+        plan=AnalysisOut.model_validate(plan, from_attributes=True),
+        orders=[OrderOut.model_validate(o, from_attributes=True) for o in orders],
+    )
