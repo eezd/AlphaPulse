@@ -1,3 +1,82 @@
+/* 浅色主题（Stitch「Daylight」稿）：色值只在这里定义，页面里用 Element 变量或 UnoCSS 色板类 */
+:root {
+  --ap-font-sans:
+    "Inter Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --ap-font-mono:
+    "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, Consolas, "PingFang SC", "Microsoft YaHei",
+    monospace;
+
+  --el-font-family: var(--ap-font-sans);
+  --el-border-radius-base: 4px;
+
+  --el-color-primary: #006194;
+  --el-color-success: #16a34a;
+  --el-color-warning: #d97706;
+  --el-color-danger: #dc2626;
+  --el-color-error: #dc2626;
+  --el-color-info: #64748b;
+
+  --el-text-color-primary: #0f172a;
+  --el-text-color-regular: #334155;
+  --el-text-color-secondary: #64748b;
+  --el-text-color-placeholder: #94a3b8;
+  --el-border-color: #e2e8f0;
+  --el-border-color-light: #e2e8f0;
+  --el-border-color-lighter: #f1f5f9;
+  --el-border-color-extra-light: #f8fafc;
+  --el-border-color-dark: #cbd5e1;
+  --el-border-color-darker: #94a3b8;
+  --el-fill-color: #f1f5f9;
+  --el-fill-color-light: #f8fafc;
+  --el-fill-color-lighter: #f8fafc;
+  --el-fill-color-extra-light: #fcfdfe;
+  --el-fill-color-dark: #e2e8f0;
+  --el-fill-color-darker: #cbd5e1;
+  --el-bg-color-page: #f8fafc;
+  --el-box-shadow-lighter: 0 1px 3px 0 rgb(15 23 42 / 3%), 0 1px 2px -1px rgb(15 23 42 / 2%);
+  --el-box-shadow-light: 0 4px 6px -1px rgb(15 23 42 / 5%), 0 2px 4px -2px rgb(15 23 42 / 3%);
+}
+
+/* Element 的深浅档按与白色、黑色的混合比例生成，与它的 SCSS 算法一致 */
+:root {
+  --el-color-primary-light-3: color-mix(in srgb, var(--el-color-primary), white 30%);
+  --el-color-primary-light-5: color-mix(in srgb, var(--el-color-primary), white 50%);
+  --el-color-primary-light-7: color-mix(in srgb, var(--el-color-primary), white 70%);
+  --el-color-primary-light-8: color-mix(in srgb, var(--el-color-primary), white 80%);
+  --el-color-primary-light-9: color-mix(in srgb, var(--el-color-primary), white 90%);
+  --el-color-primary-dark-2: color-mix(in srgb, var(--el-color-primary), black 20%);
+  --el-color-success-light-3: color-mix(in srgb, var(--el-color-success), white 30%);
+  --el-color-success-light-5: color-mix(in srgb, var(--el-color-success), white 50%);
+  --el-color-success-light-7: color-mix(in srgb, var(--el-color-success), white 70%);
+  --el-color-success-light-8: color-mix(in srgb, var(--el-color-success), white 80%);
+  --el-color-success-light-9: color-mix(in srgb, var(--el-color-success), white 90%);
+  --el-color-success-dark-2: color-mix(in srgb, var(--el-color-success), black 20%);
+  --el-color-warning-light-3: color-mix(in srgb, var(--el-color-warning), white 30%);
+  --el-color-warning-light-5: color-mix(in srgb, var(--el-color-warning), white 50%);
+  --el-color-warning-light-7: color-mix(in srgb, var(--el-color-warning), white 70%);
+  --el-color-warning-light-8: color-mix(in srgb, var(--el-color-warning), white 80%);
+  --el-color-warning-light-9: color-mix(in srgb, var(--el-color-warning), white 90%);
+  --el-color-warning-dark-2: color-mix(in srgb, var(--el-color-warning), black 20%);
+  --el-color-danger-light-3: color-mix(in srgb, var(--el-color-danger), white 30%);
+  --el-color-danger-light-5: color-mix(in srgb, var(--el-color-danger), white 50%);
+  --el-color-danger-light-7: color-mix(in srgb, var(--el-color-danger), white 70%);
+  --el-color-danger-light-8: color-mix(in srgb, var(--el-color-danger), white 80%);
+  --el-color-danger-light-9: color-mix(in srgb, var(--el-color-danger), white 90%);
+  --el-color-danger-dark-2: color-mix(in srgb, var(--el-color-danger), black 20%);
+  --el-color-error-light-3: color-mix(in srgb, var(--el-color-error), white 30%);
+  --el-color-error-light-5: color-mix(in srgb, var(--el-color-error), white 50%);
+  --el-color-error-light-7: color-mix(in srgb, var(--el-color-error), white 70%);
+  --el-color-error-light-8: color-mix(in srgb, var(--el-color-error), white 80%);
+  --el-color-error-light-9: color-mix(in srgb, var(--el-color-error), white 90%);
+  --el-color-error-dark-2: color-mix(in srgb, var(--el-color-error), black 20%);
+  --el-color-info-light-3: color-mix(in srgb, var(--el-color-info), white 30%);
+  --el-color-info-light-5: color-mix(in srgb, var(--el-color-info), white 50%);
+  --el-color-info-light-7: color-mix(in srgb, var(--el-color-info), white 70%);
+  --el-color-info-light-8: color-mix(in srgb, var(--el-color-info), white 80%);
+  --el-color-info-light-9: color-mix(in srgb, var(--el-color-info), white 90%);
+  --el-color-info-dark-2: color-mix(in srgb, var(--el-color-info), black 20%);
+}
+
 html,
 body,
 #app {
@@ -6,7 +85,48 @@ body,
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: var(--el-text-color-regular);
+  font-family: var(--ap-font-sans);
+  font-variant-numeric: tabular-nums;
+  background: var(--el-bg-color-page);
+  -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-thumb {
+  border-radius: 4px;
+  background: var(--el-border-color-dark);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--el-border-color-darker);
+}
+
+/* 面板：白底、细边框、8px 圆角，头部是带分隔线的标题条 */
+.el-card {
+  --el-card-border-radius: 8px;
+  --el-card-padding: 12px;
+}
+.el-card.is-never-shadow {
+  box-shadow: var(--el-box-shadow-lighter);
+}
+.el-card__header {
+  padding: 10px 12px;
+  color: var(--el-text-color-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.el-table {
+  --el-table-header-bg-color: var(--el-fill-color-light);
+  --el-table-header-text-color: var(--el-text-color-secondary);
+  --el-table-row-hover-bg-color: var(--el-fill-color-light);
+}
+.el-table th.el-table__cell {
+  font-size: 12px;
+  font-weight: 600;
 }
 
 /* Markdown 渲染（Chat 回复、skill 预览、CONTEXT.md 预览） */
@@ -74,4 +194,8 @@ body {
 .markdown-body td {
   padding: 0.3em 0.6em;
   border: 1px solid var(--el-border-color);
+}
+.markdown-body th {
+  color: var(--el-text-color-primary);
+  background: var(--el-fill-color-light);
 }
