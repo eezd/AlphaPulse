@@ -94,8 +94,11 @@ loadTree()
 </script>
 
 <template>
-  <div class="h-full flex gap-3">
-    <el-card class="w-80 shrink-0" body-class="h-full box-border" shadow="never">
+  <div class="h-full flex gap-4">
+    <el-card class="w-80 flex shrink-0 flex-col" body-class="min-h-0 flex-1" shadow="never">
+      <template #header>
+        Skills
+      </template>
       <SkillTree :nodes="nodes" :selected-id="selectedId" editable @select="select" @changed="loadTree" />
     </el-card>
 
@@ -103,7 +106,7 @@ loadTree()
       <el-empty v-if="!selected" description="在左侧选择或新建一个 skill" />
 
       <template v-else-if="selected.kind === 'folder'">
-        <div class="text-lg font-bold">
+        <div class="text-lg text-slate-900 font-bold">
           📁 {{ selected.path }}
         </div>
         <div class="flex items-center gap-2 text-sm">
@@ -115,7 +118,7 @@ loadTree()
 
       <template v-else>
         <div class="flex flex-wrap items-center gap-3">
-          <span class="text-lg font-bold">📄 {{ selected.path }}</span>
+          <span class="text-lg text-slate-900 font-bold">📄 {{ selected.path }}</span>
           <el-tag v-if="selected.published_version_no === null" type="info">
             未发布
           </el-tag>
@@ -145,9 +148,9 @@ loadTree()
         <div class="min-h-0 flex flex-1 gap-3">
           <textarea
             v-model="content" placeholder="用 Markdown 写下投资经验、判断流程或输出规范"
-            class="box-border flex-1 resize-none border rounded border-solid border-[var(--el-border-color)] p-3 text-sm leading-6 font-mono outline-none focus:border-[var(--el-color-primary)]"
+            class="box-border flex-1 resize-none border border-slate-300 rounded-lg border-solid p-3 text-sm text-slate-800 leading-6 font-mono outline-none focus:border-[var(--el-color-primary)]"
           />
-          <el-scrollbar class="flex-1 border rounded border-solid border-[var(--el-border-color-lighter)]">
+          <el-scrollbar class="flex-1 border border-slate-200 rounded-lg border-solid bg-slate-50/50">
             <!-- markdown-it 已关闭 html，内容中的标签按文本显示 -->
             <div class="markdown-body p-3" v-html="preview" />
           </el-scrollbar>

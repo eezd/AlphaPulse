@@ -127,7 +127,7 @@ function onCollapse(item: TreeItem) {
         <template #default="{ data }">
           <div
             class="group w-full flex items-center gap-1 overflow-hidden rounded pr-1 text-sm"
-            :class="{ 'opacity-50': !data.data.enabled, 'bg-yellow-100': highlightIds?.includes(data.id) }"
+            :class="{ 'opacity-50': !data.data.enabled, 'bg-amber-100': highlightIds?.includes(data.id) }"
           >
             <span>{{ data.data.kind === "folder" ? "📁" : "📄" }}</span>
             <span class="truncate">{{ data.data.name }}</span>

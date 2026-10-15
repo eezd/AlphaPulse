@@ -52,9 +52,9 @@ load()
 </script>
 
 <template>
-  <div class="h-full flex flex-col gap-2">
+  <el-card shadow="never" class="h-full flex flex-col" body-class="min-h-0 flex-1 flex flex-col gap-3">
     <div class="flex items-center gap-2 text-sm">
-      <span class="text-[var(--el-text-color-secondary)]">
+      <span class="text-slate-500">
         跨会话的上下文持久化：每轮都会放进 Chat 的 prompt，Chat 也会用 update_context 更新它。
         {{ current?.created_at ? `当前版本：${formatTime(current.created_at)}（${SOURCE_LABELS[current.source!]}）` : "当前为空" }}
       </span>
@@ -80,11 +80,11 @@ load()
     <div class="min-h-0 flex flex-1 gap-3">
       <textarea
         v-model="content" placeholder="目标、已确认的结论、待办…（Markdown）"
-        class="box-border flex-1 resize-none border rounded border-solid border-[var(--el-border-color)] p-3 text-sm leading-6 font-mono outline-none focus:border-[var(--el-color-primary)]"
+        class="box-border flex-1 resize-none border border-slate-300 rounded-lg border-solid p-3 text-sm text-slate-800 leading-6 font-mono outline-none focus:border-[var(--el-color-primary)]"
       />
-      <el-scrollbar class="flex-1 border rounded border-solid border-[var(--el-border-color-lighter)]">
+      <el-scrollbar class="flex-1 border border-slate-200 rounded-lg border-solid bg-slate-50/50">
         <div class="markdown-body p-3" v-html="preview" />
       </el-scrollbar>
     </div>
-  </div>
+  </el-card>
 </template>

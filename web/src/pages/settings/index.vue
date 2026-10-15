@@ -1,5 +1,6 @@
 <script lang="ts" setup>
 import type { Exchange, Provider, ProviderForm } from "@/apis/settings"
+import { Plus } from "@element-plus/icons-vue"
 import { createProvider, deleteExchange, deleteProvider, EFFORTS, getExchange, listProviders, patchProvider, putExchange, testExchange, testProvider } from "@/apis/settings"
 import { formatTime } from "@/utils/text"
 
@@ -130,65 +131,68 @@ loadExchange()
 </script>
 
 <template>
-  <div class="flex flex-col gap-3">
-    <div class="flex items-center justify-between">
-      <div>
-        <span class="text-lg font-bold">模型配置</span>
-        <span class="ml-3 text-xs text-[var(--el-text-color-secondary)]">通过 Sub2API 等中转接入；API key 加密存储，页面只显示末 4 位</span>
-      </div>
-      <el-button type="primary" @click="openCreate">
-        新增配置
-      </el-button>
-    </div>
-
-    <el-table :data="providers" border>
-      <el-table-column label="名称" min-width="120">
-        <template #default="{ row }">
-          {{ row.name }}
-          <el-tag v-if="row.is_default" size="small" type="success" class="ml-1">
-            默认
-          </el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column label="协议" min-width="200">
-        <template #default="{ row }">
-          {{ PROTOCOL_LABELS[row.protocol as keyof typeof PROTOCOL_LABELS] }}
-        </template>
-      </el-table-column>
-      <el-table-column prop="base_url" label="Base URL" min-width="200" />
-      <el-table-column prop="model" label="模型" min-width="150" />
-      <el-table-column label="思考强度" width="90">
-        <template #default="{ row }">
-          {{ (row as Provider).reasoning_effort ?? "-" }}
-        </template>
-      </el-table-column>
-      <el-table-column label="API Key" width="100">
-        <template #default="{ row }">
-          ****{{ row.api_key_hint }}
-        </template>
-      </el-table-column>
-      <el-table-column label="更新时间" width="130">
-        <template #default="{ row }">
-          {{ formatTime(row.updated_at, "MM-DD HH:mm") }}
-        </template>
-      </el-table-column>
-      <el-table-column label="操作" width="250" fixed="right">
-        <template #default="{ row }">
-          <el-button link type="primary" :loading="testing === row.id" @click="test(row as Provider)">
-            测试连接
+  <div class="flex flex-col gap-4">
+    <el-card shadow="never" body-class="p-0">
+      <template #header>
+        <div class="flex items-center justify-between">
+          <div>
+            模型配置
+            <span class="ml-3 text-xs text-slate-500 font-normal">通过 Sub2API 等中转接入；API key 加密存储，页面只显示末 4 位</span>
+          </div>
+          <el-button type="primary" :icon="Plus" @click="openCreate">
+            新增配置
           </el-button>
-          <el-button link @click="openEdit(row as Provider)">
-            编辑
-          </el-button>
-          <el-button v-if="!row.is_default" link @click="setDefault(row as Provider)">
-            设为默认
-          </el-button>
-          <el-button link type="danger" @click="remove(row as Provider)">
-            删除
-          </el-button>
-        </template>
-      </el-table-column>
-    </el-table>
+        </div>
+      </template>
+      <el-table :data="providers">
+        <el-table-column label="名称" min-width="120">
+          <template #default="{ row }">
+            {{ row.name }}
+            <el-tag v-if="row.is_default" size="small" type="success" class="ml-1">
+              默认
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="协议" min-width="200">
+          <template #default="{ row }">
+            {{ PROTOCOL_LABELS[row.protocol as keyof typeof PROTOCOL_LABELS] }}
+          </template>
+        </el-table-column>
+        <el-table-column prop="base_url" label="Base URL" min-width="200" />
+        <el-table-column prop="model" label="模型" min-width="150" />
+        <el-table-column label="思考强度" width="90">
+          <template #default="{ row }">
+            {{ (row as Provider).reasoning_effort ?? "-" }}
+          </template>
+        </el-table-column>
+        <el-table-column label="API Key" width="100">
+          <template #default="{ row }">
+            ****{{ row.api_key_hint }}
+          </template>
+        </el-table-column>
+        <el-table-column label="更新时间" width="130">
+          <template #default="{ row }">
+            {{ formatTime(row.updated_at, "MM-DD HH:mm") }}
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="250" fixed="right">
+          <template #default="{ row }">
+            <el-button link type="primary" :loading="testing === row.id" @click="test(row as Provider)">
+              测试连接
+            </el-button>
+            <el-button link @click="openEdit(row as Provider)">
+              编辑
+            </el-button>
+            <el-button v-if="!row.is_default" link @click="setDefault(row as Provider)">
+              设为默认
+            </el-button>
+            <el-button link type="danger" @click="remove(row as Provider)">
+              删除
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-card>
 
     <el-dialog v-model="dialogVisible" :title="editingId === null ? '新增模型配置' : '编辑模型配置'" width="560px">
       <el-form :model="form" label-width="100px">
@@ -245,37 +249,41 @@ loadExchange()
       </template>
     </el-dialog>
 
-    <div class="mt-4 flex items-center justify-between">
-      <div>
-        <span class="text-lg font-bold">币安模拟盘</span>
-        <span class="ml-3 text-xs text-[var(--el-text-color-secondary)]">只连接币安模拟盘（demo-fapi.binance.com）；在 demo.binance.com 的 API 管理创建 key，并开启合约交易权限</span>
-      </div>
-      <div>
-        <el-button :disabled="!exchange?.configured" :loading="exchangeTesting" @click="runExchangeTest">
-          测试连接
-        </el-button>
-        <el-button type="primary" :disabled="exchange?.running" @click="openExchangeEdit">
-          {{ exchange?.configured ? "修改 key" : "填写 key" }}
-        </el-button>
-        <el-button v-if="exchange?.configured" type="danger" plain :disabled="exchange.running" @click="removeExchange">
-          删除
-        </el-button>
-      </div>
-    </div>
-    <el-descriptions v-if="exchange" :column="3" border>
-      <el-descriptions-item label="API Key">
-        {{ exchange.configured ? `****${exchange.api_key_hint}` : "未配置" }}
-      </el-descriptions-item>
-      <el-descriptions-item label="状态">
-        <el-tag v-if="exchange.running" type="success" size="small">
-          交易中（停止后才能修改 key）
-        </el-tag>
-        <span v-else>未运行</span>
-      </el-descriptions-item>
-      <el-descriptions-item label="更新时间">
-        {{ exchange.updated_at ? formatTime(exchange.updated_at, "MM-DD HH:mm") : "-" }}
-      </el-descriptions-item>
-    </el-descriptions>
+    <el-card shadow="never">
+      <template #header>
+        <div class="flex items-center justify-between">
+          <div>
+            币安模拟盘
+            <span class="ml-3 text-xs text-slate-500 font-normal">只连接币安模拟盘（demo-fapi.binance.com）；在 demo.binance.com 的 API 管理创建 key，并开启合约交易权限</span>
+          </div>
+          <div>
+            <el-button :disabled="!exchange?.configured" :loading="exchangeTesting" @click="runExchangeTest">
+              测试连接
+            </el-button>
+            <el-button type="primary" :disabled="exchange?.running" @click="openExchangeEdit">
+              {{ exchange?.configured ? "修改 key" : "填写 key" }}
+            </el-button>
+            <el-button v-if="exchange?.configured" type="danger" plain :disabled="exchange.running" @click="removeExchange">
+              删除
+            </el-button>
+          </div>
+        </div>
+      </template>
+      <el-descriptions v-if="exchange" :column="3" border>
+        <el-descriptions-item label="API Key">
+          {{ exchange.configured ? `****${exchange.api_key_hint}` : "未配置" }}
+        </el-descriptions-item>
+        <el-descriptions-item label="状态">
+          <el-tag v-if="exchange.running" type="success" size="small">
+            交易中（停止后才能修改 key）
+          </el-tag>
+          <span v-else>未运行</span>
+        </el-descriptions-item>
+        <el-descriptions-item label="更新时间">
+          {{ exchange.updated_at ? formatTime(exchange.updated_at, "MM-DD HH:mm") : "-" }}
+        </el-descriptions-item>
+      </el-descriptions>
+    </el-card>
 
     <el-dialog v-model="exchangeDialogVisible" title="币安模拟盘 API key" width="560px">
       <el-form :model="exchangeForm" label-width="100px">

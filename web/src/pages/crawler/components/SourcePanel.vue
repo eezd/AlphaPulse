@@ -1,39 +1,29 @@
 <script lang="ts" setup>
 import type { CrawlLog, SourceInfo } from "@/apis/crawler"
 import type { NewsBrief } from "@/apis/news"
+import { CircleCheck, RefreshRight } from "@element-plus/icons-vue"
 import dayjs from "dayjs"
 import { patchSource } from "@/apis/crawler"
 import { listNews } from "@/apis/news"
 import { formatTime } from "@/utils/text"
 
+/** logs 只用来发现「本轮完成」以刷新最新入库；alert 为连续失败达到告警阈值 */
 const props = defineProps<{
   source: SourceInfo
   logs: CrawlLog[]
   restarting: boolean
+  alert: boolean
 }>()
 const emit = defineEmits<{
   restart: []
   changed: []
 }>()
 
-const LEVELS = ["INFO", "WARNING", "ERROR"]
-const levels = ref([...LEVELS])
-const autoScroll = ref(true)
-const logBox = ref<HTMLElement>()
 const latest = ref<NewsBrief[]>([])
 const interval = ref(props.source.interval_seconds)
 
-const visibleLogs = computed(() => props.logs.filter(log => levels.value.includes(log.level) || (log.level === "CRITICAL" && levels.value.includes("ERROR"))))
-
-watch(() => props.logs.length, async () => {
-  if (!autoScroll.value)
-    return
-  await nextTick()
-  logBox.value?.scrollTo({ top: logBox.value.scrollHeight })
-}, { immediate: true })
-
 async function loadLatest() {
-  latest.value = (await listNews({ source: [props.source.code], limit: 15 })).items
+  latest.value = (await listNews({ source: [props.source.code], limit: 5 })).items
 }
 
 // 本来源有新的“本轮完成”日志时刷新最新入库列表
@@ -107,95 +97,121 @@ loadLatest()
 </script>
 
 <template>
-  <div class="h-full flex flex-col gap-3">
-    <el-descriptions :column="4" border size="small">
-      <template #extra>
-        <el-button type="warning" :loading="restarting" @click="emit('restart')">
-          重启该来源
-        </el-button>
-      </template>
-      <el-descriptions-item label="状态">
-        <el-tag :type="statusTag.type" size="small">
-          {{ statusTag.text }}
-        </el-tag>
-        <span v-if="source.process?.pid" class="ml-2 text-xs text-[var(--el-text-color-secondary)]">pid {{ source.process.pid }}</span>
-      </el-descriptions-item>
-      <el-descriptions-item label="上次成功">
-        {{ formatTime(source.last_success_at) }}
-      </el-descriptions-item>
-      <el-descriptions-item label="连续失败">
-        <span :class="{ 'text-red-500 font-bold': source.consecutive_failures > 0 }">{{ source.consecutive_failures }}</span>
-      </el-descriptions-item>
-      <el-descriptions-item label="下次运行">
-        {{ formatTime(source.paused_until && source.paused_until > (source.process?.next_run_at ?? "") ? source.paused_until : source.process?.next_run_at) }}
-      </el-descriptions-item>
-      <el-descriptions-item label="今日新增 / 修订">
-        {{ source.today_new }} / {{ source.today_revised }}
-      </el-descriptions-item>
-      <el-descriptions-item label="累计条目">
-        {{ source.total_items }}
-      </el-descriptions-item>
-      <el-descriptions-item label="启用">
-        <el-switch :model-value="source.enabled" @change="toggleEnabled" />
-      </el-descriptions-item>
-      <el-descriptions-item label="采集间隔">
+  <div
+    class="flex flex-col gap-3 border rounded-lg border-solid p-4 shadow-sm"
+    :class="alert ? 'border-rose-300 bg-rose-50/50' : 'border-slate-200 bg-white'"
+  >
+    <div class="flex items-center gap-2">
+      <span class="text-base text-slate-900 font-bold">{{ source.name }}</span>
+      <el-tag v-if="alert" type="danger" effect="dark" size="small">
+        告警
+      </el-tag>
+      <div class="flex-1" />
+      <el-switch :model-value="source.enabled" @change="toggleEnabled" />
+    </div>
+    <div class="flex items-center gap-2 text-xs">
+      <span class="h-2 w-2 rounded-full" :style="{ background: `var(--el-color-${statusTag.type})` }" />
+      <span class="font-semibold" :style="{ color: `var(--el-color-${statusTag.type})` }">{{ statusTag.text }}</span>
+      <span v-if="source.process?.pid" class="num text-slate-500">PID {{ source.process.pid }}</span>
+    </div>
+
+    <div class="grid grid-cols-2 gap-x-4 gap-y-2 border border-slate-100 rounded-lg border-solid bg-slate-50 p-3 text-xs text-slate-500">
+      <div>
+        上次成功
+        <div class="num text-sm text-slate-900">
+          {{ formatTime(source.last_success_at) }}
+        </div>
+      </div>
+      <div>
+        连续失败
+        <div class="num text-sm" :class="source.consecutive_failures > 0 ? 'text-rose-600 font-bold' : 'text-slate-900'">
+          {{ source.consecutive_failures }} 次
+        </div>
+      </div>
+      <div>
+        下次运行
+        <div class="num text-sm text-[var(--el-color-primary)]">
+          {{ formatTime(source.paused_until && source.paused_until > (source.process?.next_run_at ?? "") ? source.paused_until : source.process?.next_run_at) }}
+        </div>
+      </div>
+      <div>
+        累计条目
+        <div class="num text-sm text-slate-900">
+          {{ source.total_items.toLocaleString() }}
+        </div>
+      </div>
+    </div>
+    <div class="flex justify-between text-xs text-slate-500">
+      <span>今日新增 <b class="num text-[var(--el-color-primary)]">+{{ source.today_new }}</b></span>
+      <span>今日修订 <b class="num text-slate-900">{{ source.today_revised }}</b></span>
+    </div>
+    <div class="flex items-center justify-between border-t border-t-slate-100 border-t-solid pt-3 text-xs text-slate-500">
+      采集间隔
+      <span class="flex items-center gap-1">
         <el-input-number v-model="interval" :min="5" :max="86400" size="small" controls-position="right" class="w-28" @change="saveInterval" />
         秒
-      </el-descriptions-item>
-      <el-descriptions-item label="历史回补" :span="4">
-        <span v-if="!source.supports_history" class="text-xs text-[var(--el-text-color-secondary)]">该来源的列表接口只能翻最近几页，无法回补历史</span>
-        <div v-else class="flex items-center gap-3">
-          <el-date-picker v-model="historyDate" type="date" value-format="YYYY-MM-DD" :clearable="false" size="small" class="!w-36" />
-          <el-button size="small" type="primary" @click="startHistory">
+      </span>
+    </div>
+
+    <div class="border border-slate-200 rounded-lg border-solid bg-slate-50/60 p-3 text-xs text-slate-500">
+      <div class="mb-2 flex items-center justify-between">
+        历史回补
+        <span v-if="source.supports_history" class="num text-[var(--el-color-primary)]">{{ history.percent }}%</span>
+        <span v-else>不可用</span>
+      </div>
+      <template v-if="!source.supports_history">
+        该来源的列表接口只能翻最近几页，无法回补历史
+      </template>
+      <template v-else>
+        <div class="flex items-center gap-2">
+          <el-date-picker v-model="historyDate" type="date" value-format="YYYY-MM-DD" :clearable="false" size="small" class="w-32!" />
+          <el-button size="small" type="primary" plain class="flex-1" @click="startHistory">
             {{ source.history_position ? "继续回补" : "开始回补" }}
           </el-button>
-          <el-button v-if="source.history_target" size="small" @click="cancelHistory">
+          <el-button v-if="source.history_target" size="small" class="ml-0!" @click="cancelHistory">
             取消
           </el-button>
-          <el-progress :percentage="history.percent" :status="history.status" class="w-60" />
-          <span class="text-xs">{{ history.text }}</span>
         </div>
-      </el-descriptions-item>
-      <el-descriptions-item v-if="source.last_error" label="最近错误" :span="4">
-        <span class="whitespace-pre-wrap text-xs text-red-500">{{ source.last_error }}</span>
-      </el-descriptions-item>
-    </el-descriptions>
-
-    <div class="min-h-0 flex flex-1 gap-3">
-      <el-card class="w-2/5 flex flex-col" body-class="min-h-0 flex-1 overflow-auto" shadow="never">
-        <template #header>
-          <span>最新入库</span>
-          <el-link :href="source.list_url" target="_blank" type="primary" class="ml-2">
-            原站
-          </el-link>
-        </template>
-        <div v-for="item in latest" :key="item.id" class="mb-2 text-sm">
-          <span class="mr-2 text-xs text-[var(--el-text-color-secondary)]">{{ formatTime(item.published_at, "MM-DD HH:mm") }}</span>
-          <el-link :href="item.url" target="_blank">
-            {{ item.title || item.excerpt.slice(0, 60) }}
-          </el-link>
+        <el-progress :percentage="history.percent" :status="history.status" :show-text="false" :stroke-width="4" class="mt-2" />
+        <div class="mt-1">
+          {{ history.text }}
         </div>
-      </el-card>
-
-      <el-card class="w-3/5 flex flex-col" body-class="min-h-0 flex-1 flex flex-col" shadow="never">
-        <template #header>
-          <div class="flex items-center gap-3">
-            <span>实时日志</span>
-            <el-checkbox-group v-model="levels" size="small">
-              <el-checkbox-button v-for="level in LEVELS" :key="level" :value="level">
-                {{ level }}
-              </el-checkbox-button>
-            </el-checkbox-group>
-            <el-switch v-model="autoScroll" active-text="自动滚动" size="small" />
-          </div>
-        </template>
-        <div ref="logBox" class="min-h-0 flex-1 overflow-auto rounded bg-[#1e1e1e] p-2 text-xs text-[#d4d4d4] font-mono leading-5">
-          <div v-for="log in visibleLogs" :key="log.id" class="whitespace-pre-wrap break-all">
-            <span class="text-[#808080]">{{ formatTime(log.ts) }}</span>
-            <span :class="{ 'text-yellow-400': log.level === 'WARNING', 'text-red-400': log.level === 'ERROR' || log.level === 'CRITICAL' }" class="mx-2">{{ log.level }}</span>{{ log.message }}
-          </div>
-        </div>
-      </el-card>
+      </template>
     </div>
+
+    <div v-if="source.last_error" class="border border-rose-200 rounded-lg border-solid bg-rose-50 p-2 text-xs">
+      <div class="mb-1 text-rose-700 font-semibold">
+        最近错误
+      </div>
+      <div class="num max-h-24 overflow-auto whitespace-pre-wrap break-all text-rose-800">
+        {{ source.last_error }}
+      </div>
+    </div>
+    <div v-else class="flex items-center gap-1 text-xs text-slate-500">
+      <el-icon class="text-emerald-600">
+        <CircleCheck />
+      </el-icon>
+      最近错误：无
+    </div>
+
+    <div class="border border-slate-200 rounded-lg border-solid p-2 text-xs">
+      <div class="mb-1 flex items-center justify-between text-slate-500">
+        最新入库
+        <el-link :href="source.list_url" target="_blank" type="primary" class="text-xs!">
+          原站链接
+        </el-link>
+      </div>
+      <div v-for="item in latest" :key="item.id" class="truncate leading-6">
+        <span class="num mr-2 text-slate-400">{{ formatTime(item.published_at, "MM-DD HH:mm") }}</span>
+        <a :href="item.url" target="_blank" class="text-slate-700 no-underline hover:text-[var(--el-color-primary)]">{{ item.title || item.excerpt.slice(0, 60) }}</a>
+      </div>
+      <div v-if="!latest.length" class="text-slate-400">
+        暂无
+      </div>
+    </div>
+
+    <el-button :type="alert ? 'danger' : 'default'" :icon="RefreshRight" :loading="restarting" class="mt-auto w-full" @click="emit('restart')">
+      重启该来源
+    </el-button>
   </div>
 </template>

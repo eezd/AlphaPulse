@@ -50,8 +50,8 @@ async function publish(version: SkillVersion) {
       <el-scrollbar class="w-60 shrink-0">
         <div
           v-for="v in versions" :key="v.id"
-          class="mb-1 cursor-pointer border rounded border-solid px-2 py-1 text-sm"
-          :class="v.id === selectedId ? 'border-[var(--el-color-primary)] bg-[var(--el-color-primary-light-9)]' : 'border-[var(--el-border-color-lighter)]'"
+          class="mb-2 cursor-pointer border rounded-lg border-solid px-3 py-2 text-sm"
+          :class="v.id === selectedId ? 'border-[var(--el-color-primary)] bg-[var(--el-color-primary-light-9)]' : 'border-slate-200 hover:border-slate-300'"
           @click="selectedId = v.id"
         >
           <div class="flex items-center gap-1">
@@ -81,11 +81,11 @@ async function publish(version: SkillVersion) {
             发布此版本
           </el-button>
         </div>
-        <el-scrollbar class="min-h-0 flex-1 border rounded border-solid border-[var(--el-border-color-lighter)]">
+        <el-scrollbar class="min-h-0 flex-1 border border-slate-200 rounded-lg border-solid">
           <div class="p-2 text-xs font-mono">
             <div
               v-for="(line, i) in diff" :key="i" class="whitespace-pre-wrap"
-              :class="{ 'bg-green-100': line.type === 'add', 'bg-red-100 line-through': line.type === 'del' }"
+              :class="{ 'bg-emerald-50 text-emerald-900': line.type === 'add', 'bg-rose-50 text-rose-900 line-through': line.type === 'del' }"
             >
               {{ line.type === "add" ? "+ " : line.type === "del" ? "- " : "  " }}{{ line.text }}
             </div>

@@ -189,7 +189,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="market h-full flex flex-col overflow-hidden rounded bg-[#161a1e] text-[#eaecef]">
+  <div class="market h-full flex flex-col overflow-hidden rounded-lg bg-[#161a1e] text-[#eaecef]">
     <!-- 顶栏：交易对与 24h 行情 -->
     <div class="flex flex-wrap items-center gap-6 border-b border-b-solid border-[#2b3139] px-4 py-2">
       <el-select

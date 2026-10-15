@@ -3,6 +3,7 @@ import type { ChatMessage } from "@/apis/chat"
 import type { Effort, Provider } from "@/apis/settings"
 import type { SkillNode } from "@/apis/skills"
 import type { DisplayItem } from "@/pages/chat/components/MessageList.vue"
+import { RefreshLeft } from "@element-plus/icons-vue"
 import { ElNotification } from "element-plus"
 import { getChatSession, resetChat } from "@/apis/chat"
 import { EFFORTS, listProviders } from "@/apis/settings"
@@ -39,11 +40,11 @@ function toItems(list: ChatMessage[]): DisplayItem[] {
   const calls = new Map<string, DisplayItem["toolCalls"][number]>()
   for (const m of list) {
     if (m.role === "user") {
-      items.push({ key: `m${m.id}`, kind: "user", text: m.content.text, toolCalls: [] })
+      items.push({ key: `m${m.id}`, kind: "user", text: m.content.text, toolCalls: [], time: m.created_at })
     } else if (m.role === "assistant") {
       const toolCalls = (m.content.tool_calls ?? []).map((c: any) => ({ ...c, result: null }))
       toolCalls.forEach((c: any) => calls.set(c.id, c))
-      items.push({ key: `m${m.id}`, kind: "assistant", text: m.content.text, toolCalls, stopped: m.content.stopped, error: m.content.error })
+      items.push({ key: `m${m.id}`, kind: "assistant", text: m.content.text, toolCalls, stopped: m.content.stopped, error: m.content.error, time: m.created_at })
     } else {
       const call = calls.get(m.content.tool_call_id)
       if (call)
@@ -214,68 +215,86 @@ loadSkills()
 </script>
 
 <template>
-  <div class="h-full flex flex-col">
-    <el-tabs v-model="activeTab" class="chat-tabs min-h-0 flex flex-1 flex-col">
-      <el-tab-pane label="Chat" name="chat" class="h-full">
-        <div class="h-full flex gap-3">
-          <el-card class="w-72 shrink-0" body-class="h-full box-border flex flex-col gap-2" shadow="never">
-            <div class="flex items-center justify-between text-sm font-bold">
-              Skills
-              <el-button link size="small" @click="router.push('/skills')">
-                去管理
-              </el-button>
-            </div>
-            <div class="text-xs text-[var(--el-text-color-secondary)]">
-              点击查看草稿与已发布版本的差异并发布；黄色为本次 Chat 刚改过的
-            </div>
-            <div class="min-h-0 flex-1">
-              <SkillTree :nodes="skills" :highlight-ids="highlightIds" :selected-id="drawerSkill?.id" @select="openSkill" />
-            </div>
-          </el-card>
+  <div class="h-full flex flex-col gap-3">
+    <el-segmented
+      v-model="activeTab" :options="[{ label: 'Chat', value: 'chat' }, { label: 'CONTEXT.md', value: 'context' }]"
+      class="self-start"
+    />
 
-          <el-card class="min-w-0 flex flex-1 flex-col" body-class="min-h-0 flex-1 flex flex-col gap-3" shadow="never">
-            <div class="flex flex-wrap items-center gap-3">
-              <el-select v-model="providerId" placeholder="选择模型配置" class="w-60" :disabled="streaming">
-                <el-option v-for="p in providers" :key="p.id" :value="p.id" :label="`${p.name}（${p.model}）`" />
-              </el-select>
-              <el-select v-model="effort" class="w-44" :disabled="streaming" clearable :value-on-clear="null" :placeholder="`思考强度：跟随配置（${provider?.reasoning_effort ?? '不设置'}）`">
-                <el-option v-for="e in EFFORTS" :key="e" :value="e" :label="`思考强度：${e}`" />
-              </el-select>
-              <el-tooltip content="下一轮发给模型的 system prompt（含已发布 skills、CONTEXT.md）与历史消息的估算大小" placement="bottom">
-                <span class="text-xs" :class="tokenRatio > 0.8 ? 'text-red-500 font-bold' : 'text-[var(--el-text-color-secondary)]'">
-                  上下文约 {{ estimatedTokens.toLocaleString() }}{{ provider ? ` / ${provider.context_window.toLocaleString()}` : "" }} token
-                </span>
-              </el-tooltip>
-              <el-button class="ml-auto" type="danger" plain :disabled="streaming" @click="resetVisible = true">
-                Reset
-              </el-button>
-            </div>
-
-            <div ref="listBox" class="min-h-0 flex-1 overflow-auto pr-2">
-              <el-empty v-if="items.length === 0" description="提问，例如：长鑫 4F² 架构对三星、海力士有冲击吗？在哪里抄底、止损？" />
-              <MessageList v-else :items="items" />
-            </div>
-
-            <div class="flex items-end gap-2">
-              <el-input
-                v-model="input" type="textarea" :autosize="{ minRows: 2, maxRows: 8 }" resize="none"
-                placeholder="输入问题，Ctrl+Enter 发送" @keydown="onKeydown"
-              />
-              <el-button v-if="streaming" type="warning" @click="stop">
-                停止
-              </el-button>
-              <el-button v-else type="primary" :disabled="!input.trim()" @click="submit">
-                发送
-              </el-button>
-            </div>
-          </el-card>
+    <div v-show="activeTab === 'chat'" class="min-h-0 flex flex-1 gap-4">
+      <el-card class="w-72 flex shrink-0 flex-col" body-class="min-h-0 flex-1 flex flex-col gap-2" shadow="never">
+        <template #header>
+          <div class="flex items-center justify-between">
+            Skills
+            <el-button link type="primary" size="small" @click="router.push('/skills')">
+              去管理
+            </el-button>
+          </div>
+        </template>
+        <div class="text-xs text-slate-500">
+          点击查看草稿与已发布版本的差异并发布；黄色为本次 Chat 刚改过的
         </div>
-      </el-tab-pane>
+        <div class="min-h-0 flex-1">
+          <SkillTree :nodes="skills" :highlight-ids="highlightIds" :selected-id="drawerSkill?.id" @select="openSkill" />
+        </div>
+      </el-card>
 
-      <el-tab-pane label="CONTEXT.md" name="context" class="h-full">
-        <ContextTab ref="contextTab" />
-      </el-tab-pane>
-    </el-tabs>
+      <el-card class="min-w-0 flex flex-1 flex-col" body-class="min-h-0 flex-1 flex flex-col gap-3" shadow="never">
+        <template #header>
+          <div class="flex flex-wrap items-center gap-3 font-normal">
+            <span class="text-xs text-slate-500">模型</span>
+            <el-select v-model="providerId" placeholder="选择模型配置" size="small" class="w-56" :disabled="streaming">
+              <el-option v-for="p in providers" :key="p.id" :value="p.id" :label="`${p.name}（${p.model}）`" />
+            </el-select>
+            <span class="text-xs text-slate-500">思考强度</span>
+            <el-select v-model="effort" size="small" class="w-40" :disabled="streaming" clearable :value-on-clear="null" :placeholder="`跟随配置（${provider?.reasoning_effort ?? '不设置'}）`">
+              <el-option v-for="e in EFFORTS" :key="e" :value="e" :label="e" />
+            </el-select>
+            <div class="flex-1" />
+            <el-tooltip content="下一轮发给模型的 system prompt（含已发布 skills、CONTEXT.md）与历史消息的估算大小" placement="bottom">
+              <div class="w-56 text-xs" :class="tokenRatio > 0.8 ? 'text-rose-600 font-bold' : 'text-slate-500'">
+                <div class="num text-right">
+                  上下文约 {{ estimatedTokens.toLocaleString() }}{{ provider ? ` / ${provider.context_window.toLocaleString()}` : "" }} token
+                </div>
+                <el-progress
+                  :percentage="Math.min(100, tokenRatio * 100)" :show-text="false" :stroke-width="4"
+                  :status="tokenRatio > 0.8 ? 'exception' : undefined" class="mt-1"
+                />
+              </div>
+            </el-tooltip>
+            <el-button type="danger" plain size="small" :icon="RefreshLeft" :disabled="streaming" @click="resetVisible = true">
+              Reset
+            </el-button>
+          </div>
+        </template>
+
+        <div ref="listBox" class="min-h-0 flex-1 overflow-auto pr-2">
+          <el-empty v-if="items.length === 0" description="提问，例如：长鑫 4F² 架构对三星、海力士有冲击吗？在哪里抄底、止损？" />
+          <MessageList v-else :items="items" />
+        </div>
+
+        <div class="chat-input border border-slate-300 rounded-lg border-solid bg-white">
+          <el-input
+            v-model="input" type="textarea" :autosize="{ minRows: 2, maxRows: 8 }" resize="none"
+            placeholder="输入问题，Ctrl+Enter 发送" @keydown="onKeydown"
+          />
+          <div class="flex items-center gap-2 border-t border-t-slate-100 border-t-solid px-3 py-2">
+            <span class="text-xs text-slate-400">Ctrl+Enter 发送</span>
+            <div class="flex-1" />
+            <el-button v-if="streaming" type="warning" @click="stop">
+              停止
+            </el-button>
+            <el-button v-else type="primary" :disabled="!input.trim()" @click="submit">
+              发送
+            </el-button>
+          </div>
+        </div>
+      </el-card>
+    </div>
+
+    <div v-show="activeTab === 'context'" class="min-h-0 flex-1">
+      <ContextTab ref="contextTab" />
+    </div>
 
     <SkillVersionDrawer v-model="drawerVisible" :skill="drawerSkill" @published="onPublished" />
 
@@ -299,8 +318,11 @@ loadSkills()
 </template>
 
 <style scoped>
-.chat-tabs :deep(.el-tabs__content) {
-  flex: 1;
-  min-height: 0;
+.chat-input:focus-within {
+  border-color: var(--el-color-primary);
+}
+.chat-input :deep(.el-textarea__inner) {
+  padding: 10px 12px;
+  box-shadow: none;
 }
 </style>
