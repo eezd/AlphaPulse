@@ -50,14 +50,18 @@ async def data_overview(session: AsyncSession) -> str:
     return "\n".join(lines)
 
 
-async def build_system_prompt(session: AsyncSession) -> str:
-    parts = [BASE_INSTRUCTIONS, "## 数据概况", await data_overview(session)]
+async def skills_section(session: AsyncSession) -> str:
     skills = await published_skills(session)
-    parts.append("## Skills（按优先级从高到低）")
+    parts = ["## Skills（按优先级从高到低）"]
     if skills:
         parts += [f"### 【优先级 {info.node.priority}】{info.path}\n\n{content}" for info, content in skills]
     else:
         parts.append("（暂无已发布的 skill）")
+    return "\n\n".join(parts)
+
+
+async def build_system_prompt(session: AsyncSession) -> str:
+    parts = [BASE_INSTRUCTIONS, "## 数据概况", await data_overview(session), await skills_section(session)]
     context = await current_context(session)
     parts += ["## CONTEXT.md", context.content if context and context.content.strip() else "（空）"]
     return "\n\n".join(parts)

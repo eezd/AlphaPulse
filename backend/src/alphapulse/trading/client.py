@@ -5,6 +5,7 @@
 
 import hashlib
 import hmac
+import re
 import time
 from typing import Any
 from urllib.parse import urlencode
@@ -14,6 +15,8 @@ import httpx
 BASE_URL = "https://demo-fapi.binance.com"
 RECV_WINDOW_MS = 5000
 TIMEOUT_SECONDS = 10
+# 本程序下的单 clientOrderId / clientAlgoId 为 ap{流水 id}；其他（含用户手动下的）不动
+OWN_CLIENT_ID = re.compile(r"^ap\d+$")
 
 
 class ExchangeError(Exception):

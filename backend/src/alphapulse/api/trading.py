@@ -18,8 +18,9 @@ from alphapulse.core.auth import require_admin
 from alphapulse.core.db import get_session
 from alphapulse.core.redis import KEY_PREFIX, redis
 from alphapulse.models import AiProvider, TradingAccount, TradingAnalysis, TradingEvent, TradingSymbol
-from alphapulse.trading.client import ExchangeError, public_get
-from alphapulse.trading.engine import DAILY_ANALYSIS_LIMIT, OWN_CLIENT_ID, STATUS_KEY
+from alphapulse.trading.client import OWN_CLIENT_ID, ExchangeError, public_get
+from alphapulse.trading.plan import DAILY_ANALYSIS_LIMIT
+from alphapulse.trading.snapshot import read_snapshot
 
 router = APIRouter(prefix="/api/trading", tags=["trading"], dependencies=[Depends(require_admin)])
 
@@ -82,6 +83,36 @@ class SymbolPatch(BaseModel):
     angle: Angle
 
 
+class AnalysisOut(BaseModel):
+    id: int
+    symbol: str
+    angle: str
+    reasons: list[str]
+    dry_run: bool
+    status: str
+    action: str | None
+    decision: dict | None
+    sizing: dict | None
+    error: str | None
+    model: str | None
+    reasoning_effort: str | None
+    usage: dict | None
+    started_at: datetime
+    finished_at: datetime | None
+    plan_status: str | None
+    valid_until: datetime | None
+    first_fill_at: datetime | None
+    close_deadline: datetime | None
+    closed_at: datetime | None
+    close_reason: str | None
+    result: dict | None
+
+
+class AnalysisDetail(AnalysisOut):
+    text: str | None
+    transcript: list | None
+
+
 class EventOut(BaseModel):
     id: int
     created_at: datetime
@@ -95,11 +126,6 @@ class EventOut(BaseModel):
 
 async def get_account(session: AsyncSession) -> TradingAccount:
     return await session.get(TradingAccount, 1) or TradingAccount(id=1, running=False)
-
-
-async def read_snapshot() -> dict | None:
-    raw = await redis.get(STATUS_KEY)
-    return json.loads(raw) if raw else None
 
 
 @router.get("/status")
@@ -292,3 +318,39 @@ async def list_events(
     if before:
         query = query.where(TradingEvent.id < before)
     return [EventOut.model_validate(e, from_attributes=True) for e in await session.scalars(query)]
+
+
+@router.post("/symbols/{symbol}/analyze", status_code=status.HTTP_202_ACCEPTED)
+async def request_analysis(symbol: str, session: Annotated[AsyncSession, Depends(get_session)]) -> None:
+    """排队一次手动分析：引擎停止时为试运行，计划只记录、不下单"""
+    s = await session.get(TradingSymbol, symbol)
+    if s is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"{symbol} 不在交易列表中")
+    if (await get_account(session)).capital_usdt is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "还没有设置交易资金")
+    running = await session.scalar(select(func.count()).where(TradingAnalysis.symbol == symbol, TradingAnalysis.status == "running"))
+    if running or s.analysis_requested_at is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, f"{symbol} 已在分析或排队中")
+    s.analysis_requested_at = datetime.now(LOCAL_TZ)
+    s.analysis_reasons = ["手动分析"]
+    await session.commit()
+
+
+@router.get("/analyses")
+async def list_analyses(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    symbol: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=50)] = 10,
+) -> list[AnalysisOut]:
+    query = select(TradingAnalysis).order_by(TradingAnalysis.id.desc()).limit(limit)
+    if symbol:
+        query = query.where(TradingAnalysis.symbol == symbol)
+    return [AnalysisOut.model_validate(a, from_attributes=True) for a in await session.scalars(query)]
+
+
+@router.get("/analyses/{analysis_id}")
+async def get_analysis(analysis_id: int, session: Annotated[AsyncSession, Depends(get_session)]) -> AnalysisDetail:
+    analysis = await session.get(TradingAnalysis, analysis_id)
+    if analysis is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "分析不存在")
+    return AnalysisDetail.model_validate(analysis, from_attributes=True)

@@ -140,3 +140,95 @@ export function deleteSymbol(symbol: string): Promise<void> {
 export function listEvents(params: { symbol?: string, before?: number, limit?: number }): Promise<TradingEvent[]> {
   return http.get("/trading/events", { params })
 }
+
+export interface PlanCondition {
+  direction: "above" | "below"
+  price: string
+  timeframe: "mark" | "1m" | "15m" | "1h" | "4h"
+  basis: string
+}
+
+/** submit_trade_plan 的参数原样保存；数值为字符串 */
+export interface TradeDecision {
+  action: "plan" | "keep" | "exit" | "wait"
+  summary: string
+  reasons: string
+  risks: string
+  reevaluate: PlanCondition[]
+  direction: "long" | "short" | null
+  confidence: "high" | "medium" | "low" | null
+  entries: { price: string, ratio: string, basis: string }[] | null
+  stop: string | null
+  stop_basis: string | null
+  take_profits: { price: string, basis: string }[] | null
+  entry_valid_hours: string | null
+  max_hold_hours: string | null
+  invalidation: PlanCondition | null
+}
+
+/** 程序按交易资金算出的数量和风险 */
+export interface Sizing {
+  direction: "long" | "short"
+  entries: { price: string, ratio: string, quantity: string, notional: string }[]
+  stop: string
+  take_profits: { price: string, ratio: string, quantity: string }[]
+  average_price: string
+  quantity: string
+  notional: string
+  capital: string
+  leverage: string
+  risk_amount: string
+  risk_at_stop: string
+  risk_pct: string
+  capped_by_leverage: boolean
+  reward_risk: string
+  reward_risk_first_only: string
+}
+
+export interface Analysis {
+  id: number
+  symbol: string
+  angle: Angle
+  reasons: string[]
+  dry_run: boolean
+  status: "running" | "done" | "failed"
+  action: TradeDecision["action"] | null
+  decision: TradeDecision | null
+  sizing: Sizing | null
+  error: string | null
+  model: string | null
+  reasoning_effort: string | null
+  usage: { input_tokens: number, output_tokens: number } | null
+  started_at: string
+  finished_at: string | null
+  plan_status: "pending" | "open" | "closed" | "canceled" | "replaced" | null
+  valid_until: string | null
+  first_fill_at: string | null
+  close_deadline: string | null
+  closed_at: string | null
+  close_reason: string | null
+  result: Record<string, unknown> | null
+}
+
+/** 与协议无关的消息格式，同 Chat */
+export type TranscriptMessage
+  = | { role: "user", text: string }
+    | { role: "assistant", text: string, tool_calls: { id: string, name: string, arguments: Record<string, unknown> }[] }
+    | { role: "tool", tool_call_id: string, name: string, result: string }
+
+export interface AnalysisDetail extends Analysis {
+  text: string | null
+  transcript: TranscriptMessage[] | null
+}
+
+export function requestAnalysis(symbol: string): Promise<void> {
+  return http.post(`/trading/symbols/${symbol}/analyze`)
+}
+
+export function listAnalyses(params: { symbol?: string, limit?: number }): Promise<Analysis[]> {
+  return http.get("/trading/analyses", { params })
+}
+
+export function getAnalysis(id: number): Promise<AnalysisDetail> {
+  return http.get(`/trading/analyses/${id}`)
+}

@@ -1,11 +1,13 @@
 <script lang="ts" setup>
 import type { Effort, Provider } from "@/apis/settings"
-import type { Angle, SnapshotPosition, TradingEvent, TradingStatus, TradingSymbol } from "@/apis/trading"
+import type { Analysis, Angle, SnapshotPosition, TradingEvent, TradingStatus, TradingSymbol } from "@/apis/trading"
 import { EFFORTS, listProviders } from "@/apis/settings"
-import { ANGLE_LABELS, deleteSymbol, getStatus, isOwnOrder, listEvents, listSymbols, patchConfig, patchSymbol, startTrading, stopTrading } from "@/apis/trading"
+import { ANGLE_LABELS, deleteSymbol, getStatus, isOwnOrder, listAnalyses, listEvents, listSymbols, patchConfig, patchSymbol, requestAnalysis, startTrading, stopTrading } from "@/apis/trading"
 import { usePersisted } from "@/utils/storage"
 import { formatTime } from "@/utils/text"
 import AddSymbolDialog from "./components/AddSymbolDialog.vue"
+import AnalysisDrawer from "./components/AnalysisDrawer.vue"
+import PlanCard from "./components/PlanCard.vue"
 
 const STATUS_REFRESH_MS = 3000
 const EVENTS_PAGE = 50
@@ -20,6 +22,10 @@ const events = ref<TradingEvent[]>([])
 const eventsExhausted = ref(false)
 const addVisible = ref(false)
 const toggling = ref(false)
+const latestAnalysis = ref<Analysis | null>(null)
+const requesting = ref(false)
+const drawerVisible = ref(false)
+const drawerAnalysisId = ref<number | null>(null)
 
 const snapshot = computed(() => status.value?.snapshot ?? null)
 const account = computed(() => snapshot.value?.account ?? null)
@@ -86,6 +92,30 @@ async function refresh() {
   [status.value, symbols.value] = await Promise.all([getStatus(), listSymbols()])
   if (!current.value && symbols.value.length)
     selected.value = symbols.value[0].symbol
+  await refreshAnalysis()
+}
+
+async function refreshAnalysis() {
+  const symbol = selected.value
+  const latest = symbol ? (await listAnalyses({ symbol, limit: 1 }))[0] ?? null : null
+  if (symbol === selected.value)
+    latestAnalysis.value = latest
+}
+
+async function analyze() {
+  requesting.value = true
+  try {
+    await requestAnalysis(selected.value)
+    ElMessage.success(status.value?.running ? "已排队分析" : "已排队试运行分析：计划只记录，不下单")
+    await refresh()
+  } finally {
+    requesting.value = false
+  }
+}
+
+function openAnalysis(id: number) {
+  drawerAnalysisId.value = id
+  drawerVisible.value = true
 }
 
 /** 拉取最新一页，与已加载的合并（保留已翻页加载的旧事件） */
@@ -113,7 +143,9 @@ async function loadMoreEvents() {
 
 watch(selected, () => {
   events.value = []
+  latestAnalysis.value = null
   refreshEvents()
+  refreshAnalysis()
 })
 
 async function toggleRunning() {
@@ -355,15 +387,10 @@ onBeforeUnmount(() => clearInterval(timer))
       <!-- 主区域：当前计划、挂单、时间线 -->
       <el-scrollbar class="flex-1">
         <div class="flex flex-col gap-3 pr-2">
-          <div v-if="current" class="border border-[var(--el-border-color)] rounded border-solid p-3">
-            <div class="mb-2 font-bold">
-              {{ current.symbol }} 当前计划
-              <span class="ml-2 text-xs text-[var(--el-text-color-secondary)] font-normal">{{ ANGLE_LABELS[current.angle] }}</span>
-            </div>
-            <div class="text-sm text-[var(--el-text-color-secondary)]">
-              暂无计划
-            </div>
-          </div>
+          <PlanCard
+            v-if="current" :symbol="current" :analysis="latestAnalysis" :requesting="requesting"
+            @analyze="analyze" @detail="openAnalysis"
+          />
 
           <div v-if="current">
             <div class="mb-2 font-bold">
@@ -415,6 +442,9 @@ onBeforeUnmount(() => clearInterval(timer))
                   {{ e.symbol ?? "账户" }}
                 </el-tag>
                 <span :class="e.level === 'error' ? 'text-[var(--el-color-danger)]' : ''">{{ e.message }}</span>
+                <el-link v-if="e.analysis_id && e.kind !== 'analysis_started'" type="primary" underline="never" class="ml-2" @click="openAnalysis(e.analysis_id)">
+                  查看分析
+                </el-link>
               </el-timeline-item>
             </el-timeline>
             <el-empty v-else description="还没有事件" :image-size="60" />
@@ -427,6 +457,7 @@ onBeforeUnmount(() => clearInterval(timer))
     </div>
 
     <AddSymbolDialog v-model="addVisible" @added="onAdded" />
+    <AnalysisDrawer v-model="drawerVisible" :analysis-id="drawerAnalysisId" />
   </div>
 </template>
 

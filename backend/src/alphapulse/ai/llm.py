@@ -31,6 +31,8 @@ MAX_RETRIES = 2
 # 这些都由这里再重试，且只在还没有输出内容时重试
 STREAM_RETRIES = 3
 STREAM_RETRY_DELAY_SECONDS = 2
+# 输出被截断时回给模型的工具结果：参数不完整，不能执行
+TRUNCATED_RESULT = json.dumps({"error": "输出达到最大输出上限被截断，工具参数不完整，未执行。请精简内容后重新调用"}, ensure_ascii=False)
 
 logger = logging.getLogger("alphapulse.ai.llm")
 

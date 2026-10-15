@@ -27,7 +27,6 @@ MAX_TOOL_ROUNDS = 8
 # 发给前端展示的工具结果长度
 TOOL_PREVIEW_CHARS = 2000
 STOPPED_RESULT = json.dumps({"error": "用户已停止生成，工具未执行"}, ensure_ascii=False)
-TRUNCATED_RESULT = json.dumps({"error": "输出达到最大输出上限被截断，工具参数不完整，未执行。请精简内容后重新调用"}, ensure_ascii=False)
 
 # api 只有一个进程：同一时间只允许一轮生成，Reset 也要等生成结束
 generating = asyncio.Lock()
@@ -195,7 +194,7 @@ async def send_message(body: SendIn) -> AsyncIterator[ServerSentEvent]:
                     call = pending[0]
                     yield event("tool_call", {"id": call["id"], "name": call["name"], "arguments": call["arguments"]})
                     # 截断时不执行，把原因告诉模型，让它精简后重试
-                    outcome = ToolOutcome(TRUNCATED_RESULT) if completion.truncated else await run_tool(call["name"], call["arguments"])
+                    outcome = ToolOutcome(llm.TRUNCATED_RESULT) if completion.truncated else await run_tool(call["name"], call["arguments"])
                     result = {"tool_call_id": call["id"], "name": call["name"], "result": outcome.result}
                     await save_messages(ChatMessage(session_id=current.id, role="tool", content=result))
                     pending.pop(0)
