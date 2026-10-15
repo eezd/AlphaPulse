@@ -24,6 +24,10 @@ services:
     <<: *backend
     command: [python, -m, alphapulse.market.worker]
 
+  trader:
+    <<: *backend
+    command: [python, -m, alphapulse.trading.engine]
+
   web:
     build:
       context: ../web

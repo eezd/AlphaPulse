@@ -36,6 +36,18 @@ class ExchangeError(Exception):
         return f"币安返回 {self.status}（{self.code}）：{self.message}"
 
 
+async def public_get(path: str, params: dict[str, Any] | None = None) -> Any:
+    """模拟盘公开接口（exchangeInfo 等），不需要 key"""
+    async with httpx.AsyncClient(base_url=BASE_URL, timeout=TIMEOUT_SECONDS) as http:
+        try:
+            resp = await http.get(path, params=params)
+        except httpx.TransportError as e:
+            raise ExchangeError(None, None, f"无法连接币安模拟盘：{e!r}") from e
+    if resp.status_code >= 400:
+        raise ExchangeError(resp.status_code, None, resp.text[:200])
+    return resp.json()
+
+
 class DemoClient:
     def __init__(self, api_key: str, api_secret: str) -> None:
         self.secret = api_secret.encode()

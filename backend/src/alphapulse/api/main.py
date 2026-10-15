@@ -2,7 +2,7 @@ from fastapi import Depends, FastAPI
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse
 
-from alphapulse.api import auth, chat, crawler, market, news, settings, skills
+from alphapulse.api import auth, chat, crawler, market, news, settings, skills, trading
 from alphapulse.core.auth import require_admin
 
 # 关闭默认文档路由，改为登录后才能访问
@@ -15,6 +15,7 @@ app.include_router(market.ws_router)
 app.include_router(settings.router)
 app.include_router(skills.router)
 app.include_router(chat.router)
+app.include_router(trading.router)
 
 
 @app.get("/api/health", include_in_schema=False)
