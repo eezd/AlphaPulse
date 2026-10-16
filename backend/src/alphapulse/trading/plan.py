@@ -93,10 +93,8 @@ class SymbolRules:
 @dataclass
 class PlanContext:
     mark_price: Decimal
-    # min(设定的交易资金, 账户权益)
+    # 该币的 min(交易资金, 账户权益)
     capital: Decimal
-    # 交易列表中其他币的持仓名义价值合计
-    other_notional: Decimal
     rules: SymbolRules
     # 最近已收盘 5m K 线的 ATR14，用于计算止损
     atr: Decimal
@@ -154,9 +152,8 @@ def setup_stop(direction: Direction, entry: Decimal, far_edge: Decimal, atr_valu
     return round_to_step(max(far_edge + STOP_ATR_FACTOR * atr_value, entry + MIN_STOP_ATR * atr_value), tick, ROUND_CEILING)
 
 
-def size_entry(direction: Direction, price: Decimal, stop: Decimal, *, capital: Decimal, other_notional: Decimal,
-               confidence: str, rules: SymbolRules) -> dict:
-    """按入场价和止损算数量：单笔风险上限与全账户杠杆取小。止损离入场价太远、方向不对或数量不足时抛 PlanError"""
+def size_entry(direction: Direction, price: Decimal, stop: Decimal, *, capital: Decimal, confidence: str, rules: SymbolRules) -> dict:
+    """按入场价和止损算数量：单笔风险上限与该币资金的杠杆上限取小。止损离入场价太远、方向不对或数量不足时抛 PlanError"""
     sign = 1 if direction == "long" else -1
     stop_pct = sign * (price - stop) / price
     if stop_pct <= 0:
@@ -165,9 +162,7 @@ def size_entry(direction: Direction, price: Decimal, stop: Decimal, *, capital: 
         raise PlanError([f"止损 {stop} 距入场价 {price} {stop_pct * 100:.2f}%，超过 {MAX_STOP_PCT * 100:.0f}%"])
     unit_loss = abs(price - stop) + (price + stop) * TAKER_FEE_RATE
     risk_amount = capital * RISK_PCT * (LOW_CONFIDENCE_FACTOR if confidence == "low" else 1)
-    max_notional = capital * MAX_LEVERAGE - other_notional
-    if max_notional <= 0:
-        raise PlanError([f"交易列表其他币的名义仓位 {other_notional:.2f} 已达到 {MAX_LEVERAGE} 倍交易资金，不能开新仓"])
+    max_notional = capital * MAX_LEVERAGE
     by_risk = risk_amount / unit_loss
     by_leverage = max_notional / price
     quantity = round_to_step(min(by_risk, by_leverage), rules.step_size, ROUND_FLOOR)
@@ -246,8 +241,7 @@ def check_setup(plan: TradePlan, ctx: PlanContext) -> dict:
         raise PlanError(errors)
     stop = setup_stop(direction, entry, setup.zone_low if long else setup.zone_high, ctx.atr, rules.tick_size)
     try:
-        sizing = size_entry(direction, entry, stop, capital=ctx.capital, other_notional=ctx.other_notional,
-                            confidence=plan.confidence, rules=rules)
+        sizing = size_entry(direction, entry, stop, capital=ctx.capital, confidence=plan.confidence, rules=rules)
     except PlanError as e:
         raise PlanError([f"止损 {stop}（区间{'下沿' if long else '上沿'}外 {STOP_ATR_FACTOR}×ATR(5m)，且距挂单价至少 "
                          f"{MIN_STOP_ATR}×ATR(5m)，ATR={ctx.atr.quantize(rules.tick_size)}）：{e}。"

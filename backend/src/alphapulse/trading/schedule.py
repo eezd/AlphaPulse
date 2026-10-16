@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from alphapulse.ai.tools import LOCAL_TZ
 from alphapulse.core.db import SessionLocal
-from alphapulse.models import TradingAccount, TradingAnalysis, TradingEvent, TradingSymbol
+from alphapulse.models import TradingAnalysis, TradingEvent, TradingSymbol
 from alphapulse.trading.plan import DAILY_ANALYSIS_LIMIT, MIN_ANALYSIS_GAP, next_routine_at
 
 # 自动分析失败后的重试：间隔、连续失败上限
@@ -29,9 +29,8 @@ async def daily_limit_reached(session: AsyncSession) -> bool:
 
 async def request_analysis(session: AsyncSession, symbol: str, reason: str) -> None:
     """排队一次自动分析：多个原因合并；距上次分析不足最短间隔时顺延。调用方负责 commit"""
-    account = await session.get(TradingAccount, 1)
     target = await session.get(TradingSymbol, symbol)
-    if account is None or not account.running or target is None or await daily_limit_reached(session):
+    if target is None or not target.running or await daily_limit_reached(session):
         return
     now = datetime.now(UTC)
     last_started = await session.scalar(select(func.max(TradingAnalysis.started_at)).where(TradingAnalysis.symbol == symbol))
@@ -43,13 +42,10 @@ async def request_analysis(session: AsyncSession, symbol: str, reason: str) -> N
 
 
 async def routine_requests() -> None:
-    """交易中：到例行时间的币排队例行分析；自动分析失败的隔一段时间重试"""
+    """交易中的币：到例行时间的排队例行分析；自动分析失败的隔一段时间重试"""
     async with SessionLocal() as session:
-        account = await session.get(TradingAccount, 1)
-        if account is None or not account.running:
-            return
         now = datetime.now(UTC)
-        for target in (await session.scalars(select(TradingSymbol))).all():
+        for target in (await session.scalars(select(TradingSymbol).where(TradingSymbol.running))).all():
             if target.analysis_requested_at is not None:
                 continue
             recent = (await session.scalars(

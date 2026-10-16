@@ -599,7 +599,7 @@ class Executor:
             for symbol in symbols:
                 try:
                     manual_action = await redis.getdel(MANUAL_ACTION_KEY.format(symbol.symbol))
-                    await self.reconcile(session, client, symbol, account.running, positions.get(symbol.symbol), manual_action)
+                    await self.reconcile(session, client, symbol, symbol.running, positions.get(symbol.symbol), manual_action)
                 except ExchangeError as e:
                     await session.rollback()
                     await self.report(session, symbol.symbol, f"对账失败：{e}")

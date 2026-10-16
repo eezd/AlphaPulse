@@ -41,7 +41,7 @@ def bars_until(hhmm: str) -> list[Bar]:
 
 def context(**overrides) -> PlanContext:
     values = {
-        "mark_price": Decimal("81000"), "capital": Decimal("1000"), "other_notional": Decimal("0"), "rules": BTC,
+        "mark_price": Decimal("81000"), "capital": Decimal("1000"), "rules": BTC,
         "atr": Decimal("100"), "has_plan": False, "position_side": None,
     }
     return PlanContext(**{**values, **overrides})
@@ -84,7 +84,7 @@ def test_atr_and_stop_from_example():
     # 做多：支撑区 80200–80700 内挂 80500；止损 80200 − 0.5 × 302.97 = 80048.51 → 向下取整 80048.5，距挂单价 0.56%
     stop = setup_stop("long", Decimal("80500"), Decimal("80200"), value, BTC.tick_size)
     assert stop == Decimal("80048.5")
-    entry = size_entry("long", Decimal("80500"), stop, capital=Decimal("1000"), other_notional=Decimal("0"), confidence="medium", rules=BTC)
+    entry = size_entry("long", Decimal("80500"), stop, capital=Decimal("1000"), confidence="medium", rules=BTC)
     assert entry["stop_pct"] == "0.56"
     # 10 ÷ (451.5 + (80500 + 80048.5) × 0.0004 = 515.72) = 0.01939… → 0.0193
     assert entry["quantity"] == "0.0193"
@@ -101,15 +101,15 @@ def test_stop_keeps_one_atr_from_entry():
 
 def test_size_entry_rejects_far_stop_and_halves_low_confidence():
     with pytest.raises(PlanError, match="超过 1%"):
-        size_entry("long", Decimal("80000"), Decimal("79100"), capital=Decimal("1000"), other_notional=Decimal("0"), confidence="high", rules=BTC)
+        size_entry("long", Decimal("80000"), Decimal("79100"), capital=Decimal("1000"), confidence="high", rules=BTC)
     with pytest.raises(PlanError, match="亏损一侧"):
-        size_entry("short", Decimal("80000"), Decimal("79900"), capital=Decimal("1000"), other_notional=Decimal("0"), confidence="high", rules=BTC)
-    medium = size_entry("long", Decimal("80000"), Decimal("79600"), capital=Decimal("1000"), other_notional=Decimal("0"), confidence="medium", rules=BTC)
-    low = size_entry("long", Decimal("80000"), Decimal("79600"), capital=Decimal("1000"), other_notional=Decimal("0"), confidence="low", rules=BTC)
+        size_entry("short", Decimal("80000"), Decimal("79900"), capital=Decimal("1000"), confidence="high", rules=BTC)
+    medium = size_entry("long", Decimal("80000"), Decimal("79600"), capital=Decimal("1000"), confidence="medium", rules=BTC)
+    low = size_entry("long", Decimal("80000"), Decimal("79600"), capital=Decimal("1000"), confidence="low", rules=BTC)
     assert (medium["risk_amount"], low["risk_amount"]) == ("10.00", "5.00")
-    # 止损很近时按 3 倍杠杆封顶：3000 − 其他币 1000 = 2000 ÷ 80000 = 0.025
-    capped = size_entry("long", Decimal("80000"), Decimal("79990"), capital=Decimal("1000"), other_notional=Decimal("1000"), confidence="high", rules=BTC)
-    assert (capped["quantity"], capped["capped_by_leverage"]) == ("0.0250", True)
+    # 止损很近时按该币资金的 3 倍杠杆封顶：3000 ÷ 80000 = 0.0375
+    capped = size_entry("long", Decimal("80000"), Decimal("79990"), capital=Decimal("1000"), confidence="high", rules=BTC)
+    assert (capped["quantity"], capped["capped_by_leverage"]) == ("0.0375", True)
 
 
 def test_take_profit_ladders():

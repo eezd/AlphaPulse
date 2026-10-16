@@ -67,6 +67,7 @@ export function testProvider(id: number): Promise<TestResult> {
 export interface Exchange {
   configured: boolean
   api_key_hint: string | null
+  /** 是否有币种在交易：交易中不能修改 key */
   running: boolean
   updated_at: string | null
 }

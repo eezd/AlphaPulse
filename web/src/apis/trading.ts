@@ -54,12 +54,6 @@ export interface Snapshot {
 
 export interface TradingStatus {
   configured: boolean
-  running: boolean
-  running_changed_at: string | null
-  /** 设定的交易资金，十进制字符串；未设置时不能开始交易 */
-  capital_usdt: string | null
-  /** 实际用于仓位计算的资金：min(交易资金, 账户权益) */
-  effective_capital: string | null
   provider_id: number | null
   reasoning_effort: Effort | null
   /** trader 进程离线时为空 */
@@ -72,6 +66,13 @@ export interface TradingSymbol {
   added_at: string
   analysis_requested_at: string | null
   analyzing: boolean
+  /** 该币是否在交易；停止时分析为试运行，不挂新的入场单 */
+  running: boolean
+  running_changed_at: string | null
+  /** 该币的交易资金，十进制字符串；未设置时不能开始交易 */
+  capital_usdt: string | null
+  /** 实际用于仓位计算的资金：min(交易资金, 账户权益) */
+  effective_capital: string | null
   /** 执行器正在管理的计划 */
   plan_id: number | null
   plan_status: "pending" | "open" | "closing" | null
@@ -103,15 +104,20 @@ export function getStatus(): Promise<TradingStatus> {
   return http.get("/trading/status")
 }
 
-export function startTrading(): Promise<TradingStatus> {
-  return http.post("/trading/start")
+export function startTrading(symbol: string): Promise<void> {
+  return http.post(`/trading/symbols/${symbol}/start`)
 }
 
-export function stopTrading(): Promise<TradingStatus> {
-  return http.post("/trading/stop")
+export function stopTrading(symbol: string): Promise<void> {
+  return http.post(`/trading/symbols/${symbol}/stop`)
 }
 
-export function patchConfig(body: { capital_usdt?: string | null, provider_id?: number | null, reasoning_effort?: Effort | null }): Promise<TradingStatus> {
+/** 设置该币的交易资金：各币合计不超过账户权益 */
+export function patchSymbol(symbol: string, body: { capital_usdt: string | null }): Promise<void> {
+  return http.patch(`/trading/symbols/${symbol}`, body)
+}
+
+export function patchConfig(body: { provider_id?: number | null, reasoning_effort?: Effort | null }): Promise<TradingStatus> {
   return http.patch("/trading/config", body)
 }
 
@@ -321,7 +327,7 @@ export function requestAnalysis(symbol: string): Promise<void> {
   return http.post(`/trading/symbols/${symbol}/analyze`)
 }
 
-/** 一键平仓（同时停止行情交易）、清除挂单：由执行器在几秒内执行，结果写入时间线 */
+/** 一键平仓（同时停止该币的行情交易）、清除挂单：由执行器在几秒内执行，结果写入时间线 */
 export function manualAction(symbol: string, action: "close" | "cancel"): Promise<void> {
   return http.post(`/trading/symbols/${symbol}/manual/${action}`)
 }

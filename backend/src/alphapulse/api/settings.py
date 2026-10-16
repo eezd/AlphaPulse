@@ -6,7 +6,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, HttpUrl, StringConstraints
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,7 +14,7 @@ from alphapulse.ai import llm
 from alphapulse.core.auth import require_admin
 from alphapulse.core.crypto import decrypt, encrypt
 from alphapulse.core.db import get_session
-from alphapulse.models import AiProvider, TradingAccount
+from alphapulse.models import AiProvider, TradingAccount, TradingSymbol
 from alphapulse.trading.client import DemoClient, ExchangeError
 
 router = APIRouter(prefix="/api/settings", tags=["settings"], dependencies=[Depends(require_admin)])
@@ -186,25 +186,29 @@ class ExchangeTestResult(BaseModel):
     error: str | None = None
 
 
-def exchange_out(account: TradingAccount | None) -> ExchangeOut:
+async def any_running(session: AsyncSession) -> bool:
+    return bool(await session.scalar(select(func.count()).where(TradingSymbol.running)))
+
+
+async def exchange_out(session: AsyncSession, account: TradingAccount | None) -> ExchangeOut:
     if account is None:
         return ExchangeOut(configured=False, api_key_hint=None, running=False, updated_at=None)
     return ExchangeOut(
         configured=account.api_key_encrypted is not None, api_key_hint=account.api_key_hint,
-        running=account.running, updated_at=account.updated_at,
+        running=await any_running(session), updated_at=account.updated_at,
     )
 
 
 async def editable_account(session: AsyncSession) -> TradingAccount:
     account = await session.get(TradingAccount, 1)
-    if account is not None and account.running:
-        raise HTTPException(status.HTTP_409_CONFLICT, "模拟盘正在交易，请先停止再修改 key")
+    if await any_running(session):
+        raise HTTPException(status.HTTP_409_CONFLICT, "有币种正在交易，请先全部停止再修改 key")
     return account or TradingAccount(id=1)
 
 
 @router.get("/exchange")
 async def get_exchange(session: Annotated[AsyncSession, Depends(get_session)]) -> ExchangeOut:
-    return exchange_out(await session.get(TradingAccount, 1))
+    return await exchange_out(session, await session.get(TradingAccount, 1))
 
 
 @router.put("/exchange")
@@ -216,7 +220,7 @@ async def put_exchange(body: ExchangeIn, session: Annotated[AsyncSession, Depend
     session.add(account)
     await session.commit()
     await session.refresh(account)
-    return exchange_out(account)
+    return await exchange_out(session, account)
 
 
 @router.delete("/exchange")
@@ -226,7 +230,7 @@ async def delete_exchange(session: Annotated[AsyncSession, Depends(get_session)]
     session.add(account)
     await session.commit()
     await session.refresh(account)
-    return exchange_out(account)
+    return await exchange_out(session, account)
 
 
 @router.post("/exchange/test")

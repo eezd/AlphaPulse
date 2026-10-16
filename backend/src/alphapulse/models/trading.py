@@ -9,7 +9,7 @@ from alphapulse.core.db import Base
 
 
 class TradingAccount(Base):
-    """币安模拟盘账户：单行（id=1）。key 只以密文存储；running 是引擎启停的唯一来源"""
+    """币安模拟盘账户：单行（id=1）。key 只以密文存储；启停和交易资金按币种设置，见 TradingSymbol"""
 
     __tablename__ = "trading_account"
     __table_args__ = (CheckConstraint("id = 1", name="trading_account_single_row"),)
@@ -18,10 +18,6 @@ class TradingAccount(Base):
     api_key_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary)
     api_secret_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary)
     api_key_hint: Mapped[str | None] = mapped_column(String(8))
-    running: Mapped[bool] = mapped_column(Boolean, default=False)
-    running_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # 交易资金：仓位计算按 min(交易资金, 账户权益)，不动用账户的全部余额；未设置时不能开始交易
-    capital_usdt: Mapped[Decimal | None] = mapped_column(Numeric)
     # 交易分析用的模型配置；为空时用默认配置
     provider_id: Mapped[int | None] = mapped_column(ForeignKey("ai_providers.id", ondelete="SET NULL"))
     reasoning_effort: Mapped[str | None] = mapped_column(String(8))
@@ -33,6 +29,11 @@ class TradingSymbol(Base):
 
     symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
     added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # 该币引擎启停的唯一来源：停止时不自动分析、不挂新的入场单，已有持仓的程序规则照常执行
+    running: Mapped[bool] = mapped_column(Boolean, default=False)
+    running_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # 该币的交易资金：仓位按 min(交易资金, 账户权益) 计算；各币合计不超过账户权益；未设置时不能开始交易
+    capital_usdt: Mapped[Decimal | None] = mapped_column(Numeric)
     # 待执行的分析请求：多个触发在执行前合并为一次
     analysis_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     analysis_reasons: Mapped[list[str]] = mapped_column(JSONB, default=list)

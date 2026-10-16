@@ -1,9 +1,9 @@
 <script lang="ts" setup>
 import type { Effort, Provider } from "@/apis/settings"
 import type { Analysis, OrderRow, SnapshotPosition, TradingEvent, TradingStatus, TradingSymbol } from "@/apis/trading"
-import { Clock, Edit, Plus } from "@element-plus/icons-vue"
+import { Clock, Plus } from "@element-plus/icons-vue"
 import { EFFORTS, listProviders } from "@/apis/settings"
-import { deleteSymbol, getStatus, getSymbolPlan, isOwnOrder, listAnalyses, listEvents, listSymbols, manualAction, patchConfig, requestAnalysis, startTrading, stopTrading } from "@/apis/trading"
+import { deleteSymbol, getStatus, getSymbolPlan, isOwnOrder, listAnalyses, listEvents, listSymbols, manualAction, patchConfig, patchSymbol, requestAnalysis, startTrading, stopTrading } from "@/apis/trading"
 import { usePersisted } from "@/utils/storage"
 import { formatTime } from "@/utils/text"
 import AddSymbolDialog from "./components/AddSymbolDialog.vue"
@@ -35,11 +35,10 @@ const snapshot = computed(() => status.value?.snapshot ?? null)
 const account = computed(() => snapshot.value?.account ?? null)
 const positions = computed(() => snapshot.value?.positions ?? [])
 const current = computed(() => symbols.value.find(s => s.symbol === selected.value))
-const engineText = computed(() => snapshot.value ? `在线 · ${status.value!.running ? "正在交易" : "已停止"}` : "离线")
-const capitalShort = computed(() => {
-  const s = status.value!
-  return s.effective_capital && s.capital_usdt && Number(s.effective_capital) < Number(s.capital_usdt)
-})
+const runningCount = computed(() => symbols.value.filter(s => s.running).length)
+const engineText = computed(() => snapshot.value ? `在线 · ${runningCount.value ? `${runningCount.value} 个币交易中` : "全部停止"}` : "离线")
+/** 各币交易资金合计，不超过账户权益 */
+const allocated = computed(() => symbols.value.reduce((sum, s) => sum + Number(s.capital_usdt ?? 0), 0))
 const symbolOrders = computed(() => {
   const s = snapshot.value
   if (!s)
@@ -140,7 +139,7 @@ async function analyze() {
   requesting.value = true
   try {
     await requestAnalysis(selected.value)
-    ElMessage.success(status.value?.running ? "已排队分析" : "已排队试运行分析：计划只记录，不下单")
+    ElMessage.success(current.value?.running ? "已排队分析" : "已排队试运行分析：计划只记录，不下单")
     await refresh()
   } finally {
     requesting.value = false
@@ -184,42 +183,45 @@ watch(selected, () => {
   refreshAnalysis()
 })
 
-async function toggleRunning() {
-  if (status.value!.running) {
+async function toggleRunning(s: TradingSymbol) {
+  if (s.running) {
     await ElMessageBox.confirm(
-      "停止后不再做新的分析，并撤销未成交的限价单。已有持仓保留，止损、止盈、到期平仓等程序规则继续执行。",
-      "停止行情交易",
+      `停止后 ${s.symbol} 不再做新的分析，并撤销未成交的限价单。已有持仓保留，止损、止盈、到期平仓等程序规则继续执行。`,
+      `停止 ${s.symbol} 行情交易`,
       { type: "warning", confirmButtonText: "停止" }
     )
   } else {
     await ElMessageBox.confirm(
-      "开始后，引擎会按触发条件和例行节奏自动分析交易列表里的币，并在币安模拟盘下单。",
-      "开始行情交易",
+      `开始后，引擎会按触发条件和例行节奏自动分析 ${s.symbol}，并按它的交易资金在币安模拟盘下单。`,
+      `开始 ${s.symbol} 行情交易`,
       { type: "info", confirmButtonText: "开始" }
     )
   }
   toggling.value = true
   try {
-    status.value = status.value!.running ? await stopTrading() : await startTrading()
+    await (s.running ? stopTrading(s.symbol) : startTrading(s.symbol))
+    await refresh()
     await refreshEvents()
   } finally {
     toggling.value = false
   }
 }
 
-async function editCapital() {
+async function editCapital(s: TradingSymbol) {
+  const others = allocated.value - Number(s.capital_usdt ?? 0)
   const { value } = await ElMessageBox.prompt(
-    `仓位按交易资金计算：单笔风险 1%（置信度低时 0.5%），所有仓位名义价值合计不超过 3 倍（逐仓 3 倍时保证金合计不超过交易资金）。不能超过账户权益 ${money(account.value?.margin_balance)} USDT；账户权益低于它时按权益计算。`,
-    "设置交易资金（USDT）",
+    `${s.symbol} 的仓位按它的交易资金计算：单笔风险 1%（置信度低时 0.5%），名义仓位不超过 3 倍交易资金。各币交易资金合计不能超过账户权益 ${money(account.value?.margin_balance)} USDT（其他币已分配 ${others.toFixed(2)}）；账户权益低于它时按权益计算。`,
+    `设置 ${s.symbol} 交易资金（USDT）`,
     {
-      inputValue: status.value!.capital_usdt ? num(status.value!.capital_usdt) : "",
+      inputValue: s.capital_usdt ? num(s.capital_usdt) : "",
       inputPattern: /^(?:[1-9]\d*|0)(?:\.\d{1,2})?$/,
       inputErrorMessage: "请输入正数，最多两位小数",
       confirmButtonText: "保存"
     }
   )
-  status.value = await patchConfig({ capital_usdt: value })
+  await patchSymbol(s.symbol, { capital_usdt: value })
   ElMessage.success("已保存")
+  await refresh()
   await refreshEvents()
 }
 
@@ -233,7 +235,7 @@ async function changeEffort(effort: Effort | null) {
 
 async function closePosition(symbol: string) {
   await ElMessageBox.confirm(
-    `撤销 ${symbol} 的全部挂单（含止损、止盈和手动挂的单），市价平掉持仓，并停止行情交易（所有币不再做新的分析）。`,
+    `撤销 ${symbol} 的全部挂单（含止损、止盈和手动挂的单），市价平掉持仓，并停止 ${symbol} 的行情交易（其他币不受影响）。`,
     "一键平仓",
     { type: "warning", confirmButtonText: "平仓" }
   )
@@ -290,32 +292,16 @@ onBeforeUnmount(() => clearInterval(timer))
             </div>
           </div>
         </div>
-        <el-button
-          :type="status.running ? 'danger' : 'primary'" :plain="status.running" :loading="toggling" size="small"
-          :disabled="!status.running && (!status.configured || !status.capital_usdt)"
-          @click="toggleRunning"
-        >
-          {{ status.running ? "停止行情交易" : "开始行情交易" }}
-        </el-button>
       </div>
 
       <div class="h-12 w-px bg-slate-200" />
 
       <div class="metric">
-        <div class="metric-label">
-          交易资金
-          <el-icon class="cursor-pointer text-[var(--el-color-primary)]" title="设置交易资金" @click="editCapital">
-            <Edit />
-          </el-icon>
+        <div class="metric-label" title="各币交易资金合计，在每个币的计划卡片上设置">
+          已分配资金
         </div>
-        <div v-if="status.capital_usdt" class="metric-value">
-          {{ money(status.capital_usdt) }}<small>USDT</small>
-        </div>
-        <div v-else class="metric-value text-rose-600!">
-          未设置
-        </div>
-        <div v-if="capitalShort" class="text-xs text-amber-600">
-          权益不足，按 {{ money(status.effective_capital!) }}
+        <div class="metric-value">
+          {{ allocated.toFixed(2) }}<small>USDT</small>
         </div>
       </div>
       <div class="metric">
@@ -385,9 +371,6 @@ onBeforeUnmount(() => clearInterval(timer))
 
     <el-alert v-if="!status.configured" type="warning" :closable="false" show-icon>
       还没有填写币安模拟盘 key，请先到「环境变量」页填写。
-    </el-alert>
-    <el-alert v-else-if="!status.capital_usdt" type="warning" :closable="false" show-icon>
-      还没有设置交易资金。引擎只按交易资金计算仓位，不会动用账户的全部余额；设置后才能开始行情交易。
     </el-alert>
     <el-alert v-else-if="snapshot?.error" type="error" :closable="false" show-icon>
       同步模拟盘失败：{{ snapshot.error }}{{ snapshot.synced_at ? `（以下为 ${formatTime(snapshot.synced_at, "HH:mm:ss")} 的数据）` : "" }}
@@ -505,7 +488,10 @@ onBeforeUnmount(() => clearInterval(timer))
         >
           <span class="absolute inset-y-0 left-0 w-1" :style="{ background: `var(--el-color-${symbolState(s).type})` }" />
           <div class="flex items-center justify-between">
-            <span class="num text-slate-900 font-semibold">{{ s.symbol }}</span>
+            <span class="flex items-center gap-2">
+              <span class="h-2 w-2 rounded-full" :class="s.running ? 'bg-emerald-500' : 'bg-slate-300'" :title="s.running ? '交易中' : '已停止'" />
+              <span class="num text-slate-900 font-semibold">{{ s.symbol }}</span>
+            </span>
             <el-tag :type="symbolState(s).type" size="small">
               {{ symbolState(s).label }}
             </el-tag>
@@ -526,8 +512,8 @@ onBeforeUnmount(() => clearInterval(timer))
       <!-- 中：当前计划 -->
       <PlanCard
         v-if="current" :symbol="current" :analysis="livePlan ?? latestAnalysis" :latest="latestAnalysis" :orders="planOrders"
-        :requesting="requesting"
-        @analyze="analyze" @detail="openAnalysis"
+        :requesting="requesting" :toggling="toggling"
+        @analyze="analyze" @detail="openAnalysis" @toggle="toggleRunning(current)" @capital="editCapital(current)"
       />
       <el-card v-else shadow="never">
         <el-empty description="先在左侧新增交易币种" :image-size="60" />

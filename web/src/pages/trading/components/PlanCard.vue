@@ -1,12 +1,12 @@
 <script lang="ts" setup>
 import type { Analysis, OrderRow, PlanCondition, TradingSymbol } from "@/apis/trading"
-import { Document, Lightning } from "@element-plus/icons-vue"
+import { Document, Edit, Lightning, SwitchButton, VideoPlay } from "@element-plus/icons-vue"
 import { CLOSE_REASON_LABELS, PLAN_STATUS_LABELS, TAKE_PROFIT_STEPS } from "@/apis/trading"
 import { formatTime } from "@/utils/text"
 
 /** analysis：执行中的计划，没有时为最近一次分析；latest：最近一次分析（与 analysis 不同时另行提示） */
-const props = defineProps<{ symbol: TradingSymbol, analysis: Analysis | null, latest: Analysis | null, orders: OrderRow[], requesting: boolean }>()
-const emit = defineEmits<{ analyze: [], detail: [id: number] }>()
+const props = defineProps<{ symbol: TradingSymbol, analysis: Analysis | null, latest: Analysis | null, orders: OrderRow[], requesting: boolean, toggling: boolean }>()
+const emit = defineEmits<{ analyze: [], detail: [id: number], toggle: [], capital: [] }>()
 
 const ACTION_LABELS = { plan: "新计划", keep: "维持当前计划", exit: "结束当前计划", wait: "观望" } as const
 const CONFIDENCE_LABELS = { high: "高", medium: "中", low: "低" } as const
@@ -74,11 +74,18 @@ const ladder = computed(() => sizing.value?.entry && entryRow.value
               {{ PLAN_STATUS_LABELS[analysis.plan_status] }}
             </el-tag>
           </div>
-          <div class="text-xs text-slate-500 font-normal">
+          <div class="truncate text-xs text-slate-500 font-normal" title="短线做波动（区间内挂限价单，最长持仓 4 小时）">
             短线做波动（区间内挂限价单，最长持仓 4 小时）
           </div>
         </div>
         <div class="flex-1" />
+        <el-button
+          :type="symbol.running ? 'danger' : 'success'" plain :icon="symbol.running ? SwitchButton : VideoPlay" :loading="toggling"
+          :disabled="!symbol.running && !symbol.capital_usdt" :title="!symbol.running && !symbol.capital_usdt ? '先设置交易资金' : ''"
+          @click="emit('toggle')"
+        >
+          {{ symbol.running ? "停止交易" : "开始交易" }}
+        </el-button>
         <el-button v-if="analysis && analysis.status !== 'running'" :icon="Document" @click="emit('detail', analysis.id)">
           查看完整分析
         </el-button>
@@ -88,8 +95,28 @@ const ladder = computed(() => sizing.value?.entry && entryRow.value
       </div>
     </template>
 
+    <div class="flex flex-wrap items-center gap-x-6 gap-y-1 border border-slate-200 rounded-lg border-solid bg-slate-50 px-3 py-2 text-xs text-slate-500">
+      <span class="flex items-center gap-1">
+        交易资金
+        <b v-if="symbol.capital_usdt" class="num text-sm text-slate-900">{{ Number(symbol.capital_usdt).toFixed(2) }} USDT</b>
+        <b v-else class="text-sm text-rose-600">未设置</b>
+        <el-icon class="cursor-pointer text-[var(--el-color-primary)]" title="设置交易资金" @click="emit('capital')">
+          <Edit />
+        </el-icon>
+      </span>
+      <span v-if="symbol.effective_capital && Number(symbol.effective_capital) < Number(symbol.capital_usdt)" class="text-amber-600">
+        权益不足，按 {{ Number(symbol.effective_capital).toFixed(2) }} 计算
+      </span>
+      <span v-if="symbol.capital_usdt">名义仓位上限 <b class="num text-slate-900">{{ (Number(symbol.effective_capital ?? symbol.capital_usdt) * 3).toFixed(2) }} USDT</b></span>
+      <span class="flex items-center gap-1">
+        <span class="h-2 w-2 rounded-full" :class="symbol.running ? 'bg-emerald-500' : 'bg-slate-300'" />
+        <span :class="symbol.running ? 'text-emerald-700' : ''">{{ symbol.running ? "交易中" : "已停止" }}</span>
+        <span v-if="symbol.running_changed_at" class="num">（{{ formatTime(symbol.running_changed_at, "MM-DD HH:mm") }} 起）</span>
+      </span>
+    </div>
+
     <div v-if="!analysis" class="border border-slate-200 rounded-lg border-solid bg-slate-50 px-3 py-2 text-slate-500">
-      还没有分析。引擎停止时点「立即分析」为试运行：计划只记录，不下单。
+      还没有分析。该币停止交易时点「立即分析」为试运行：计划只记录，不下单。
     </div>
     <div v-else-if="analysis.status === 'running'" class="flex items-center gap-2 border border-amber-200 rounded-lg border-solid bg-amber-50 px-3 py-2 text-amber-700">
       <span class="h-2 w-2 animate-pulse rounded-full bg-amber-500" />

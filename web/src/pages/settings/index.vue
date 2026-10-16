@@ -275,7 +275,7 @@ loadExchange()
         </el-descriptions-item>
         <el-descriptions-item label="状态">
           <el-tag v-if="exchange.running" type="success" size="small">
-            交易中（停止后才能修改 key）
+            有币种在交易（全部停止后才能修改 key）
           </el-tag>
           <span v-else>未运行</span>
         </el-descriptions-item>

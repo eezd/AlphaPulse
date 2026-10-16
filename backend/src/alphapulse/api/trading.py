@@ -45,11 +45,6 @@ class TodayUsage(BaseModel):
 
 class StatusOut(BaseModel):
     configured: bool
-    running: bool
-    running_changed_at: datetime | None
-    capital_usdt: Decimal | None
-    # 实际用于仓位计算的资金：min(交易资金, 账户权益)；没有快照时无法计算
-    effective_capital: Decimal | None
     provider_id: int | None
     reasoning_effort: str | None
     # trader 进程的心跳快照；进程离线时为空
@@ -58,7 +53,6 @@ class StatusOut(BaseModel):
 
 
 class ConfigIn(BaseModel):
-    capital_usdt: Annotated[Decimal, Field(gt=0, decimal_places=2)] | None = None
     provider_id: int | None = None
     reasoning_effort: llm.Effort | None = None
 
@@ -73,10 +67,19 @@ class SymbolOut(BaseModel):
     added_at: datetime
     analysis_requested_at: datetime | None
     analyzing: bool
+    running: bool
+    running_changed_at: datetime | None
+    capital_usdt: Decimal | None
+    # 实际用于仓位计算的资金：min(交易资金, 账户权益)；没有快照时无法计算
+    effective_capital: Decimal | None
     # 当前计划：pending / open / closing，没有计划为空
     plan_id: int | None
     plan_status: str | None
     close_deadline: datetime | None
+
+
+class SymbolConfigIn(BaseModel):
+    capital_usdt: Annotated[Decimal, Field(gt=0, decimal_places=2)] | None
 
 
 class SymbolIn(BaseModel):
@@ -177,7 +180,7 @@ class PositionHistoryPage(BaseModel):
 
 
 async def get_account(session: AsyncSession) -> TradingAccount:
-    return await session.get(TradingAccount, 1) or TradingAccount(id=1, running=False)
+    return await session.get(TradingAccount, 1) or TradingAccount(id=1)
 
 
 @router.get("/status")
@@ -191,43 +194,11 @@ async def get_status(session: Annotated[AsyncSession, Depends(get_session)]) -> 
             func.coalesce(func.sum(TradingAnalysis.usage["output_tokens"].as_integer()), 0),
         ).where(TradingAnalysis.started_at >= today)
     )).one()
-    snapshot = await read_snapshot()
-    equity = snapshot and snapshot["account"] and Decimal(snapshot["account"]["margin_balance"])
     return StatusOut(
-        configured=account.api_key_encrypted is not None, running=account.running,
-        running_changed_at=account.running_changed_at, capital_usdt=account.capital_usdt,
-        effective_capital=min(account.capital_usdt, equity) if account.capital_usdt and equity else None,
-        provider_id=account.provider_id, reasoning_effort=account.reasoning_effort, snapshot=snapshot,
+        configured=account.api_key_encrypted is not None, provider_id=account.provider_id, reasoning_effort=account.reasoning_effort,
+        snapshot=await read_snapshot(),
         today=TodayUsage(analyses=count, limit=DAILY_ANALYSIS_LIMIT, input_tokens=input_tokens, output_tokens=output_tokens),
     )
-
-
-async def set_running(session: AsyncSession, running: bool) -> StatusOut:
-    account = await get_account(session)
-    if running and account.api_key_encrypted is None:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "还没有填写模拟盘 key，请先到环境变量页填写")
-    if running and account.capital_usdt is None:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "还没有设置交易资金")
-    if account.running != running:
-        account.running = running
-        account.running_changed_at = datetime.now(LOCAL_TZ)
-        session.add(account)
-        session.add(TradingEvent(
-            kind="started" if running else "stopped",
-            message="开始行情交易" if running else "停止行情交易：不再分析，撤销未成交的入场单；已有持仓的止损、止盈等程序规则继续执行",
-        ))
-        await session.commit()
-    return await get_status(session)
-
-
-@router.post("/start")
-async def start(session: Annotated[AsyncSession, Depends(get_session)]) -> StatusOut:
-    return await set_running(session, True)
-
-
-@router.post("/stop")
-async def stop(session: Annotated[AsyncSession, Depends(get_session)]) -> StatusOut:
-    return await set_running(session, False)
 
 
 @router.patch("/config")
@@ -236,19 +207,6 @@ async def patch_config(body: ConfigIn, session: Annotated[AsyncSession, Depends(
     fields = body.model_dump(exclude_unset=True)
     if fields.get("provider_id") is not None and await session.get(AiProvider, fields["provider_id"]) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "模型配置不存在")
-    if "capital_usdt" in fields:
-        capital = fields["capital_usdt"]
-        if capital is None and account.running:
-            raise HTTPException(status.HTTP_409_CONFLICT, "交易中不能清空交易资金")
-        snapshot = await read_snapshot()
-        equity = snapshot and snapshot["account"] and Decimal(snapshot["account"]["margin_balance"])
-        if capital is not None and equity and capital > equity:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"交易资金不能超过账户权益 {equity:.2f} USDT")
-        if capital != account.capital_usdt:
-            session.add(TradingEvent(
-                kind="capital_changed",
-                message=f"交易资金设为 {capital} USDT" if capital is not None else "清空交易资金",
-            ))
     for key, value in fields.items():
         setattr(account, key, value)
     session.add(account)
@@ -284,9 +242,71 @@ async def list_symbol_options() -> list[SymbolOption]:
     return [SymbolOption.model_validate(o) for o in await symbol_options()]
 
 
+async def current_equity() -> Decimal | None:
+    """账户权益，取自 trader 的快照；进程离线或未同步到币安时为空"""
+    snapshot = await read_snapshot()
+    return Decimal(snapshot["account"]["margin_balance"]) if snapshot and snapshot["account"] else None
+
+
+async def get_symbol(session: AsyncSession, symbol: str) -> TradingSymbol:
+    s = await session.get(TradingSymbol, symbol)
+    if s is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"{symbol} 不在交易列表中")
+    return s
+
+
+async def set_running(session: AsyncSession, s: TradingSymbol, running: bool) -> None:
+    if running and (await get_account(session)).api_key_encrypted is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "还没有填写模拟盘 key，请先到环境变量页填写")
+    if running and s.capital_usdt is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{s.symbol} 还没有设置交易资金")
+    if s.running != running:
+        s.running = running
+        s.running_changed_at = datetime.now(LOCAL_TZ)
+        session.add(TradingEvent(
+            symbol=s.symbol, kind="started" if running else "stopped",
+            message="开始行情交易" if running else "停止行情交易：不再分析，撤销未成交的入场单；已有持仓的止损、止盈等程序规则继续执行",
+        ))
+        await session.commit()
+
+
+@router.post("/symbols/{symbol}/start")
+async def start(symbol: str, session: Annotated[AsyncSession, Depends(get_session)]) -> None:
+    await set_running(session, await get_symbol(session, symbol), True)
+
+
+@router.post("/symbols/{symbol}/stop")
+async def stop(symbol: str, session: Annotated[AsyncSession, Depends(get_session)]) -> None:
+    await set_running(session, await get_symbol(session, symbol), False)
+
+
+@router.patch("/symbols/{symbol}")
+async def patch_symbol(symbol: str, body: SymbolConfigIn, session: Annotated[AsyncSession, Depends(get_session)]) -> None:
+    """设置该币的交易资金：各币合计不超过账户权益（取不到权益时不校验）"""
+    s = await get_symbol(session, symbol)
+    capital = body.capital_usdt
+    if capital == s.capital_usdt:
+        return
+    if capital is None and s.running:
+        raise HTTPException(status.HTTP_409_CONFLICT, "交易中不能清空交易资金")
+    equity = await current_equity()
+    if capital is not None and equity:
+        others = await session.scalar(
+            select(func.coalesce(func.sum(TradingSymbol.capital_usdt), 0)).where(TradingSymbol.symbol != symbol)
+        )
+        if capital + others > equity:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                f"各币交易资金合计不能超过账户权益 {equity:.2f} USDT（其他币已分配 {others:.2f}，最多还能设 {max(equity - others, 0):.2f}）")
+    s.capital_usdt = capital
+    session.add(TradingEvent(symbol=symbol, kind="capital_changed",
+                             message=f"交易资金设为 {capital} USDT" if capital is not None else "清空交易资金"))
+    await session.commit()
+
+
 @router.get("/symbols")
 async def list_symbols(session: Annotated[AsyncSession, Depends(get_session)]) -> list[SymbolOut]:
     symbols = (await session.scalars(select(TradingSymbol).order_by(TradingSymbol.added_at))).all()
+    equity = await current_equity()
     analyzing = set((await session.scalars(select(TradingAnalysis.symbol).where(TradingAnalysis.status == "running"))).all())
     plans = {p.symbol: p for p in await session.scalars(
         select(TradingAnalysis).where(TradingAnalysis.plan_status.in_(LIVE_PLAN_STATUSES)).order_by(TradingAnalysis.id)
@@ -294,7 +314,9 @@ async def list_symbols(session: Annotated[AsyncSession, Depends(get_session)]) -
     return [
         SymbolOut(
             symbol=s.symbol, added_at=s.added_at, analysis_requested_at=s.analysis_requested_at,
-            analyzing=s.symbol in analyzing, plan_id=plans[s.symbol].id if s.symbol in plans else None,
+            analyzing=s.symbol in analyzing, running=s.running, running_changed_at=s.running_changed_at, capital_usdt=s.capital_usdt,
+            effective_capital=min(s.capital_usdt, equity) if s.capital_usdt and equity else None,
+            plan_id=plans[s.symbol].id if s.symbol in plans else None,
             plan_status=plans[s.symbol].plan_status if s.symbol in plans else None,
             close_deadline=plans[s.symbol].close_deadline if s.symbol in plans else None,
         )
@@ -354,14 +376,13 @@ async def delete_symbol(symbol: str, session: Annotated[AsyncSession, Depends(ge
 
 @router.post("/symbols/{symbol}/manual/{action}", status_code=status.HTTP_202_ACCEPTED)
 async def manual_action(symbol: str, action: Literal["close", "cancel"], session: Annotated[AsyncSession, Depends(get_session)]) -> None:
-    """一键平仓（同时停止行情交易）、清除挂单：交给执行器执行，结果写入时间线"""
+    """一键平仓（同时停止该币的行情交易）、清除挂单：交给执行器执行，结果写入时间线"""
     label = "平仓" if action == "close" else "清除挂单"
-    if await session.get(TradingSymbol, symbol) is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"{symbol} 不在交易列表中")
+    s = await get_symbol(session, symbol)
     await fresh_snapshot(symbol, label)
     if action == "close":
         # 不停止的话，平仓后会重新分析，可能马上又开仓
-        await set_running(session, False)
+        await set_running(session, s, False)
     await redis.set(MANUAL_ACTION_KEY.format(symbol), action, ex=MANUAL_ACTION_TTL_SECONDS)
 
 
@@ -435,12 +456,10 @@ async def list_position_history_symbols(session: Annotated[AsyncSession, Depends
 
 @router.post("/symbols/{symbol}/analyze", status_code=status.HTTP_202_ACCEPTED)
 async def request_analysis(symbol: str, session: Annotated[AsyncSession, Depends(get_session)]) -> None:
-    """排队一次手动分析：引擎停止时为试运行，计划只记录、不下单"""
-    s = await session.get(TradingSymbol, symbol)
-    if s is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"{symbol} 不在交易列表中")
-    if (await get_account(session)).capital_usdt is None:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "还没有设置交易资金")
+    """排队一次手动分析：该币停止交易时为试运行，计划只记录、不下单"""
+    s = await get_symbol(session, symbol)
+    if s.capital_usdt is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{symbol} 还没有设置交易资金")
     running = await session.scalar(select(func.count()).where(TradingAnalysis.symbol == symbol, TradingAnalysis.status == "running"))
     if running or s.analysis_requested_at is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, f"{symbol} 已在分析或排队中")
