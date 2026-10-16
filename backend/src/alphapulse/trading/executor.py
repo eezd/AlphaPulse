@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from alphapulse.ai.tools import LOCAL_TZ
 from alphapulse.core.crypto import decrypt
 from alphapulse.core.db import SessionLocal
+from alphapulse.core.redis import KEY_PREFIX, redis
 from alphapulse.market.binance import BinanceClient
 from alphapulse.models import TradingAccount, TradingAnalysis, TradingEvent, TradingOrder, TradingSymbol
 from alphapulse.trading.client import OWN_CLIENT_ID, DemoClient, ExchangeError, mark_price, symbol_rules
@@ -46,7 +47,11 @@ ORDER_STATUSES = {"NEW": "new", "PARTIALLY_FILLED": "partially_filled", "FILLED"
                   "EXPIRED": "expired", "EXPIRED_IN_MATCH": "expired", "REJECTED": "rejected"}
 PURPOSE_LABELS = {"entry": "入场", "tp": "止盈", "stop": "止损", "close": "市价平仓"}
 CLOSE_REASON_LABELS = {"stop": "止损", "take_profit": "止盈", "time": "到达持仓时限", "exit": "模型决定结束",
-                       "external": "外部平仓（如在网页手动平仓）", "stop_failed": "止损挂单失败", "close": "市价平仓"}
+                       "external": "外部平仓（如在网页手动平仓）", "stop_failed": "止损挂单失败", "close": "市价平仓",
+                       "manual_close": "一键平仓", "manual_cancel": "清除挂单"}
+# 页面上的「平仓」「清除挂单」：API 写入请求，执行器下一轮取走执行，避免和对账同时改计划
+MANUAL_ACTION_KEY = f"{KEY_PREFIX}trader:manual:{{}}"
+MANUAL_ACTIONS = {"close": "一键平仓", "cancel": "清除挂单"}
 CANCEL_REASON_LABELS = {"expired": "限价单到期未成交", "stopped": "已停止交易", "entry_failed": "入场单被拒"}
 
 
@@ -333,7 +338,8 @@ class Executor:
 
     # ---------- 对账 ----------
 
-    async def reconcile(self, session: AsyncSession, client: DemoClient, symbol: TradingSymbol, running: bool, position: Position | None) -> None:
+    async def reconcile(self, session: AsyncSession, client: DemoClient, symbol: TradingSymbol, running: bool, position: Position | None,
+                        manual_action: str | None) -> None:
         name = symbol.symbol
         rules = await symbol_rules(name)
         open_orders = {o["clientOrderId"]: o for o in await client.request("GET", "/fapi/v1/openOrders", {"symbol": name})}
@@ -359,6 +365,9 @@ class Executor:
         )
         plan = await self.adopt(session, client, symbol, plan, position)
         await session.commit()
+        if manual_action is not None:
+            await self.manual(session, client, name, manual_action, plan, position, open_orders, open_algos)
+            await session.commit()
 
         # 不属于当前计划的活动订单（被替换、已结束的计划）：入场和止盈先撤；止损等新止损挂上后再撤，不留无保护窗口
         stale = [r for r in rows if r.status in ACTIVE_ORDER_STATUSES and r.purpose != "close" and (plan is None or r.analysis_id != plan.id)]
@@ -427,6 +436,31 @@ class Executor:
         if running and plan.plan_status != "closing":
             await self.check_reevaluate(session, name, position.mark if position else None)
         await session.commit()
+
+    async def manual(self, session: AsyncSession, client: DemoClient, symbol: str, action: str, plan: TradingAnalysis | None,
+                     position: Position | None, open_orders: dict, open_algos: dict) -> None:
+        """一键平仓、清除挂单：撤掉该币全部挂单（含止损止盈和手动挂的），有持仓就市价平仓——程序不留没有止损的仓位。
+        本程序的单通过结束计划撤销，否则下一轮对账会按计划补挂回来。撤销计划不像到期那样排队重新分析，免得马上又挂单"""
+        reason = f"manual_{action}"
+        label = MANUAL_ACTIONS[action]
+        for client_id in [*open_orders, *open_algos]:
+            if not OWN_CLIENT_ID.match(client_id):
+                await self.cancel_client_id(client, symbol, client_id, client_id in open_algos)
+        detail = f"，市价平仓 {fmt(position.qty)}" if position else ""
+        session.add(TradingEvent(symbol=symbol, analysis_id=plan.id if plan else None, kind=reason, level="warn",
+                                 message=f"{label}：撤销全部挂单{detail}"))
+        if plan is not None and plan.plan_status in ("pending", "open") and position is not None:
+            # 平仓中的计划：撤入场和止盈、市价平仓，持仓归零后结束并撤掉止损
+            plan.plan_status, plan.close_reason = "closing", reason
+        elif plan is not None and plan.plan_status == "pending":
+            plan.plan_status, plan.close_reason, plan.closed_at = "canceled", reason, utcnow()
+        elif plan is None and position is not None:
+            closing = await session.scalar(select(func.count()).where(
+                TradingOrder.symbol == symbol, TradingOrder.purpose == "close", TradingOrder.status.in_(ACTIVE_ORDER_STATUSES),
+            ))
+            if not closing:
+                close_side = "SELL" if position.side == "long" else "BUY"
+                await self.place(session, client, symbol, None, "close", OrderSpec("close", None, close_side, "MARKET", None, None, position.qty))
 
     async def check_reevaluate(self, session: AsyncSession, symbol: str, mark: Decimal | None) -> None:
         """最近一次交易中分析给出的 reevaluate 条件：满足任一个就排队分析"""
@@ -564,7 +598,8 @@ class Executor:
                     logger.warning("同步成交记录失败，%ds 后重试", FILLS_SYNC_SECONDS, exc_info=True)
             for symbol in symbols:
                 try:
-                    await self.reconcile(session, client, symbol, account.running, positions.get(symbol.symbol))
+                    manual_action = await redis.getdel(MANUAL_ACTION_KEY.format(symbol.symbol))
+                    await self.reconcile(session, client, symbol, account.running, positions.get(symbol.symbol), manual_action)
                 except ExchangeError as e:
                     await session.rollback()
                     await self.report(session, symbol.symbol, f"对账失败：{e}")

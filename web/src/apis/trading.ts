@@ -253,6 +253,8 @@ export const CLOSE_REASON_LABELS: Record<string, string> = {
   external: "外部平仓",
   stop_failed: "止损挂单失败",
   close: "市价平仓",
+  manual_close: "一键平仓",
+  manual_cancel: "清除挂单",
   // 计划 3.1 之前的旧原因，历史仓位里还会出现
   invalidation: "短线失效条件触发",
   replaced: "被新计划替换",
@@ -317,6 +319,11 @@ export function getSymbolPlan(symbol: string): Promise<{ plan: Analysis | null, 
 
 export function requestAnalysis(symbol: string): Promise<void> {
   return http.post(`/trading/symbols/${symbol}/analyze`)
+}
+
+/** 一键平仓（同时停止行情交易）、清除挂单：由执行器在几秒内执行，结果写入时间线 */
+export function manualAction(symbol: string, action: "close" | "cancel"): Promise<void> {
+  return http.post(`/trading/symbols/${symbol}/manual/${action}`)
 }
 
 export function listAnalyses(params: { symbol?: string, limit?: number }): Promise<Analysis[]> {

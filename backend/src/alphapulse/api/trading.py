@@ -19,6 +19,7 @@ from alphapulse.core.db import get_session
 from alphapulse.core.redis import KEY_PREFIX, redis
 from alphapulse.models import AiProvider, TradingAccount, TradingAnalysis, TradingEvent, TradingFill, TradingOrder, TradingSymbol
 from alphapulse.trading.client import OWN_CLIENT_ID, ExchangeError, public_get
+from alphapulse.trading.executor import MANUAL_ACTION_KEY
 from alphapulse.trading.positions import build_positions
 from alphapulse.trading.plan import DAILY_ANALYSIS_LIMIT
 from alphapulse.trading.snapshot import read_snapshot
@@ -29,6 +30,8 @@ SYMBOLS_CACHE_KEY = f"{KEY_PREFIX}trading:symbols"
 SYMBOLS_CACHE_SECONDS = 3600
 # 删除前要求快照足够新，否则无法确认没有仓位和挂单
 SNAPSHOT_FRESH_SECONDS = 30
+# 平仓、清除挂单的请求等执行器取走的时限：引擎没及时处理就作废，不在之后意外执行
+MANUAL_ACTION_TTL_SECONDS = 30
 # 执行器正在管理的计划状态
 LIVE_PLAN_STATUSES = ("pending", "open", "closing")
 
@@ -312,6 +315,15 @@ async def add_symbol(body: SymbolIn, session: Annotated[AsyncSession, Depends(ge
         raise HTTPException(status.HTTP_409_CONFLICT, f"{symbol} 已在交易列表中") from None
 
 
+async def fresh_snapshot(symbol: str, action: str) -> dict:
+    """引擎在线且刚和币安同步过的快照"""
+    snapshot = await read_snapshot()
+    synced_at = snapshot and snapshot["synced_at"] and datetime.fromisoformat(snapshot["synced_at"])
+    if not synced_at or datetime.now(LOCAL_TZ) - synced_at > timedelta(seconds=SNAPSHOT_FRESH_SECONDS):
+        raise HTTPException(status.HTTP_409_CONFLICT, f"无法确认 {symbol} 的仓位和挂单（引擎离线或连接币安失败），暂时不能{action}")
+    return snapshot
+
+
 async def ensure_idle(session: AsyncSession, symbol: str, action: str) -> TradingSymbol:
     """只有空仓、没有本程序的挂单、没有进行中的计划和分析时，才能删除"""
     s = await session.get(TradingSymbol, symbol)
@@ -323,10 +335,7 @@ async def ensure_idle(session: AsyncSession, symbol: str, action: str) -> Tradin
     ))
     if busy:
         raise HTTPException(status.HTTP_409_CONFLICT, f"{symbol} 有进行中的分析或计划，不能{action}")
-    snapshot = await read_snapshot()
-    synced_at = snapshot and snapshot["synced_at"] and datetime.fromisoformat(snapshot["synced_at"])
-    if not synced_at or datetime.now(LOCAL_TZ) - synced_at > timedelta(seconds=SNAPSHOT_FRESH_SECONDS):
-        raise HTTPException(status.HTTP_409_CONFLICT, f"无法确认 {symbol} 的仓位和挂单（引擎离线或连接币安失败），暂时不能{action}")
+    snapshot = await fresh_snapshot(symbol, action)
     if any(p["symbol"] == symbol for p in snapshot["positions"]):
         raise HTTPException(status.HTTP_409_CONFLICT, f"{symbol} 有持仓，不能{action}")
     if any(o["symbol"] == symbol and OWN_CLIENT_ID.match(o["client_id"]) for o in snapshot["orders"] + snapshot["algo_orders"]):
@@ -341,6 +350,19 @@ async def delete_symbol(symbol: str, session: Annotated[AsyncSession, Depends(ge
     await session.delete(s)
     session.add(TradingEvent(symbol=symbol, kind="symbol_removed", message="移出交易列表"))
     await session.commit()
+
+
+@router.post("/symbols/{symbol}/manual/{action}", status_code=status.HTTP_202_ACCEPTED)
+async def manual_action(symbol: str, action: Literal["close", "cancel"], session: Annotated[AsyncSession, Depends(get_session)]) -> None:
+    """一键平仓（同时停止行情交易）、清除挂单：交给执行器执行，结果写入时间线"""
+    label = "平仓" if action == "close" else "清除挂单"
+    if await session.get(TradingSymbol, symbol) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"{symbol} 不在交易列表中")
+    await fresh_snapshot(symbol, label)
+    if action == "close":
+        # 不停止的话，平仓后会重新分析，可能马上又开仓
+        await set_running(session, False)
+    await redis.set(MANUAL_ACTION_KEY.format(symbol), action, ex=MANUAL_ACTION_TTL_SECONDS)
 
 
 @router.get("/events")

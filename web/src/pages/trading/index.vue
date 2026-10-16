@@ -3,7 +3,7 @@ import type { Effort, Provider } from "@/apis/settings"
 import type { Analysis, OrderRow, SnapshotPosition, TradingEvent, TradingStatus, TradingSymbol } from "@/apis/trading"
 import { Clock, Edit, Plus } from "@element-plus/icons-vue"
 import { EFFORTS, listProviders } from "@/apis/settings"
-import { deleteSymbol, getStatus, getSymbolPlan, isOwnOrder, listAnalyses, listEvents, listSymbols, patchConfig, requestAnalysis, startTrading, stopTrading } from "@/apis/trading"
+import { deleteSymbol, getStatus, getSymbolPlan, isOwnOrder, listAnalyses, listEvents, listSymbols, manualAction, patchConfig, requestAnalysis, startTrading, stopTrading } from "@/apis/trading"
 import { usePersisted } from "@/utils/storage"
 import { formatTime } from "@/utils/text"
 import AddSymbolDialog from "./components/AddSymbolDialog.vue"
@@ -231,6 +231,27 @@ async function changeEffort(effort: Effort | null) {
   status.value = await patchConfig({ reasoning_effort: effort })
 }
 
+async function closePosition(symbol: string) {
+  await ElMessageBox.confirm(
+    `撤销 ${symbol} 的全部挂单（含止损、止盈和手动挂的单），市价平掉持仓，并停止行情交易（所有币不再做新的分析）。`,
+    "一键平仓",
+    { type: "warning", confirmButtonText: "平仓" }
+  )
+  await manualAction(symbol, "close")
+  ElMessage.success("已提交，几秒内执行，结果见时间线")
+  await refresh()
+}
+
+async function clearOrders() {
+  await ElMessageBox.confirm(
+    `撤销 ${selected.value} 的全部挂单，包括止损、止盈和手动挂的单。有持仓时会一并市价平仓，程序不保留没有止损的仓位。行情交易不停止。`,
+    "清除挂单",
+    { type: "warning", confirmButtonText: "清除" }
+  )
+  await manualAction(selected.value, "cancel")
+  ElMessage.success("已提交，几秒内执行，结果见时间线")
+}
+
 async function remove(s: TradingSymbol) {
   await ElMessageBox.confirm(`把 ${s.symbol} 移出交易列表？历史分析和时间线会保留。`, "删除确认", { type: "warning" })
   await deleteSymbol(s.symbol)
@@ -454,6 +475,14 @@ onBeforeUnmount(() => clearInterval(timer))
             </el-tag>
           </template>
         </el-table-column>
+        <el-table-column label="操作" width="80">
+          <template #default="{ row }">
+            <el-button v-if="symbols.some(s => s.symbol === row.symbol)" link type="danger" @click="closePosition(row.symbol)">
+              平仓
+            </el-button>
+            <span v-else class="font-sans text-slate-400" title="不在交易列表中，程序不管理，请到币安网页处理">-</span>
+          </template>
+        </el-table-column>
       </el-table>
     </el-card>
 
@@ -508,7 +537,12 @@ onBeforeUnmount(() => clearInterval(timer))
       <div class="flex flex-col gap-4">
         <el-card v-if="current" shadow="never" body-class="flex flex-col gap-2">
           <template #header>
-            当前挂单（{{ symbolOrders.length }}）
+            <div class="flex items-center justify-between">
+              当前挂单（{{ symbolOrders.length }}）
+              <el-button link type="danger" :disabled="!symbolOrders.length" @click="clearOrders">
+                清除挂单
+              </el-button>
+            </div>
           </template>
           <div
             v-for="o in symbolOrders" :key="`${o.client_id}-${o.time}`"
