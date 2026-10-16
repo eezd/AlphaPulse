@@ -267,26 +267,48 @@ export const TAKE_PROFIT_STEPS: Record<"long" | "short", [number, number][]> = {
   short: [[0.005, 0.8], [0.0075, 0.2]]
 }
 
-/** 已平仓的仓位：一个计划从首次入场到持仓归零；数值为十进制字符串 */
+/** 由币安成交记录还原的已平仓仓位（含程序外的手动仓位）；数值为十进制字符串 */
 export interface PositionHistory {
-  analysis_id: number
   symbol: string
   direction: "long" | "short"
   opened_at: string
   closed_at: string
-  close_reason: string
-  /** 计划 3.1 之前替换计划时会接管旧计划的持仓，这类旧记录没有自己的入场成交，为空 */
-  quantity: string | null
-  entry_price: string | null
-  /** 外部平仓没有成交记录，为空 */
-  exit_price: string | null
+  quantity: string
+  entry_price: string
+  exit_price: string
   realized_pnl: string
   commission: string
   net: string
+  source: "program" | "manual"
+  /** 手动仓位没有关联计划，为空 */
+  analysis_id: number | null
+  close_reason: string | null
 }
 
-export function listPositionHistory(params: { before?: number, limit?: number }): Promise<PositionHistory[]> {
+export interface PositionHistoryQuery {
+  symbol?: string
+  /** 按平仓时间筛选，ISO 时间 */
+  start?: string
+  end?: string
+  outcome?: "profit" | "loss"
+  source?: "program" | "manual"
+  page: number
+  limit: number
+}
+
+export interface PositionHistoryPage {
+  /** 按筛选条件统计全部仓位 */
+  summary: { count: number, wins: number, net: string, commission: string }
+  total: number
+  items: PositionHistory[]
+}
+
+export function listPositionHistory(params: PositionHistoryQuery): Promise<PositionHistoryPage> {
   return http.get("/trading/positions/history", { params })
+}
+
+export function listPositionHistorySymbols(): Promise<string[]> {
+  return http.get("/trading/positions/history/symbols")
 }
 
 export function getSymbolPlan(symbol: string): Promise<{ plan: Analysis | null, orders: OrderRow[] }> {

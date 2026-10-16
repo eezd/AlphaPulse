@@ -125,3 +125,22 @@ class TradingEvent(Base):
     level: Mapped[str] = mapped_column(String(8), default="info")
     message: Mapped[str] = mapped_column(Text)
     data: Mapped[dict | None] = mapped_column(JSONB)
+
+
+class TradingFill(Base):
+    """币安成交记录（userTrades），历史仓位由它还原；包括程序外的手动成交。trade id 只在单个 symbol 内唯一"""
+
+    __tablename__ = "trading_fills"
+    __table_args__ = (Index("ix_trading_fills_symbol_time", "symbol", "time"),)
+
+    symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
+    trade_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    order_id: Mapped[int] = mapped_column(BigInteger)
+    # BUY / SELL；账户为单向持仓，买为正、卖为负即可还原仓位
+    side: Mapped[str] = mapped_column(String(4))
+    price: Mapped[Decimal] = mapped_column(Numeric)
+    qty: Mapped[Decimal] = mapped_column(Numeric)
+    realized_pnl: Mapped[Decimal] = mapped_column(Numeric)
+    commission: Mapped[Decimal] = mapped_column(Numeric)
+    commission_asset: Mapped[str] = mapped_column(String(16))
+    time: Mapped[datetime] = mapped_column(DateTime(timezone=True))

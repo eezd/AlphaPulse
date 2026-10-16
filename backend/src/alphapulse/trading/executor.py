@@ -23,6 +23,7 @@ from alphapulse.core.db import SessionLocal
 from alphapulse.market.binance import BinanceClient
 from alphapulse.models import TradingAccount, TradingAnalysis, TradingEvent, TradingOrder, TradingSymbol
 from alphapulse.trading.client import OWN_CLIENT_ID, DemoClient, ExchangeError, mark_price, symbol_rules
+from alphapulse.trading.fills import sync_fills
 from alphapulse.trading.plan import (
     MAX_HOLD_HOURS, TAKE_PROFIT_STEPS, OrderSpec, SymbolRules, condition_met, desired_orders, diff_orders, round_to_step,
 )
@@ -31,6 +32,8 @@ from alphapulse.trading.schedule import request_analysis
 logger = logging.getLogger("alphapulse.trading.executor")
 
 EXECUTOR_SECONDS = 2
+# 成交记录只用于历史仓位，不需要跟对账一样频繁
+FILLS_SYNC_SECONDS = 60
 ACTIVE_ORDER_STATUSES = ("submitting", "new", "partially_filled")
 LIVE_PLAN_STATUSES = ("pending", "open", "closing")
 # 刚下的单可能短时间查不到（C1 实测约 0.25s）
@@ -78,6 +81,7 @@ class Executor:
         self.kline_cache: dict[tuple[str, str], tuple[int, Decimal]] = {}
         # 已提示过的无计划持仓：symbol -> 持仓均价，同一笔持仓只提示一次
         self.unmanaged_noticed: dict[str, Decimal] = {}
+        self.fills_due = 0.0
 
     # ---------- 基础 ----------
 
@@ -537,7 +541,7 @@ class Executor:
             account = await session.get(TradingAccount, 1)
             symbols = list((await session.scalars(select(TradingSymbol))).all())
             client = await self.ensure_client(account)
-            if client is None or not symbols:
+            if client is None:
                 return
             positions = {}
             for p in await client.request("GET", "/fapi/v3/positionRisk"):
@@ -547,6 +551,17 @@ class Executor:
                         side="long" if amount > 0 else "short", qty=abs(amount), entry=Decimal(p["entryPrice"]),
                         break_even=Decimal(p["breakEvenPrice"]), mark=Decimal(p["markPrice"]),
                     )
+            # 交易列表为空时也要同步：手动成交同样计入历史仓位。
+            # 用独立会话：失败回滚会让会话里的对象全部过期，不能影响下面的对账
+            if time.monotonic() >= self.fills_due:
+                self.fills_due = time.monotonic() + FILLS_SYNC_SECONDS
+                try:
+                    async with SessionLocal() as fills_session:
+                        fetched = await sync_fills(fills_session, client, {s.symbol for s in symbols} | set(positions))
+                    if fetched:
+                        logger.info("同步成交记录 %d 条", fetched)
+                except Exception:
+                    logger.warning("同步成交记录失败，%ds 后重试", FILLS_SYNC_SECONDS, exc_info=True)
             for symbol in symbols:
                 try:
                     await self.reconcile(session, client, symbol, account.running, positions.get(symbol.symbol))

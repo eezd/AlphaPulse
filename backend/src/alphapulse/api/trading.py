@@ -1,10 +1,9 @@
 """模拟盘页：引擎状态、启停、交易币种、时间线。账户和持仓来自 trader 进程写入 Redis 的快照"""
 
 import json
-from collections import defaultdict
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -18,8 +17,9 @@ from alphapulse.api.market import call_binance, client as market_client
 from alphapulse.core.auth import require_admin
 from alphapulse.core.db import get_session
 from alphapulse.core.redis import KEY_PREFIX, redis
-from alphapulse.models import AiProvider, TradingAccount, TradingAnalysis, TradingEvent, TradingOrder, TradingSymbol
+from alphapulse.models import AiProvider, TradingAccount, TradingAnalysis, TradingEvent, TradingFill, TradingOrder, TradingSymbol
 from alphapulse.trading.client import OWN_CLIENT_ID, ExchangeError, public_get
+from alphapulse.trading.positions import build_positions
 from alphapulse.trading.plan import DAILY_ANALYSIS_LIMIT
 from alphapulse.trading.snapshot import read_snapshot
 
@@ -142,21 +142,35 @@ class EventOut(BaseModel):
     data: dict | None
 
 
-class PositionHistoryOut(BaseModel):
-    analysis_id: int
+class PositionHistoryItem(BaseModel):
     symbol: str
     direction: str
     opened_at: datetime
     closed_at: datetime
-    close_reason: str
-    # 本计划的入场成交。计划 3.1 之前，替换计划时持仓会交给新计划接管（如 #8），这类旧记录没有自己的入场成交，这两项为空
-    quantity: Decimal | None
-    entry_price: Decimal | None
-    # 止盈、止损、市价平仓的成交均价；外部平仓（如网页手动平仓）没有成交记录，为空
-    exit_price: Decimal | None
+    quantity: Decimal
+    entry_price: Decimal
+    exit_price: Decimal
     realized_pnl: Decimal
     commission: Decimal
     net: Decimal
+    # program：成交里有程序计划的订单；manual：在币安网页等程序外开的仓
+    source: str
+    analysis_id: int | None
+    close_reason: str | None
+
+
+class PositionSummary(BaseModel):
+    count: int
+    wins: int
+    net: Decimal
+    commission: Decimal
+
+
+class PositionHistoryPage(BaseModel):
+    # 按筛选条件统计全部仓位，不只是当前页
+    summary: PositionSummary
+    total: int
+    items: list[PositionHistoryItem]
 
 
 async def get_account(session: AsyncSession) -> TradingAccount:
@@ -345,41 +359,56 @@ async def list_events(
     return [EventOut.model_validate(e, from_attributes=True) for e in await session.scalars(query)]
 
 
-def average_fill(rows: list[TradingOrder]) -> tuple[Decimal, Decimal] | None:
-    """成交数量与按量加权的均价；没有成交时为空"""
-    qty = sum((r.filled_qty for r in rows), Decimal(0))
-    if not qty:
-        return None
-    return qty, sum((r.filled_qty * r.avg_price for r in rows), Decimal(0)) / qty
-
-
 @router.get("/positions/history")
 async def list_position_history(
     session: Annotated[AsyncSession, Depends(get_session)],
-    before: int | None = None,
+    symbol: str | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    outcome: Literal["profit", "loss"] | None = None,
+    source: Literal["program", "manual"] | None = None,
+    page: Annotated[int, Query(ge=1)] = 1,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
-) -> list[PositionHistoryOut]:
-    """已平仓的计划（入场成交过、持仓已归零），按计划 id 倒序分页；closed 的计划一定有 first_fill_at 和 result"""
-    query = select(TradingAnalysis).where(TradingAnalysis.plan_status == "closed").order_by(TradingAnalysis.id.desc()).limit(limit)
-    if before:
-        query = query.where(TradingAnalysis.id < before)
-    plans = list(await session.scalars(query))
-    fills: dict[int, list[TradingOrder]] = defaultdict(list)
-    for order in await session.scalars(
-        select(TradingOrder).where(TradingOrder.analysis_id.in_([p.id for p in plans]), TradingOrder.filled_qty > 0)
-    ):
-        fills[order.analysis_id].append(order)
+) -> PositionHistoryPage:
+    """由币安成交记录还原的已平仓仓位，按平仓时间倒序；start/end 按平仓时间筛选。
+    个人账户成交量小，每次全量还原后在内存里筛选、统计、分页"""
+    fills = list(await session.scalars(select(TradingFill).order_by(TradingFill.symbol, TradingFill.time, TradingFill.trade_id)))
+    # 程序下的普通单记录了 orderId；条件单（止损）触发后的订单号没有记录，靠同一仓位里的其他订单关联
+    order_plans = dict((await session.execute(
+        select(TradingOrder.exchange_id, TradingOrder.analysis_id)
+        .where(TradingOrder.is_algo.is_(False), TradingOrder.exchange_id.is_not(None), TradingOrder.analysis_id.is_not(None))
+    )).tuples().all())
+    plans = {a.id: a for a in await session.scalars(
+        select(TradingAnalysis).where(TradingAnalysis.id.in_(set(order_plans.values())))
+    )}
     items = []
-    for plan in plans:
-        entry = average_fill([o for o in fills[plan.id] if o.purpose == "entry"])
-        exit_fill = average_fill([o for o in fills[plan.id] if o.purpose != "entry"])
-        items.append(PositionHistoryOut(
-            analysis_id=plan.id, symbol=plan.symbol, direction=plan.sizing["direction"],
-            opened_at=plan.first_fill_at, closed_at=plan.closed_at, close_reason=plan.close_reason,
-            quantity=entry[0] if entry else None, entry_price=entry[1] if entry else None,
-            exit_price=exit_fill[1] if exit_fill else None, **plan.result,
+    for position in build_positions(fills):
+        linked = [plans[order_plans[str(o)]] for o in position.order_ids if str(o) in order_plans]
+        # 早期替换计划时持仓会交给新计划接管，优先取最终平仓的那个计划
+        plan = max(linked, key=lambda a: (a.plan_status == "closed", a.id)) if linked else None
+        items.append(PositionHistoryItem(
+            symbol=position.symbol, direction=position.direction, opened_at=position.opened_at, closed_at=position.closed_at,
+            quantity=position.quantity, entry_price=position.entry_price, exit_price=position.exit_price,
+            realized_pnl=position.realized_pnl, commission=position.commission, net=position.net,
+            source="program" if plan else "manual", analysis_id=plan.id if plan else None, close_reason=plan.close_reason if plan else None,
         ))
-    return items
+    items = [
+        i for i in items
+        if (symbol is None or i.symbol == symbol) and (start is None or i.closed_at >= start) and (end is None or i.closed_at < end)
+        and (outcome is None or (i.net > 0 if outcome == "profit" else i.net < 0)) and (source is None or i.source == source)
+    ]
+    items.sort(key=lambda i: i.closed_at, reverse=True)
+    summary = PositionSummary(
+        count=len(items), wins=sum(1 for i in items if i.net > 0),
+        net=sum((i.net for i in items), Decimal(0)), commission=sum((i.commission for i in items), Decimal(0)),
+    )
+    return PositionHistoryPage(summary=summary, total=len(items), items=items[(page - 1) * limit:page * limit])
+
+
+@router.get("/positions/history/symbols")
+async def list_position_history_symbols(session: Annotated[AsyncSession, Depends(get_session)]) -> list[str]:
+    """有过成交的币，供历史仓位筛选"""
+    return list(await session.scalars(select(TradingFill.symbol).distinct().order_by(TradingFill.symbol)))
 
 
 @router.post("/symbols/{symbol}/analyze", status_code=status.HTTP_202_ACCEPTED)
