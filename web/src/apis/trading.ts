@@ -319,6 +319,45 @@ export function listPositionHistorySymbols(): Promise<string[]> {
   return http.get("/trading/positions/history/symbols")
 }
 
+export type SignalHorizon = "1h" | "4h"
+
+/** 新闻信号前向记录：按模型标注方向（利多做多、利空做空）交易的统计；收益单位 bp */
+export interface NewsSignalStat {
+  category: "price_report" | "event" | "irrelevant"
+  symbol: string
+  horizon: SignalHorizon
+  n: number
+  mean_bp: number | null
+  t: number | null
+  /** 扣除来回手续费后的平均收益 */
+  net_bp: number | null
+  win_rate: number | null
+}
+
+export interface NewsSignalItem {
+  news_id: number
+  published_at: string
+  source_code: string
+  title: string
+  category: NewsSignalStat["category"]
+  direction: "bullish" | "bearish" | "neutral"
+  /** 进场后的原始涨跌（bp，未按方向取正负）；发布未满 4 小时为空 */
+  returns: Record<string, Record<SignalHorizon, number>> | null
+}
+
+export interface NewsSignals {
+  /** 前向记录的起点：之后发布的新闻才计入 */
+  start: string
+  labeled: number
+  filled: number
+  stats: NewsSignalStat[]
+  recent: NewsSignalItem[]
+}
+
+export function getNewsSignals(): Promise<NewsSignals> {
+  return http.get("/trading/news-signals")
+}
+
 export function getSymbolPlan(symbol: string): Promise<{ plan: Analysis | null, orders: OrderRow[] }> {
   return http.get(`/trading/symbols/${symbol}/plan`)
 }

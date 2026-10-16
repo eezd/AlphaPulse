@@ -1,13 +1,14 @@
 <script lang="ts" setup>
 import type { Effort, Provider } from "@/apis/settings"
 import type { Analysis, OrderRow, SnapshotPosition, TradingEvent, TradingStatus, TradingSymbol } from "@/apis/trading"
-import { Clock, Plus } from "@element-plus/icons-vue"
+import { Clock, Plus, Reading } from "@element-plus/icons-vue"
 import { EFFORTS, listProviders } from "@/apis/settings"
 import { deleteSymbol, getStatus, getSymbolPlan, isOwnOrder, listAnalyses, listEvents, listSymbols, manualAction, patchConfig, patchSymbol, requestAnalysis, startTrading, stopTrading } from "@/apis/trading"
 import { usePersisted } from "@/utils/storage"
 import { formatTime } from "@/utils/text"
 import AddSymbolDialog from "./components/AddSymbolDialog.vue"
 import AnalysisDrawer from "./components/AnalysisDrawer.vue"
+import NewsSignalDrawer from "./components/NewsSignalDrawer.vue"
 import PlanCard from "./components/PlanCard.vue"
 import PositionHistoryDrawer from "./components/PositionHistoryDrawer.vue"
 
@@ -30,6 +31,7 @@ const requesting = ref(false)
 const drawerVisible = ref(false)
 const drawerAnalysisId = ref<number | null>(null)
 const historyVisible = ref(false)
+const signalsVisible = ref(false)
 
 const snapshot = computed(() => status.value?.snapshot ?? null)
 const account = computed(() => snapshot.value?.account ?? null)
@@ -381,9 +383,14 @@ onBeforeUnmount(() => clearInterval(timer))
       <template #header>
         <div class="flex items-center justify-between">
           持仓（{{ positions.length }}）
-          <el-button link type="primary" :icon="Clock" @click="historyVisible = true">
-            历史仓位
-          </el-button>
+          <div>
+            <el-button link type="primary" :icon="Reading" @click="signalsVisible = true">
+              新闻信号
+            </el-button>
+            <el-button link type="primary" :icon="Clock" @click="historyVisible = true">
+              历史仓位
+            </el-button>
+          </div>
         </div>
       </template>
       <el-table :data="positions" empty-text="没有持仓" cell-class-name="num">
@@ -591,6 +598,7 @@ onBeforeUnmount(() => clearInterval(timer))
 
     <AddSymbolDialog v-model="addVisible" @added="onAdded" />
     <PositionHistoryDrawer v-model="historyVisible" @detail="openAnalysis" />
+    <NewsSignalDrawer v-model="signalsVisible" />
     <AnalysisDrawer v-model="drawerVisible" :analysis-id="drawerAnalysisId" />
   </div>
 </template>

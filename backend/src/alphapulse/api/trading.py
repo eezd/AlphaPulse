@@ -17,11 +17,13 @@ from alphapulse.api.market import call_binance, client as market_client
 from alphapulse.core.auth import require_admin
 from alphapulse.core.db import get_session
 from alphapulse.core.redis import KEY_PREFIX, redis
-from alphapulse.models import AiProvider, TradingAccount, TradingAnalysis, TradingEvent, TradingFill, TradingOrder, TradingSymbol
+from alphapulse.models import AiProvider, NewsItem, NewsSignal, TradingAccount, TradingAnalysis, TradingEvent, TradingFill, TradingOrder, TradingSymbol
 from alphapulse.trading.client import OWN_CLIENT_ID, ExchangeError, public_get
 from alphapulse.trading.executor import MANUAL_ACTION_KEY
+from alphapulse.trading.news_signals import FORWARD_START, SYMBOLS as SIGNAL_SYMBOLS, news_text
 from alphapulse.trading.positions import build_positions
 from alphapulse.trading.plan import DAILY_ANALYSIS_LIMIT
+from alphapulse.trading.signal_stats import Signal, summarize
 from alphapulse.trading.snapshot import read_snapshot
 
 router = APIRouter(prefix="/api/trading", tags=["trading"], dependencies=[Depends(require_admin)])
@@ -177,6 +179,37 @@ class PositionHistoryPage(BaseModel):
     summary: PositionSummary
     total: int
     items: list[PositionHistoryItem]
+
+
+class NewsSignalStat(BaseModel):
+    category: str
+    symbol: str
+    horizon: str
+    n: int
+    mean_bp: float | None
+    t: float | None
+    # 扣除来回手续费后的平均收益
+    net_bp: float | None
+    win_rate: float | None
+
+
+class NewsSignalItem(BaseModel):
+    news_id: int
+    published_at: datetime
+    source_code: str
+    title: str
+    category: str
+    direction: str
+    # 进场后的原始涨跌（bp，未按方向取正负）：{symbol: {"1h": ..., "4h": ...}}；未满 4 小时为空
+    returns: dict[str, dict[str, float]] | None
+
+
+class NewsSignalsOut(BaseModel):
+    start: datetime
+    labeled: int
+    filled: int
+    stats: list[NewsSignalStat]
+    recent: list[NewsSignalItem]
 
 
 async def get_account(session: AsyncSession) -> TradingAccount:
@@ -452,6 +485,32 @@ async def list_position_history(
 async def list_position_history_symbols(session: Annotated[AsyncSession, Depends(get_session)]) -> list[str]:
     """有过成交的币，供历史仓位筛选"""
     return list(await session.scalars(select(TradingFill.symbol).distinct().order_by(TradingFill.symbol)))
+
+
+@router.get("/news-signals")
+async def list_news_signals(session: Annotated[AsyncSession, Depends(get_session)]) -> NewsSignalsOut:
+    """新闻信号前向记录：按标注方向交易的累计统计和最近 50 条"""
+    rows = (await session.execute(
+        select(NewsSignal, NewsItem.published_at, NewsItem.source_code, news_text())
+        .join(NewsItem, NewsItem.id == NewsSignal.news_id).order_by(NewsItem.published_at)
+    )).all()
+    filled = [Signal(published_at, s.category, s.direction, s.prices) for s, published_at, _, _ in rows if s.prices]
+    horizons = ("1h", "4h")
+
+    def returns(prices: dict | None) -> dict[str, dict[str, float]] | None:
+        if prices is None:
+            return None
+        return {sym: {h: (float(p[h]) / float(p["entry"]) - 1) * 1e4 for h in horizons} for sym, p in prices.items()}
+
+    return NewsSignalsOut(
+        start=FORWARD_START, labeled=len(rows), filled=len(filled),
+        stats=[NewsSignalStat(**r) for r in summarize(filled, SIGNAL_SYMBOLS, horizons)],
+        recent=[
+            NewsSignalItem(news_id=s.news_id, published_at=published_at, source_code=source, title=title,
+                           category=s.category, direction=s.direction, returns=returns(s.prices))
+            for s, published_at, source, title in reversed(rows[-50:])
+        ],
+    )
 
 
 @router.post("/symbols/{symbol}/analyze", status_code=status.HTTP_202_ACCEPTED)

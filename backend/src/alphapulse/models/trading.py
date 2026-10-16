@@ -145,3 +145,19 @@ class TradingFill(Base):
     commission: Mapped[Decimal] = mapped_column(Numeric)
     commission_asset: Mapped[str] = mapped_column(String(16))
     time: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class NewsSignal(Base):
+    """新闻信号前向记录：加密相关新闻的模型标注，以及发布后 BTC/ETH 的价格，检验按标注方向交易是否有优势。只记录，不下单"""
+
+    __tablename__ = "news_signals"
+
+    news_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("news_items.id"), primary_key=True)
+    # price_report（行情播报）/ event（事件）/ irrelevant（与币价无关）
+    category: Mapped[str] = mapped_column(String(16))
+    # 对 BTC 短期（几小时）的影响：bullish / bearish / neutral
+    direction: Mapped[str] = mapped_column(String(8))
+    model: Mapped[str] = mapped_column(String(64))
+    labeled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # 发布 4 小时后回填的 1m 开盘价：{symbol: {"open": 发布所在分钟, "entry": +5 分钟, "1h": +65 分钟, "4h": +245 分钟}}；为空表示尚未回填
+    prices: Mapped[dict | None] = mapped_column(JSONB)

@@ -1,4 +1,4 @@
-"""模拟盘交易进程：同步账户快照、执行器对账、调度分析。
+"""模拟盘交易进程：同步账户快照、执行器对账、调度分析、记录新闻信号。
 
 用法：python -m alphapulse.trading.engine
 """
@@ -13,6 +13,7 @@ from alphapulse.core.db import SessionLocal
 from alphapulse.models import TradingAnalysis, TradingSymbol
 from alphapulse.trading.analyst import run_analysis
 from alphapulse.trading.executor import executor_loop
+from alphapulse.trading.news_signals import news_signal_loop
 from alphapulse.trading.schedule import routine_requests
 from alphapulse.trading.snapshot import snapshot_loop
 
@@ -74,6 +75,7 @@ async def main() -> None:
         tg.create_task(snapshot_loop())
         tg.create_task(executor_loop())
         tg.create_task(analysis_loop())
+        tg.create_task(news_signal_loop())
 
 
 if __name__ == "__main__":
