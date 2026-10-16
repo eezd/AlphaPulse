@@ -13,16 +13,36 @@ const revisions = ref<Revision[]>([])
 const activeTab = ref("content")
 // 当前查看的修订序号，与上一版对比
 const selectedRevision = ref<number>()
+// 加载失败（错误提示已由 http 拦截器弹出）：停止转圈，显示重试
+const failed = ref(false)
+// 连续点击不同新闻时，只采用最后一次请求的结果
+let requestSeq = 0
 
-watch(() => props.newsId, async (id) => {
-  if (id == null)
-    return
+async function load(id: number) {
+  const seq = ++requestSeq
+  failed.value = false
+  try {
+    const [news, revs] = await Promise.all([getNews(id), listRevisions(id)])
+    if (seq !== requestSeq)
+      return
+    detail.value = news
+    revisions.value = revs
+    selectedRevision.value = revs[0]?.revision_no
+  } catch (error) {
+    if (seq === requestSeq)
+      failed.value = true
+    throw error
+  }
+}
+
+watch(() => props.newsId, (id) => {
   activeTab.value = "content"
   detail.value = undefined
-  const [news, revs] = await Promise.all([getNews(id), listRevisions(id)])
-  detail.value = news
-  revisions.value = revs
-  selectedRevision.value = revs[0]?.revision_no
+  revisions.value = []
+  if (id == null)
+    requestSeq++
+  else
+    load(id)
 })
 
 // 第三方正文放进无脚本权限的 sandbox iframe，避免其中的脚本访问本站
@@ -110,6 +130,11 @@ const diffStats = computed(() => ({
         </el-tab-pane>
       </el-tabs>
     </template>
+    <el-empty v-else-if="failed" description="加载失败" class="m-auto">
+      <el-button type="primary" @click="load(newsId)">
+        重试
+      </el-button>
+    </el-empty>
     <div v-else v-loading="true" class="h-full" />
   </el-card>
 </template>

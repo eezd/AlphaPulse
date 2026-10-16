@@ -275,7 +275,7 @@ export interface PositionHistory {
   opened_at: string
   closed_at: string
   close_reason: string
-  /** 计划被替换后接管持仓的新计划没有自己的入场成交，为空 */
+  /** 计划 3.1 之前替换计划时会接管旧计划的持仓，这类旧记录没有自己的入场成交，为空 */
   quantity: string | null
   entry_price: string | null
   /** 外部平仓没有成交记录，为空 */

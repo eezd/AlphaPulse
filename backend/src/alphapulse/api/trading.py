@@ -149,7 +149,7 @@ class PositionHistoryOut(BaseModel):
     opened_at: datetime
     closed_at: datetime
     close_reason: str
-    # 本计划的入场成交；计划被替换时持仓由新计划接管，新计划没有自己的入场成交，这两项为空
+    # 本计划的入场成交。计划 3.1 之前，替换计划时持仓会交给新计划接管（如 #8），这类旧记录没有自己的入场成交，这两项为空
     quantity: Decimal | None
     entry_price: Decimal | None
     # 止盈、止损、市价平仓的成交均价；外部平仓（如网页手动平仓）没有成交记录，为空
