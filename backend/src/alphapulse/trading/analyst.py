@@ -7,7 +7,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from pydantic import ValidationError
@@ -21,6 +21,7 @@ from alphapulse.core.db import SessionLocal
 from alphapulse.models import AiProvider, TradingAccount, TradingAnalysis, TradingEvent, TradingOrder, TradingSymbol
 from alphapulse.trading import plan as rules
 from alphapulse.trading.client import ExchangeError, mark_price, symbol_rules
+from alphapulse.trading.executor import CLOSE_REASON_LABELS
 from alphapulse.trading.plan import PlanContext, PlanError, TradePlan, atr, check_setup, parse_bars
 from alphapulse.trading.snapshot import read_snapshot
 
@@ -30,6 +31,8 @@ READ_TOOLS = ("search_news", "get_news", "search_symbols", "get_klines", "get_ti
 # 最后一轮只开放 submit_trade_plan，逼模型给出结论
 MAX_ROUNDS = 6
 RECENT_DECISIONS = 2
+# skill 的连续止损暂停、止损后冷却、每日开仓上限要靠这段成交记录判断
+RECENT_TRADES_HOURS = 24
 DIRECTION_LABELS = {"long": "做多", "short": "做空"}
 CONFIDENCE_LABELS = {"high": "高", "medium": "中", "low": "低"}
 ACTION_LABELS = {"plan": "新计划", "keep": "维持当前计划", "exit": "结束当前计划", "wait": "观望"}
@@ -107,6 +110,15 @@ def plan_brief(decision: dict, sizing: dict | None) -> dict:
     return brief
 
 
+def trade_brief(a: TradingAnalysis) -> str:
+    setup = a.decision["setup"]
+    head = (f"#{a.id} {DIRECTION_LABELS[a.decision['direction']]}，区间 {setup['zone_low']}–{setup['zone_high']}，"
+            f"挂单 {a.sizing['entry']['price']}，{local(a.first_fill_at)} 成交")
+    if a.plan_status != "closed":
+        return f"{head}，{'持仓中' if a.plan_status == 'open' else '平仓中'}"
+    return f"{head}，{local(a.closed_at)} {CLOSE_REASON_LABELS.get(a.close_reason, a.close_reason)}，净 {Decimal(a.result['net']):.2f} USDT"
+
+
 async def recent_atr(symbol: str) -> Decimal:
     """最近已收盘 5m K 线的 ATR14，用于计算止损"""
     bars = parse_bars(await market_client.get("um", "klines", {"symbol": symbol, "interval": rules.ATR_INTERVAL, "limit": rules.ATR_PERIOD + 2}))
@@ -151,6 +163,12 @@ async def prepare(symbol: str, reasons: list[str], analysis_id: int) -> Prepared
             select(TradingAnalysis)
             .where(TradingAnalysis.symbol == symbol, TradingAnalysis.status == "done", TradingAnalysis.id != analysis_id)
             .order_by(TradingAnalysis.id.desc()).limit(RECENT_DECISIONS)
+        )).all()
+        trades = (await session.scalars(
+            select(TradingAnalysis)
+            .where(TradingAnalysis.symbol == symbol, TradingAnalysis.dry_run.is_(False),
+                   TradingAnalysis.first_fill_at >= datetime.now(UTC) - timedelta(hours=RECENT_TRADES_HOURS))
+            .order_by(TradingAnalysis.first_fill_at.desc())
         )).all()
         current = await session.scalar(
             select(TradingAnalysis)
@@ -213,6 +231,9 @@ async def prepare(symbol: str, reasons: list[str], analysis_id: int) -> Prepared
         "",
         "## 最近决策（新的在前）",
         *([f"- {local(a.started_at)}{'（试运行）' if a.dry_run else ''}：{dump(plan_brief(a.decision, a.sizing))}" for a in recent] or ["无"]),
+        "",
+        f"## 近 {RECENT_TRADES_HOURS} 小时已成交的计划（新的在前，共 {len(trades)} 次开仓）",
+        *([f"- {trade_brief(a)}" for a in trades] or ["无"]),
         "",
         "## 预取的行情（实盘数据，已取，不要用相同参数重复调用）",
         await prefetch(symbol),
