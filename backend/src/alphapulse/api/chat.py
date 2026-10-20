@@ -29,7 +29,7 @@ MAX_TOOL_ROUNDS = 8
 TOOL_PREVIEW_CHARS = 2000
 STOPPED_RESULT = json.dumps({"error": "用户已停止生成，未完成的工具结果尚未确认，请核对后再重试"}, ensure_ascii=False)
 
-# api 只有一个进程：同一时间只允许一轮生成，Reset 也要等生成结束
+# api 只有一个进程：生成与 Reset 共用互斥锁，不能同时修改当前会话。
 generating = asyncio.Lock()
 logger = logging.getLogger("alphapulse.api.chat")
 
@@ -127,7 +127,7 @@ async def get_chat_session(session: Annotated[AsyncSession, Depends(get_session)
 async def send_message(body: SendIn) -> AsyncIterator[ServerSentEvent]:
     """事件：prompt、thinking、delta、tool_call、tool_result、skill_draft、context_updated、usage、error、done"""
     if generating.locked():
-        yield event("error", {"message": "上一轮还在生成，请等待完成或先停止"})
+        yield event("error", {"message": "正在生成或重置会话，请等待完成"})
         return
     async with generating:
         async with SessionLocal() as session:
@@ -233,11 +233,12 @@ async def send_message(body: SendIn) -> AsyncIterator[ServerSentEvent]:
 async def reset(body: ResetIn, session: Annotated[AsyncSession, Depends(get_session)]) -> None:
     """结束当前会话（消息保留在库里，不再展示），可选同时清空 CONTEXT.md（写入空版本，可找回）"""
     if generating.locked():
-        raise HTTPException(status.HTTP_409_CONFLICT, "正在生成，请先停止")
-    await session.execute(update(ChatSession).where(ChatSession.ended_at.is_(None)).values(ended_at=datetime.now(UTC)))
-    if body.clear_context:
-        session.add(ContextVersion(content="", source="reset"))
-    await session.commit()
+        raise HTTPException(status.HTTP_409_CONFLICT, "正在生成或重置会话，请稍后重试")
+    async with generating:
+        await session.execute(update(ChatSession).where(ChatSession.ended_at.is_(None)).values(ended_at=datetime.now(UTC)))
+        if body.clear_context:
+            session.add(ContextVersion(content="", source="reset"))
+        await session.commit()
 
 
 @router.get("/context")

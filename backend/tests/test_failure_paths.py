@@ -179,3 +179,54 @@ def test_skill_rename_rejects_whitespace_without_writing(trading):
         assert error.value.status_code == 400
         assert node.name == "原名称"
     asyncio.run(check())
+
+
+def test_chat_reset_blocks_new_generation_until_commit(trading, monkeypatch):
+    from alphapulse.api import chat
+
+    async def check():
+        monkeypatch.setattr(chat, "generating", asyncio.Lock())
+        entered, finish = asyncio.Event(), asyncio.Event()
+        monkeypatch.setattr(chat, "SessionLocal", lambda: pytest.fail("重置期间不能进入生成的数据库路径"))
+        saved = []
+        class Session:
+            async def execute(self, statement):
+                entered.set()
+                await finish.wait()
+            def add(self, row):
+                saved.append(row)
+            async def commit(self):
+                assert chat.generating.locked()
+        async def reset_and_send():
+            task = asyncio.create_task(chat.reset(chat.ResetIn(clear_context=True), Session()))
+            try:
+                await entered.wait()
+                events = [event async for event in chat.send_message(chat.SendIn(text="重置期间的新消息"))]
+                assert len(events) == 1 and events[0].event == "error"
+                assert not task.done()
+            finally:
+                finish.set()
+                await task
+        await asyncio.wait_for(reset_and_send(), timeout=2)
+        assert len(saved) == 1 and saved[0].content == "" and saved[0].source == "reset"
+        assert not chat.generating.locked()
+    asyncio.run(check())
+
+
+def test_chat_reset_rejects_busy_generation_and_releases_lock_on_failure(trading, monkeypatch):
+    from fastapi import HTTPException
+    from alphapulse.api import chat
+
+    async def check():
+        monkeypatch.setattr(chat, "generating", asyncio.Lock())
+        class Session:
+            async def execute(self, statement):
+                raise RuntimeError("重置写库失败")
+        async with chat.generating:
+            with pytest.raises(HTTPException) as error:
+                await chat.reset(chat.ResetIn(), Session())
+            assert error.value.status_code == 409
+        with pytest.raises(RuntimeError, match="重置写库失败"):
+            await chat.reset(chat.ResetIn(), Session())
+        assert not chat.generating.locked()
+    asyncio.run(check())
