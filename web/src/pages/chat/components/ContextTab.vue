@@ -12,19 +12,32 @@ const versions = ref<ChatContext[]>([])
 const saving = ref(false)
 const dirty = computed(() => content.value !== (current.value?.content ?? ""))
 const preview = computed(() => renderMarkdown(content.value))
+let loadSeq = 0
 
 async function load() {
-  current.value = await getChatContext()
-  content.value = current.value.content
-  versions.value = await listChatContextVersions()
+  if (saving.value)
+    return
+  const seq = ++loadSeq
+  const previous = content.value
+  const [context, history] = await Promise.all([getChatContext(), listChatContextVersions()])
+  if (seq !== loadSeq)
+    return
+  current.value = context
+  versions.value = history
+  if (content.value === previous)
+    content.value = context.content
 }
 
 async function save() {
   saving.value = true
+  // 失效保存前的读取，保存期间也不启动新的读取，避免旧版本覆盖编辑区。
+  ++loadSeq
   try {
-    await saveChatContext(content.value)
+    const saved = await saveChatContext(content.value)
+    // 保存回执就是已保存版本，编辑区保留后续输入。
+    current.value = saved
     ElMessage.success("已保存")
-    await load()
+    versions.value = await listChatContextVersions()
   } finally {
     saving.value = false
   }

@@ -14,10 +14,10 @@ interface Version {
   version_no: number
 }
 
-function setupPage(page: string, modules: Record<string, unknown>, confirm: () => Promise<unknown> = async () => {}) {
-  const filename = new URL(`../src/pages/${page}/index.vue`, import.meta.url)
+function setupComponent(component: string, modules: Record<string, unknown>, confirm: () => Promise<unknown> = async () => {}) {
+  const filename = new URL(`../src/pages/${component}`, import.meta.url)
   const { descriptor } = parse(readFileSync(filename, "utf8"))
-  const script = compileScript(descriptor, { id: page }).content
+  const script = compileScript(descriptor, { id: component }).content
   const code = ts.transpileModule(script, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
   const globals = {
     ref: vue.ref,
@@ -28,17 +28,17 @@ function setupPage(page: string, modules: Record<string, unknown>, confirm: () =
     onBeforeUnmount() {},
     onBeforeRouteLeave() {},
     setInterval() {},
-    ElMessage: { success() {} },
+    ElMessage: { success() {}, warning() {} },
     ElMessageBox: { confirm }
   }
   const mod = new Module(filename.pathname)
   const load = (path: string) => path in modules ? modules[path] : require(path)
-  runInNewContext(code, { require: load, module: mod, exports: mod.exports, ...globals }, { filename: `${page}.vue` })
+  runInNewContext(code, { require: load, module: mod, exports: mod.exports, ...globals }, { filename: component })
   return mod.exports.default.setup({}, { expose() {} })
 }
 
 function skills(api: Record<string, unknown>, confirm?: () => Promise<unknown>) {
-  return setupPage("skills", {
+  return setupComponent("skills/index.vue", {
     "@/apis/skills": api,
     "@/components/SkillTree.vue": {},
     "@/components/SkillVersionDrawer.vue": {},
@@ -115,7 +115,7 @@ async function checkPublishSwitch() {
 async function checkTickerSwitch() {
   const btc = Promise.withResolvers<Record<string, string>>()
   const eth = Promise.withResolvers<Record<string, string>>()
-  const page = setupPage("market", {
+  const page = setupComponent("market/index.vue", {
     "@/apis/market": { getTicker: (_: string, symbol: string) => symbol === "BTCUSDT" ? btc.promise : eth.promise },
     "@/utils/storage": { usePersisted: (_: string, value: unknown) => vue.ref(value) },
     "./chart": { DEFAULT_FAVORITE_INTERVALS: [], INTERVAL_LABELS: {}, MAIN_INDICATORS: [], SUB_INDICATORS: [] },
@@ -155,9 +155,123 @@ async function checkPublishConfirmationSwitch() {
   assert.deepEqual(published, [])
 }
 
+function contextEditor(api: Record<string, unknown>) {
+  return setupComponent("chat/components/ContextTab.vue", {
+    "@/apis/chat": api,
+    "@/utils/markdown": { renderMarkdown: (text: string) => text },
+    "@/utils/text": { formatTime: (text: string) => text }
+  })
+}
+
+async function checkContextRefresh() {
+  const updated = Promise.withResolvers<{ id: number, content: string }>()
+  const api = {
+    getChatContext: async () => ({ id: 1, content: "原内容" }),
+    listChatContextVersions: async () => []
+  }
+  const page = contextEditor(api)
+  await new Promise(resolve => setImmediate(resolve))
+  api.getChatContext = () => updated.promise
+  const refresh = page.refreshFromChat()
+  page.content.value = "刷新期间的新输入"
+  updated.resolve({ id: 2, content: "Chat 更新" })
+  await refresh
+  assert.equal(page.current.value.content, "Chat 更新")
+  assert.equal(page.content.value, "刷新期间的新输入")
+  assert.equal(page.dirty.value, true)
+}
+
+async function checkContextSave() {
+  const saved = Promise.withResolvers<{ id: number, content: string }>()
+  let submitted = ""
+  const page = contextEditor({
+    getChatContext: async () => ({ id: 1, content: "原内容" }),
+    listChatContextVersions: async () => [],
+    saveChatContext: (content: string) => {
+      submitted = content
+      return saved.promise
+    }
+  })
+  await new Promise(resolve => setImmediate(resolve))
+  page.content.value = "提交的修改"
+  const saving = page.save()
+  page.content.value = "保存期间继续输入"
+  saved.resolve({ id: 2, content: submitted })
+  await saving
+  assert.equal(submitted, "提交的修改")
+  assert.equal(page.current.value.content, "提交的修改")
+  assert.equal(page.content.value, "保存期间继续输入")
+  assert.equal(page.dirty.value, true)
+}
+
+async function checkContextReloadAfterSave() {
+  const stale = Promise.withResolvers<{ id: number, content: string }>()
+  const api = {
+    getChatContext: async () => ({ id: 1, content: "原内容" }),
+    listChatContextVersions: async () => [],
+    saveChatContext: async (content: string) => ({ id: 2, content })
+  }
+  const page = contextEditor(api)
+  await new Promise(resolve => setImmediate(resolve))
+  api.getChatContext = () => stale.promise
+  const loading = page.load()
+  page.content.value = "已保存修改"
+  await page.save()
+  stale.resolve({ id: 1, content: "旧响应" })
+  await loading
+  assert.equal(page.current.value.id, 2)
+  assert.equal(page.content.value, "已保存修改")
+  assert.equal(page.dirty.value, false)
+}
+
+async function checkContextRefreshDuringSave() {
+  const saved = Promise.withResolvers<{ id: number, content: string }>()
+  const page = contextEditor({
+    getChatContext: async () => ({ id: 1, content: "原内容" }),
+    listChatContextVersions: async () => [],
+    saveChatContext: () => saved.promise
+  })
+  await new Promise(resolve => setImmediate(resolve))
+  page.content.value = "提交的修改"
+  const saving = page.save()
+  await page.load()
+  assert.equal(page.content.value, "提交的修改")
+  saved.resolve({ id: 2, content: "提交的修改" })
+  await saving
+  assert.equal(page.dirty.value, false)
+}
+
+async function checkContextFailedSave() {
+  const saved = Promise.withResolvers<{ id: number, content: string }>()
+  const stale = Promise.withResolvers<{ id: number, content: string }>()
+  const api = {
+    getChatContext: async () => ({ id: 1, content: "原内容" }),
+    listChatContextVersions: async () => [],
+    saveChatContext: () => saved.promise
+  }
+  const page = contextEditor(api)
+  await new Promise(resolve => setImmediate(resolve))
+  page.content.value = "保存失败后应保留的草稿"
+  const saving = page.save()
+  api.getChatContext = () => stale.promise
+  const loading = page.load()
+  saved.reject(new Error("保存失败"))
+  await assert.rejects(saving, /保存失败/)
+  stale.resolve({ id: 1, content: "原内容" })
+  await loading
+  assert.equal(page.content.value, "保存失败后应保留的草稿")
+  assert.equal(page.dirty.value, true)
+  assert.equal(page.saving.value, false)
+}
+
 await checkSkillSwitch()
 await checkSkillReload()
 await checkPublishSwitch()
 await checkTickerSwitch()
 await checkPublishConfirmationSwitch()
-console.log("页面异步竞态：5 项回归检查通过")
+await checkContextRefresh()
+await checkContextSave()
+await checkContextReloadAfterSave()
+await checkContextRefreshDuringSave()
+await checkContextFailedSave()
+console.log("页面异步竞态：10 项回归检查通过")
