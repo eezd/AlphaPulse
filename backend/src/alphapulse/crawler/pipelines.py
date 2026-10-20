@@ -53,16 +53,17 @@ class NewsPipeline:
                 news = await session.scalar(locked)
             if inserted_id is not None:
                 kind = "new"
-            elif news.content_hash != digest:
-                kind = "revised"
+            else:
+                # 主记录保存最新元数据；正文修订仍只由内容哈希变化决定。
                 for field in UPDATABLE_FIELDS:
                     setattr(news, field, item[field])
-                news.content_hash = digest
-                news.revision_no += 1
                 news.last_seen_at = func.now()
-            else:
-                kind = None
-                news.last_seen_at = func.now()
+                if news.content_hash != digest:
+                    kind = "revised"
+                    news.content_hash = digest
+                    news.revision_no += 1
+                else:
+                    kind = None
 
             if kind:
                 session.add(NewsRevision(

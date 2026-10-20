@@ -230,3 +230,57 @@ def test_chat_reset_rejects_busy_generation_and_releases_lock_on_failure(trading
             await chat.reset(chat.ResetIn(), Session())
         assert not chat.generating.locked()
     asyncio.run(check())
+
+
+@pytest.mark.parametrize("change", ["metadata", "content", "unchanged"])
+def test_news_updates_metadata_without_creating_content_revision(trading, monkeypatch, change):
+    from alphapulse.crawler import pipelines
+    from alphapulse.models import NewsItem
+
+    original = {
+        "url": "https://example.invalid/1", "title": "原标题", "summary": "摘要", "content_html": "<p>正文</p>",
+        "content_text": "正文", "author": "原作者", "tags": ["旧标签"], "is_paywalled": False,
+        "published_at": datetime(2026, 10, 20, tzinfo=UTC), "source_updated_at": None, "extra": {},
+    }
+    news = NewsItem(id=1, source_code="cls_telegraph", external_id="1", revision_no=1,
+                    content_hash=pipelines.content_hash(original), **original)
+    incoming = dict(original)
+    if change != "unchanged":
+        incoming.update(author="更正作者", tags=["新标签"], is_paywalled=True, extra={"level": 1},
+                        published_at=original["published_at"] + timedelta(minutes=1),
+                        source_updated_at=original["published_at"] + timedelta(minutes=2))
+    if change == "content":
+        incoming.update(title="修订标题", content_html="<p>修订正文</p>", content_text="修订正文")
+    revisions, events = [], []
+    class Session:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            pass
+        async def scalar(self, statement):
+            return news
+        def add(self, revision):
+            revisions.append(revision)
+        async def commit(self):
+            pass
+    async def publish(channel, data):
+        events.append(json.loads(data))
+    monkeypatch.setattr(pipelines, "SessionLocal", Session)
+    monkeypatch.setattr(pipelines.redis, "publish", publish)
+    run = SimpleNamespace(items_seen=0, items_new=0, items_revised=0)
+    pipeline = pipelines.NewsPipeline(SimpleNamespace(spider=SimpleNamespace(run=run)))
+
+    async def check():
+        for _ in range(2):
+            await pipeline.process_item({**incoming, "source_code": "cls_telegraph", "external_id": "1", "raw_response_id": 10})
+        assert {key: getattr(news, key) for key in pipelines.UPDATABLE_FIELDS} == incoming
+        assert news.content_hash == pipelines.content_hash(incoming)
+        assert news.revision_no == (2 if change == "content" else 1)
+        assert run.items_seen == 2 and run.items_new == 0
+        if change == "content":
+            assert len(revisions) == run.items_revised == 1
+            assert revisions[0].revision_no == 2 and revisions[0].content_html == incoming["content_html"]
+            assert events == [{"id": 1, "source_code": "cls_telegraph", "kind": "revised"}]
+        else:
+            assert not revisions and not events and run.items_revised == 0
+    asyncio.run(check())
