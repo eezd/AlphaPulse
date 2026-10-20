@@ -1,5 +1,5 @@
 <script lang="ts" setup>
-import type { Exchange, Provider, ProviderForm } from "@/apis/settings"
+import type { Exchange, ExchangeName, Provider, ProviderForm } from "@/apis/settings"
 import { Plus } from "@element-plus/icons-vue"
 import { createProvider, deleteExchange, deleteProvider, EFFORTS, getExchange, listProviders, patchProvider, putExchange, testExchange, testProvider } from "@/apis/settings"
 import { formatTime } from "@/utils/text"
@@ -78,7 +78,7 @@ async function test(p: Provider) {
 
 load()
 
-// ---------- 币安模拟盘 ----------
+// ---------- 模拟盘 ----------
 
 const exchange = ref<Exchange>()
 const exchangeDialogVisible = ref(false)
@@ -90,6 +90,16 @@ async function loadExchange() {
   exchange.value = await getExchange()
 }
 
+async function changeExchange(value: ExchangeName) {
+  exchangeSaving.value = true
+  try {
+    exchange.value = await putExchange({ exchange: value })
+    ElMessage.success("已切换模拟盘，另一家交易所的凭证和历史记录仍保留")
+  } finally {
+    exchangeSaving.value = false
+  }
+}
+
 function openExchangeEdit() {
   exchangeForm.value = { api_key: "", api_secret: "" }
   exchangeDialogVisible.value = true
@@ -98,7 +108,7 @@ function openExchangeEdit() {
 async function saveExchange() {
   exchangeSaving.value = true
   try {
-    exchange.value = await putExchange(exchangeForm.value)
+    exchange.value = await putExchange({ exchange: exchange.value?.exchange, ...exchangeForm.value })
     exchangeDialogVisible.value = false
     ElMessage.success("已保存")
   } finally {
@@ -253,8 +263,15 @@ loadExchange()
       <template #header>
         <div class="flex items-center justify-between">
           <div>
-            币安模拟盘
-            <span class="ml-3 text-xs text-slate-500 font-normal">只连接币安模拟盘（demo-fapi.binance.com）；在 demo.binance.com 的 API 管理创建 key，并开启合约交易权限</span>
+            模拟盘交易所
+            <el-select :model-value="exchange?.exchange" class="ml-3 w-36" :disabled="exchange?.running || exchangeSaving" @update:model-value="changeExchange">
+              <el-option value="binance" label="币安模拟盘" />
+              <el-option value="bybit" label="Bybit 模拟盘" />
+            </el-select>
+            <div class="mt-2 text-xs text-slate-500 font-normal">
+              {{ exchange?.exchange === "bybit" ? "在 Bybit 主站切换到模拟交易后创建 API Key，并开启合约交易权限；实盘和 Testnet 的 Key 不可用。" : "在 demo.binance.com 的 API 管理创建 Key，并开启合约交易权限。" }}
+              两家凭证分别保存；切换不会撤销原交易所的挂单，旧挂单仍须在原平台处理。
+            </div>
           </div>
           <div>
             <el-button :disabled="!exchange?.configured" :loading="exchangeTesting" @click="runExchangeTest">
@@ -285,7 +302,7 @@ loadExchange()
       </el-descriptions>
     </el-card>
 
-    <el-dialog v-model="exchangeDialogVisible" title="币安模拟盘 API key" width="560px">
+    <el-dialog v-model="exchangeDialogVisible" :title="`${exchange?.exchange === 'bybit' ? 'Bybit' : '币安'}模拟盘 API Key`" width="560px">
       <el-form :model="exchangeForm" label-width="100px">
         <el-form-item label="API Key" required>
           <el-input v-model="exchangeForm.api_key" type="password" show-password autocomplete="new-password" />

@@ -116,8 +116,8 @@ async def patch(node_id: int, body: NodePatch, session: Annotated[AsyncSession, 
     node = await get_node(session, node_id)
     if body.name is not None:
         name = body.name.strip()
-        if "/" in name:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "名称不能包含 /")
+        if not name or "/" in name:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "名称不能为空，也不能包含 /")
         duplicate = await session.scalar(select(SkillNode.id).where(
             SkillNode.parent_id.is_not_distinct_from(node.parent_id), SkillNode.name == name, SkillNode.id != node_id
         ))

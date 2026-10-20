@@ -14,6 +14,8 @@ const latest = ref<SkillVersion | null>(null)
 const content = ref("")
 const dirty = computed(() => selected.value?.kind === "skill" && content.value !== (latest.value?.content ?? ""))
 const saving = ref(false)
+const loadingContent = ref(false)
+let contentVersion = 0
 const historyVisible = ref(false)
 const preview = computed(() => renderMarkdown(content.value))
 
@@ -24,13 +26,25 @@ async function loadTree() {
 }
 
 async function loadContent() {
-  if (selected.value?.kind !== "skill") {
-    latest.value = null
-    content.value = ""
+  const version = ++contentVersion
+  const skill = selected.value
+  latest.value = null
+  content.value = ""
+  if (skill?.kind !== "skill") {
+    loadingContent.value = false
     return
   }
-  latest.value = (await listSkillVersions(selected.value.id))[0] ?? null
-  content.value = latest.value?.content ?? ""
+  loadingContent.value = true
+  try {
+    const versions = await listSkillVersions(skill.id)
+    if (version !== contentVersion)
+      return
+    latest.value = versions[0] ?? null
+    content.value = latest.value?.content ?? ""
+  } finally {
+    if (version === contentVersion)
+      loadingContent.value = false
+  }
 }
 
 async function select(node: SkillNode) {
@@ -43,11 +57,18 @@ async function select(node: SkillNode) {
 }
 
 async function saveDraft(): Promise<SkillVersion | null> {
+  if (loadingContent.value || saving.value)
+    return null
   if (!selected.value || !dirty.value)
     return latest.value
+  const id = selected.value.id
+  const version = contentVersion
   saving.value = true
   try {
-    latest.value = await saveSkillDraft(selected.value.id, content.value)
+    const saved = await saveSkillDraft(id, content.value)
+    if (version !== contentVersion)
+      return null
+    latest.value = saved
     ElMessage.success(`已保存草稿 v${latest.value.version_no}`)
     await loadTree()
     return latest.value
@@ -57,11 +78,18 @@ async function saveDraft(): Promise<SkillVersion | null> {
 }
 
 async function publishLatest() {
+  const skill = selected.value
+  if (!skill)
+    return
+  const id = skill.id
+  const contentRequest = contentVersion
   const version = await saveDraft()
-  if (!version || !selected.value)
+  if (!version || selectedId.value !== id || contentRequest !== contentVersion)
     return
   await ElMessageBox.confirm(`发布 v${version.version_no}？发布后 Chat 下一轮起按此版本判断。`, "发布确认", { type: "warning" })
-  await publishSkillVersion(selected.value.id, version.id)
+  if (selectedId.value !== id || contentRequest !== contentVersion)
+    return
+  await publishSkillVersion(id, version.id)
   ElMessage.success(`已发布 v${version.version_no}`)
   await loadTree()
 }
@@ -148,6 +176,7 @@ loadTree()
         <div class="min-h-0 flex flex-1 gap-3">
           <textarea
             v-model="content" placeholder="用 Markdown 写下投资经验、判断流程或输出规范"
+            :disabled="loadingContent || saving"
             class="box-border flex-1 resize-none border border-slate-300 rounded-lg border-solid p-3 text-sm text-slate-800 leading-6 font-mono outline-none focus:border-[var(--el-color-primary)]"
           />
           <el-scrollbar class="flex-1 border border-slate-200 rounded-lg border-solid bg-slate-50/50">
@@ -157,10 +186,10 @@ loadTree()
         </div>
 
         <div class="flex gap-2">
-          <el-button :disabled="!dirty" :loading="saving" @click="saveDraft">
+          <el-button :disabled="loadingContent || !dirty" :loading="saving" @click="saveDraft">
             保存草稿
           </el-button>
-          <el-button type="primary" :disabled="!dirty && !selected.has_draft" :loading="saving" @click="publishLatest">
+          <el-button type="primary" :disabled="loadingContent || (!dirty && !selected.has_draft)" :loading="saving" @click="publishLatest">
             {{ dirty ? "保存并发布" : "发布最新版本" }}
           </el-button>
           <el-button @click="historyVisible = true">

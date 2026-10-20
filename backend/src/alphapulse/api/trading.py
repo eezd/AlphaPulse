@@ -1,13 +1,13 @@
 """模拟盘页：引擎状态、启停、交易币种、时间线。账户和持仓来自 trader 进程写入 Redis 的快照"""
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import func, or_, select
+from sqlalchemy import BigInteger, cast, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,23 +17,17 @@ from alphapulse.api.market import call_binance, client as market_client
 from alphapulse.core.auth import require_admin
 from alphapulse.core.db import get_session
 from alphapulse.core.redis import KEY_PREFIX, redis
-from alphapulse.models import AiProvider, NewsItem, NewsSignal, TradingAccount, TradingAnalysis, TradingEvent, TradingFill, TradingOrder, TradingSymbol
-from alphapulse.trading.client import OWN_CLIENT_ID, ExchangeError, public_get
-from alphapulse.trading.executor import MANUAL_ACTION_KEY
-from alphapulse.trading.news_signals import FORWARD_START, SYMBOLS as SIGNAL_SYMBOLS, news_text
+from alphapulse.models import AiProvider, NewsItem, NewsSignal, TradingAccount, TradingAnalysis, TradingCredential, TradingEvent, TradingFill, TradingOrder, TradingSymbol
+from alphapulse.trading.client import OWN_CLIENT_ID, ExchangeError, active_exchange, public_get
+from alphapulse.trading.news_signals import FORWARD_START, SYMBOLS as SIGNAL_SYMBOLS, is_forward_sample, news_text
 from alphapulse.trading.positions import build_positions
-from alphapulse.trading.plan import DAILY_ANALYSIS_LIMIT
 from alphapulse.trading.signal_stats import Signal, summarize
-from alphapulse.trading.snapshot import read_snapshot
+from alphapulse.trading.snapshot import SnapshotError, read_snapshot, require_fresh_snapshot
 
 router = APIRouter(prefix="/api/trading", tags=["trading"], dependencies=[Depends(require_admin)])
 
 SYMBOLS_CACHE_KEY = f"{KEY_PREFIX}trading:symbols"
 SYMBOLS_CACHE_SECONDS = 3600
-# 删除前要求快照足够新，否则无法确认没有仓位和挂单
-SNAPSHOT_FRESH_SECONDS = 30
-# 平仓、清除挂单的请求等执行器取走的时限：引擎没及时处理就作废，不在之后意外执行
-MANUAL_ACTION_TTL_SECONDS = 30
 # 执行器正在管理的计划状态
 LIVE_PLAN_STATUSES = ("pending", "open", "closing")
 
@@ -46,6 +40,7 @@ class TodayUsage(BaseModel):
 
 
 class StatusOut(BaseModel):
+    exchange: Literal["binance", "bybit"]
     configured: bool
     provider_id: int | None
     reasoning_effort: str | None
@@ -57,6 +52,7 @@ class StatusOut(BaseModel):
 class ConfigIn(BaseModel):
     provider_id: int | None = None
     reasoning_effort: llm.Effort | None = None
+    daily_analysis_limit: Annotated[int, Field(strict=True, ge=1, le=2147483647)] = 60
 
 
 class SymbolOption(BaseModel):
@@ -89,6 +85,7 @@ class SymbolIn(BaseModel):
 
 
 class AnalysisOut(BaseModel):
+    exchange: str
     id: int
     symbol: str
     reasons: list[str]
@@ -140,6 +137,7 @@ class SymbolPlanOut(BaseModel):
 
 
 class EventOut(BaseModel):
+    exchange: str
     id: int
     created_at: datetime
     symbol: str | None
@@ -213,7 +211,7 @@ class NewsSignalsOut(BaseModel):
 
 
 async def get_account(session: AsyncSession) -> TradingAccount:
-    return await session.get(TradingAccount, 1) or TradingAccount(id=1)
+    return await session.get(TradingAccount, 1) or TradingAccount(id=1, exchange="binance", daily_analysis_limit=60)
 
 
 @router.get("/status")
@@ -227,10 +225,12 @@ async def get_status(session: Annotated[AsyncSession, Depends(get_session)]) -> 
             func.coalesce(func.sum(TradingAnalysis.usage["output_tokens"].as_integer()), 0),
         ).where(TradingAnalysis.started_at >= today)
     )).one()
+    credential = await session.get(TradingCredential, account.exchange)
     return StatusOut(
-        configured=account.api_key_encrypted is not None, provider_id=account.provider_id, reasoning_effort=account.reasoning_effort,
+        exchange=account.exchange, configured=bool(credential and credential.api_key_encrypted),
+        provider_id=account.provider_id, reasoning_effort=account.reasoning_effort,
         snapshot=await read_snapshot(),
-        today=TodayUsage(analyses=count, limit=DAILY_ANALYSIS_LIMIT, input_tokens=input_tokens, output_tokens=output_tokens),
+        today=TodayUsage(analyses=count, limit=account.daily_analysis_limit, input_tokens=input_tokens, output_tokens=output_tokens),
     )
 
 
@@ -247,9 +247,9 @@ async def patch_config(body: ConfigIn, session: Annotated[AsyncSession, Depends(
     return await get_status(session)
 
 
-async def symbol_options() -> list[dict]:
+async def symbol_options(exchange: str) -> list[dict]:
     """可交易的币：模拟盘和实盘都在交易的 USDT 永续，只含加密货币（排除美股、商品等 TradFi）"""
-    if cached := await redis.get(SYMBOLS_CACHE_KEY):
+    if cached := await redis.get(f"{SYMBOLS_CACHE_KEY}:{exchange}"):
         return json.loads(cached)
 
     def crypto_perpetuals(info: dict) -> dict[str, str]:
@@ -260,23 +260,27 @@ async def symbol_options() -> list[dict]:
         }
 
     try:
-        demo = crypto_perpetuals(await public_get("/fapi/v1/exchangeInfo"))
+        if exchange == "bybit":
+            from alphapulse.trading.bybit import instruments
+            demo = {symbol: row["baseCoin"] for symbol, row in (await instruments()).items()}
+        else:
+            demo = crypto_perpetuals(await public_get("/fapi/v1/exchangeInfo"))
     except ExchangeError as e:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e)) from None
     # 分析用实盘行情，执行在模拟盘，两边都要有
     mainnet = crypto_perpetuals(await call_binance(market_client.get("um", "exchange_info")))
     options = [{"symbol": s, "base": b} for s, b in sorted(demo.items()) if s in mainnet]
-    await redis.set(SYMBOLS_CACHE_KEY, json.dumps(options), ex=SYMBOLS_CACHE_SECONDS)
+    await redis.set(f"{SYMBOLS_CACHE_KEY}:{exchange}", json.dumps(options), ex=SYMBOLS_CACHE_SECONDS)
     return options
 
 
 @router.get("/symbol-options")
-async def list_symbol_options() -> list[SymbolOption]:
-    return [SymbolOption.model_validate(o) for o in await symbol_options()]
+async def list_symbol_options(session: Annotated[AsyncSession, Depends(get_session)]) -> list[SymbolOption]:
+    return [SymbolOption.model_validate(o) for o in await symbol_options(await active_exchange(session))]
 
 
 async def current_equity() -> Decimal | None:
-    """账户权益，取自 trader 的快照；进程离线或未同步到币安时为空"""
+    """账户权益，取自 trader 的快照；进程离线或未同步到交易所时为空"""
     snapshot = await read_snapshot()
     return Decimal(snapshot["account"]["margin_balance"]) if snapshot and snapshot["account"] else None
 
@@ -289,14 +293,18 @@ async def get_symbol(session: AsyncSession, symbol: str) -> TradingSymbol:
 
 
 async def set_running(session: AsyncSession, s: TradingSymbol, running: bool) -> None:
-    if running and (await get_account(session)).api_key_encrypted is None:
+    exchange = await active_exchange(session)
+    credential = await session.get(TradingCredential, exchange)
+    if running and (credential is None or credential.api_key_encrypted is None):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "还没有填写模拟盘 key，请先到环境变量页填写")
     if running and s.capital_usdt is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{s.symbol} 还没有设置交易资金")
+    if running and not any(o["symbol"] == s.symbol for o in await symbol_options(exchange)):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{s.symbol} 不受当前模拟盘支持")
     if s.running != running:
         s.running = running
         s.running_changed_at = datetime.now(LOCAL_TZ)
-        session.add(TradingEvent(
+        session.add(TradingEvent(exchange=await active_exchange(session),
             symbol=s.symbol, kind="started" if running else "stopped",
             message="开始行情交易" if running else "停止行情交易：不再分析，撤销未成交的入场单；已有持仓的止损、止盈等程序规则继续执行",
         ))
@@ -331,7 +339,7 @@ async def patch_symbol(symbol: str, body: SymbolConfigIn, session: Annotated[Asy
             raise HTTPException(status.HTTP_400_BAD_REQUEST,
                                 f"各币交易资金合计不能超过账户权益 {equity:.2f} USDT（其他币已分配 {others:.2f}，最多还能设 {max(equity - others, 0):.2f}）")
     s.capital_usdt = capital
-    session.add(TradingEvent(symbol=symbol, kind="capital_changed",
+    session.add(TradingEvent(exchange=await active_exchange(session), symbol=symbol, kind="capital_changed",
                              message=f"交易资金设为 {capital} USDT" if capital is not None else "清空交易资金"))
     await session.commit()
 
@@ -340,9 +348,9 @@ async def patch_symbol(symbol: str, body: SymbolConfigIn, session: Annotated[Asy
 async def list_symbols(session: Annotated[AsyncSession, Depends(get_session)]) -> list[SymbolOut]:
     symbols = (await session.scalars(select(TradingSymbol).order_by(TradingSymbol.added_at))).all()
     equity = await current_equity()
-    analyzing = set((await session.scalars(select(TradingAnalysis.symbol).where(TradingAnalysis.status == "running"))).all())
+    analyzing = set((await session.scalars(select(TradingAnalysis.symbol).where(TradingAnalysis.exchange == await active_exchange(session), TradingAnalysis.status == "running"))).all())
     plans = {p.symbol: p for p in await session.scalars(
-        select(TradingAnalysis).where(TradingAnalysis.plan_status.in_(LIVE_PLAN_STATUSES)).order_by(TradingAnalysis.id)
+        select(TradingAnalysis).where(TradingAnalysis.exchange == await active_exchange(session), TradingAnalysis.plan_status.in_(LIVE_PLAN_STATUSES)).order_by(TradingAnalysis.id)
     )}
     return [
         SymbolOut(
@@ -360,10 +368,10 @@ async def list_symbols(session: Annotated[AsyncSession, Depends(get_session)]) -
 @router.post("/symbols", status_code=status.HTTP_201_CREATED)
 async def add_symbol(body: SymbolIn, session: Annotated[AsyncSession, Depends(get_session)]) -> None:
     symbol = body.symbol.strip().upper()
-    if not any(o["symbol"] == symbol for o in await symbol_options()):
+    if not any(o["symbol"] == symbol for o in await symbol_options(await active_exchange(session))):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{symbol} 不是模拟盘和实盘都在交易的加密货币 USDT 永续合约")
     session.add(TradingSymbol(symbol=symbol))
-    session.add(TradingEvent(symbol=symbol, kind="symbol_added", message="加入交易列表"))
+    session.add(TradingEvent(exchange=await active_exchange(session), symbol=symbol, kind="symbol_added", message="加入交易列表"))
     try:
         await session.commit()
     except IntegrityError:
@@ -371,12 +379,10 @@ async def add_symbol(body: SymbolIn, session: Annotated[AsyncSession, Depends(ge
 
 
 async def fresh_snapshot(symbol: str, action: str) -> dict:
-    """引擎在线且刚和币安同步过的快照"""
-    snapshot = await read_snapshot()
-    synced_at = snapshot and snapshot["synced_at"] and datetime.fromisoformat(snapshot["synced_at"])
-    if not synced_at or datetime.now(LOCAL_TZ) - synced_at > timedelta(seconds=SNAPSHOT_FRESH_SECONDS):
-        raise HTTPException(status.HTTP_409_CONFLICT, f"无法确认 {symbol} 的仓位和挂单（引擎离线或连接币安失败），暂时不能{action}")
-    return snapshot
+    try:
+        return require_fresh_snapshot(await read_snapshot())
+    except SnapshotError as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, f"无法确认 {symbol} 的仓位和挂单，暂时不能{action}：{e}") from e
 
 
 async def ensure_idle(session: AsyncSession, symbol: str, action: str) -> TradingSymbol:
@@ -385,7 +391,7 @@ async def ensure_idle(session: AsyncSession, symbol: str, action: str) -> Tradin
     if s is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"{symbol} 不在交易列表中")
     busy = await session.scalar(select(func.count()).where(
-        TradingAnalysis.symbol == symbol,
+        TradingAnalysis.exchange == await active_exchange(session), TradingAnalysis.symbol == symbol,
         or_(TradingAnalysis.status == "running", TradingAnalysis.plan_status.in_(("proposed", *LIVE_PLAN_STATUSES))),
     ))
     if busy:
@@ -403,7 +409,7 @@ async def delete_symbol(symbol: str, session: Annotated[AsyncSession, Depends(ge
     """只移出列表；分析、订单流水和时间线保留"""
     s = await ensure_idle(session, symbol, "删除")
     await session.delete(s)
-    session.add(TradingEvent(symbol=symbol, kind="symbol_removed", message="移出交易列表"))
+    session.add(TradingEvent(exchange=await active_exchange(session), symbol=symbol, kind="symbol_removed", message="移出交易列表"))
     await session.commit()
 
 
@@ -416,7 +422,9 @@ async def manual_action(symbol: str, action: Literal["close", "cancel"], session
     if action == "close":
         # 不停止的话，平仓后会重新分析，可能马上又开仓
         await set_running(session, s, False)
-    await redis.set(MANUAL_ACTION_KEY.format(symbol), action, ex=MANUAL_ACTION_TTL_SECONDS)
+    session.add(TradingEvent(exchange=await active_exchange(session), symbol=symbol, kind="manual_requested", level="warn",
+                             message=f"已请求{label}，等待交易所确认", data={"action": action}))
+    await session.commit()
 
 
 @router.get("/events")
@@ -427,7 +435,7 @@ async def list_events(
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> list[EventOut]:
     """按 id 倒序分页；指定 symbol 时同时返回账户级事件（启停等）"""
-    query = select(TradingEvent).order_by(TradingEvent.id.desc()).limit(limit)
+    query = select(TradingEvent).where(TradingEvent.exchange == await active_exchange(session)).order_by(TradingEvent.id.desc()).limit(limit)
     if symbol:
         query = query.where(or_(TradingEvent.symbol == symbol, TradingEvent.symbol.is_(None)))
     if before:
@@ -446,13 +454,15 @@ async def list_position_history(
     page: Annotated[int, Query(ge=1)] = 1,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> PositionHistoryPage:
-    """由币安成交记录还原的已平仓仓位，按平仓时间倒序；start/end 按平仓时间筛选。
+    """由当前交易所成交记录还原的已平仓仓位，按平仓时间倒序；start/end 按平仓时间筛选。
     个人账户成交量小，每次全量还原后在内存里筛选、统计、分页"""
-    fills = list(await session.scalars(select(TradingFill).order_by(TradingFill.symbol, TradingFill.time, TradingFill.trade_id)))
+    exchange = await active_exchange(session)
+    trade_order = cast(TradingFill.trade_id, BigInteger) if exchange == "binance" else TradingFill.trade_id
+    fills = list(await session.scalars(select(TradingFill).where(TradingFill.exchange == exchange).order_by(TradingFill.symbol, TradingFill.time, trade_order)))
     # 程序下的普通单记录了 orderId；条件单（止损）触发后的订单号没有记录，靠同一仓位里的其他订单关联
     order_plans = dict((await session.execute(
         select(TradingOrder.exchange_id, TradingOrder.analysis_id)
-        .where(TradingOrder.is_algo.is_(False), TradingOrder.exchange_id.is_not(None), TradingOrder.analysis_id.is_not(None))
+        .where(TradingOrder.exchange == await active_exchange(session), TradingOrder.is_algo.is_(False), TradingOrder.exchange_id.is_not(None), TradingOrder.analysis_id.is_not(None))
     )).tuples().all())
     plans = {a.id: a for a in await session.scalars(
         select(TradingAnalysis).where(TradingAnalysis.id.in_(set(order_plans.values())))
@@ -484,7 +494,7 @@ async def list_position_history(
 @router.get("/positions/history/symbols")
 async def list_position_history_symbols(session: Annotated[AsyncSession, Depends(get_session)]) -> list[str]:
     """有过成交的币，供历史仓位筛选"""
-    return list(await session.scalars(select(TradingFill.symbol).distinct().order_by(TradingFill.symbol)))
+    return list(await session.scalars(select(TradingFill.symbol).where(TradingFill.exchange == await active_exchange(session)).distinct().order_by(TradingFill.symbol)))
 
 
 @router.get("/news-signals")
@@ -494,6 +504,8 @@ async def list_news_signals(session: Annotated[AsyncSession, Depends(get_session
         select(NewsSignal, NewsItem.published_at, NewsItem.source_code, news_text())
         .join(NewsItem, NewsItem.id == NewsSignal.news_id).order_by(NewsItem.published_at)
     )).all()
+    # 旧标注保留在库里，但事后标注不能混入前向记录或统计。
+    rows = [r for r in rows if is_forward_sample(r[1], r[0].labeled_at)]
     filled = [Signal(published_at, s.category, s.direction, s.prices) for s, published_at, _, _ in rows if s.prices]
     horizons = ("1h", "4h")
 
@@ -519,7 +531,7 @@ async def request_analysis(symbol: str, session: Annotated[AsyncSession, Depends
     s = await get_symbol(session, symbol)
     if s.capital_usdt is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{symbol} 还没有设置交易资金")
-    running = await session.scalar(select(func.count()).where(TradingAnalysis.symbol == symbol, TradingAnalysis.status == "running"))
+    running = await session.scalar(select(func.count()).where(TradingAnalysis.symbol == symbol, TradingAnalysis.exchange == await active_exchange(session), TradingAnalysis.status == "running"))
     if running or s.analysis_requested_at is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, f"{symbol} 已在分析或排队中")
     s.analysis_requested_at = datetime.now(LOCAL_TZ)
@@ -533,7 +545,7 @@ async def list_analyses(
     symbol: str | None = None,
     limit: Annotated[int, Query(ge=1, le=50)] = 10,
 ) -> list[AnalysisOut]:
-    query = select(TradingAnalysis).order_by(TradingAnalysis.id.desc()).limit(limit)
+    query = select(TradingAnalysis).where(TradingAnalysis.exchange == await active_exchange(session)).order_by(TradingAnalysis.id.desc()).limit(limit)
     if symbol:
         query = query.where(TradingAnalysis.symbol == symbol)
     return [AnalysisOut.model_validate(a, from_attributes=True) for a in await session.scalars(query)]
@@ -550,7 +562,7 @@ async def get_analysis(analysis_id: int, session: Annotated[AsyncSession, Depend
 @router.get("/symbols/{symbol}/plan")
 async def get_symbol_plan(symbol: str, session: Annotated[AsyncSession, Depends(get_session)]) -> SymbolPlanOut:
     plan = await session.scalar(
-        select(TradingAnalysis).where(TradingAnalysis.symbol == symbol, TradingAnalysis.plan_status.in_(("proposed", *LIVE_PLAN_STATUSES)))
+        select(TradingAnalysis).where(TradingAnalysis.exchange == await active_exchange(session), TradingAnalysis.symbol == symbol, TradingAnalysis.plan_status.in_(("proposed", *LIVE_PLAN_STATUSES)))
         .order_by(TradingAnalysis.id.desc()).limit(1)
     )
     if plan is None:

@@ -9,18 +9,29 @@ from alphapulse.core.db import Base
 
 
 class TradingAccount(Base):
-    """币安模拟盘账户：单行（id=1）。key 只以密文存储；启停和交易资金按币种设置，见 TradingSymbol"""
+    """模拟盘全局设置：单行（id=1），凭证按交易所单独保存"""
 
     __tablename__ = "trading_account"
     __table_args__ = (CheckConstraint("id = 1", name="trading_account_single_row"),)
 
     id: Mapped[int] = mapped_column(primary_key=True, default=1)
-    api_key_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary)
-    api_secret_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary)
-    api_key_hint: Mapped[str | None] = mapped_column(String(8))
+    exchange: Mapped[str] = mapped_column(String(16), default="binance", server_default="binance")
     # 交易分析用的模型配置；为空时用默认配置
     provider_id: Mapped[int | None] = mapped_column(ForeignKey("ai_providers.id", ondelete="SET NULL"))
     reasoning_effort: Mapped[str | None] = mapped_column(String(8))
+    daily_analysis_limit: Mapped[int] = mapped_column(Integer, default=60, server_default="60")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class TradingCredential(Base):
+    """每家模拟盘独立保存凭证，切换交易所不覆盖另一家的 key"""
+
+    __tablename__ = "trading_credentials"
+
+    exchange: Mapped[str] = mapped_column(String(16), primary_key=True)
+    api_key_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary)
+    api_secret_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary)
+    api_key_hint: Mapped[str | None] = mapped_column(String(8))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
@@ -43,6 +54,8 @@ class TradingAnalysis(Base):
     """一次模型分析；action=plan 的行同时是一个交易计划，plan_* 等字段记录其生命周期"""
 
     __tablename__ = "trading_analyses"
+    exchange: Mapped[str] = mapped_column(String(16), index=True, default="binance", server_default="binance")
+
     __table_args__ = (Index("ix_trading_analyses_symbol_started", "symbol", "started_at"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -84,6 +97,8 @@ class TradingOrder(Base):
 
     __tablename__ = "trading_orders"
 
+    exchange: Mapped[str] = mapped_column(String(16), index=True, default="binance", server_default="binance")
+
     id: Mapped[int] = mapped_column(primary_key=True)
     analysis_id: Mapped[int | None] = mapped_column(ForeignKey("trading_analyses.id"), index=True)
     symbol: Mapped[str] = mapped_column(String(32), index=True)
@@ -102,7 +117,7 @@ class TradingOrder(Base):
     # submitting / new / partially_filled / filled / canceled / expired / rejected / finished / failed
     status: Mapped[str] = mapped_column(String(16), default="submitting")
     # orderId 或 algoId
-    exchange_id: Mapped[str | None] = mapped_column(String(32))
+    exchange_id: Mapped[str | None] = mapped_column(String(64))
     filled_qty: Mapped[Decimal] = mapped_column(Numeric, default=0)
     avg_price: Mapped[Decimal | None] = mapped_column(Numeric)
     error: Mapped[str | None] = mapped_column(Text)
@@ -114,6 +129,8 @@ class TradingEvent(Base):
     """只追加的时间线"""
 
     __tablename__ = "trading_events"
+    exchange: Mapped[str] = mapped_column(String(16), index=True, default="binance", server_default="binance")
+
     __table_args__ = (Index("ix_trading_events_symbol_id", "symbol", "id"),)
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -129,14 +146,16 @@ class TradingEvent(Base):
 
 
 class TradingFill(Base):
-    """币安成交记录（userTrades），历史仓位由它还原；包括程序外的手动成交。trade id 只在单个 symbol 内唯一"""
+    """模拟盘成交记录，历史仓位由它还原；包括手动成交，按交易所和币种隔离 ID"""
 
     __tablename__ = "trading_fills"
+    exchange: Mapped[str] = mapped_column(String(16), primary_key=True, default="binance", server_default="binance")
+
     __table_args__ = (Index("ix_trading_fills_symbol_time", "symbol", "time"),)
 
     symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
-    trade_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    order_id: Mapped[int] = mapped_column(BigInteger)
+    trade_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    order_id: Mapped[str] = mapped_column(String(64))
     # BUY / SELL；账户为单向持仓，买为正、卖为负即可还原仓位
     side: Mapped[str] = mapped_column(String(4))
     price: Mapped[Decimal] = mapped_column(Numeric)

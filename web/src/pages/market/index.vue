@@ -45,6 +45,7 @@ let chart: Chart | null = null
 let barCallback: ((bar: KLineData) => void) | undefined
 // 切换交易对或周期后，丢弃旧请求的返回
 let loadVersion = 0
+let tickerVersion = 0
 
 function toBar(r: KlineRow): KLineData {
   return { timestamp: r[0], open: r[1], high: r[2], low: r[3], close: r[4], volume: r[5], turnover: r[6] }
@@ -85,8 +86,11 @@ const { connected, subscribe } = useMarketSocket(
 )
 
 async function loadTicker() {
+  const version = ++tickerVersion
   const { market, symbol } = selection.value
   const t = await getTicker(market, symbol)
+  if (version !== tickerVersion)
+    return
   Object.assign(ticker, {
     last: +t.lastPrice,
     high: +t.highPrice,

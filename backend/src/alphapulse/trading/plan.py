@@ -14,8 +14,6 @@ from pydantic import BaseModel, Field
 
 Direction = Literal["long", "short"]
 
-# 所有币合计每天（北京时间）最多自动分析的次数
-DAILY_ANALYSIS_LIMIT = 60
 RISK_PCT = Decimal("0.01")
 LOW_CONFIDENCE_FACTOR = Decimal("0.5")
 MAX_LEVERAGE = 3

@@ -20,10 +20,11 @@ from alphapulse.api.market import client as market_client
 from alphapulse.core.db import SessionLocal
 from alphapulse.models import AiProvider, TradingAccount, TradingAnalysis, TradingEvent, TradingOrder, TradingSymbol
 from alphapulse.trading import plan as rules
-from alphapulse.trading.client import ExchangeError, mark_price, symbol_rules
+from alphapulse.trading.client import ExchangeError, active_exchange, mark_price, symbol_rules
 from alphapulse.trading.executor import CLOSE_REASON_LABELS
 from alphapulse.trading.plan import PlanContext, PlanError, TradePlan, atr, check_setup, parse_bars
-from alphapulse.trading.snapshot import read_snapshot
+from alphapulse.trading.schedule import daily_limit_reached
+from alphapulse.trading.snapshot import SnapshotError, read_snapshot, require_fresh_snapshot
 
 logger = logging.getLogger("alphapulse.trading.analyst")
 
@@ -93,6 +94,7 @@ class AnalysisError(Exception):
 
 @dataclass
 class Prepared:
+    exchange: str
     provider: AiProvider
     effort: str | None
     dry_run: bool
@@ -159,20 +161,21 @@ async def prepare(symbol: str, reasons: list[str], analysis_id: int) -> Prepared
         if provider is None:
             raise AnalysisError("没有可用的模型配置，请先到「环境变量」页面添加")
         session.expunge(provider)
+        exchange = account.exchange
         recent = (await session.scalars(
             select(TradingAnalysis)
-            .where(TradingAnalysis.symbol == symbol, TradingAnalysis.status == "done", TradingAnalysis.id != analysis_id)
+            .where(TradingAnalysis.exchange == exchange, TradingAnalysis.symbol == symbol, TradingAnalysis.status == "done", TradingAnalysis.id != analysis_id)
             .order_by(TradingAnalysis.id.desc()).limit(RECENT_DECISIONS)
         )).all()
         trades = (await session.scalars(
             select(TradingAnalysis)
-            .where(TradingAnalysis.symbol == symbol, TradingAnalysis.dry_run.is_(False),
+            .where(TradingAnalysis.exchange == exchange, TradingAnalysis.symbol == symbol, TradingAnalysis.dry_run.is_(False),
                    TradingAnalysis.first_fill_at >= datetime.now(UTC) - timedelta(hours=RECENT_TRADES_HOURS))
             .order_by(TradingAnalysis.first_fill_at.desc())
         )).all()
         current = await session.scalar(
             select(TradingAnalysis)
-            .where(TradingAnalysis.symbol == symbol, TradingAnalysis.plan_status.in_(("pending", "open", "closing")), TradingAnalysis.dry_run.is_(False))
+            .where(TradingAnalysis.exchange == exchange, TradingAnalysis.symbol == symbol, TradingAnalysis.plan_status.in_(("pending", "open", "closing")), TradingAnalysis.dry_run.is_(False))
             .order_by(TradingAnalysis.id.desc()).limit(1)
         )
         fills = [
@@ -186,14 +189,17 @@ async def prepare(symbol: str, reasons: list[str], analysis_id: int) -> Prepared
         capital_usdt = target.capital_usdt
         effort = account.reasoning_effort or provider.reasoning_effort
 
-    snapshot = await read_snapshot()
-    if not snapshot or not snapshot["account"]:
-        raise AnalysisError("取不到模拟盘账户快照（引擎未同步到币安），无法计算仓位")
+    try:
+        snapshot = require_fresh_snapshot(await read_snapshot())
+    except SnapshotError as e:
+        raise AnalysisError(f"无法计算仓位：{e}") from e
+    if snapshot["exchange"] != exchange:
+        raise AnalysisError("分析期间切换了交易所，请重新分析")
     equity = Decimal(snapshot["account"]["margin_balance"])
     capital = min(capital_usdt, equity)
     position = next((p for p in snapshot["positions"] if p["symbol"] == symbol), None)
-    symbol_rules_ = await symbol_rules(symbol)
-    mark = await mark_price(symbol)
+    symbol_rules_ = await symbol_rules(symbol, exchange)
+    mark = await mark_price(symbol, exchange)
     context = PlanContext(
         mark_price=mark, capital=capital, rules=symbol_rules_, atr=await recent_atr(symbol),
         has_plan=current is not None, position_side=position_side(snapshot, symbol),
@@ -212,7 +218,8 @@ async def prepare(symbol: str, reasons: list[str], analysis_id: int) -> Prepared
         f"- 本次单笔风险金额：{risk:.2f} USDT（{_pct(rules.RISK_PCT)}；置信度低时 {risk * rules.LOW_CONFIDENCE_FACTOR:.2f}）",
         f"- 名义仓位上限：{capital * rules.MAX_LEVERAGE:.2f} USDT（{rules.MAX_LEVERAGE} 倍该币交易资金）",
         f"- 模拟盘交易规则：价格精度 {symbol_rules_.tick_size}，数量精度 {symbol_rules_.step_size}，最小下单金额 {symbol_rules_.min_notional} USDT",
-        f"- 模拟盘标记价：{mark}（校验以此为准；行情数据来自实盘，两者通常相差不到 0.1%）",
+        f"- 执行交易所：{exchange} 模拟盘；行情研究数据来自币安实盘，跨交易所价格可能有差异",
+        f"- 模拟盘标记价：{mark}（下单校验以此为准）",
         f"- 最近已收盘 5m K 线的 ATR14：{context.atr:.{max(0, -symbol_rules_.tick_size.as_tuple().exponent)}f}（程序按它计算止损）",
         "",
         "## 当前持仓与挂单（模拟盘）",
@@ -238,7 +245,7 @@ async def prepare(symbol: str, reasons: list[str], analysis_id: int) -> Prepared
         "## 预取的行情（实盘数据，已取，不要用相同参数重复调用）",
         await prefetch(symbol),
     ]
-    return Prepared(provider=provider, effort=effort, dry_run=dry_run, system=system, user_text="\n".join(lines), context=context)
+    return Prepared(exchange=exchange, provider=provider, effort=effort, dry_run=dry_run, system=system, user_text="\n".join(lines), context=context)
 
 
 async def complete(prepared: Prepared, messages: list[dict], tools: list[llm.ToolSpec]) -> llm.Completion:
@@ -250,7 +257,8 @@ async def complete(prepared: Prepared, messages: list[dict], tools: list[llm.Too
 
 async def add_event(symbol: str, analysis_id: int, kind: str, message: str, level: str = "info", data: dict | None = None) -> None:
     async with SessionLocal() as session:
-        session.add(TradingEvent(symbol=symbol, analysis_id=analysis_id, kind=kind, level=level, message=message, data=data))
+        analysis = await session.get(TradingAnalysis, analysis_id)
+        session.add(TradingEvent(exchange=analysis.exchange, symbol=symbol, analysis_id=analysis_id, kind=kind, level=level, message=message, data=data))
         await session.commit()
 
 
@@ -272,7 +280,7 @@ async def submit(prepared: Prepared, symbol: str, analysis_id: int, arguments: d
     except ValidationError as e:
         return dump({"error": "参数无效", "details": e.errors(include_url=False)}), None
     # 分析可能持续几分钟，按提交时的标记价、持仓和 ATR 校验
-    prepared.context.mark_price = await mark_price(symbol)
+    prepared.context.mark_price = await mark_price(symbol, prepared.exchange)
     prepared.context.atr = await recent_atr(symbol)
     snapshot = await read_snapshot()
     if snapshot:
@@ -288,8 +296,13 @@ async def submit(prepared: Prepared, symbol: str, analysis_id: int, arguments: d
 async def run_analysis(symbol: str, reasons: list[str]) -> None:
     """一次完整的分析；结果和失败原因都写进 trading_analyses 和时间线，不向外抛出"""
     async with SessionLocal() as session:
+        # 串行核验额度并占用名额，防止并发分析或已排队请求越过新上限。
+        await session.scalar(select(TradingAccount).where(TradingAccount.id == 1).with_for_update())
+        if reasons != ["手动分析"] and await daily_limit_reached(session):
+            await session.commit()
+            return
         target = await session.get(TradingSymbol, symbol)
-        analysis = TradingAnalysis(symbol=symbol, reasons=reasons, dry_run=not (target and target.running), status="running")
+        analysis = TradingAnalysis(exchange=await active_exchange(session), symbol=symbol, reasons=reasons, dry_run=not (target and target.running), status="running")
         session.add(analysis)
         await session.commit()
         analysis_id, dry_run = analysis.id, analysis.dry_run

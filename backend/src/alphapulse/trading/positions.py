@@ -10,7 +10,7 @@ class Fill(Protocol):
     """一笔成交；models.TradingFill 满足此接口"""
 
     symbol: str
-    order_id: int
+    order_id: str
     side: str
     price: Decimal
     qty: Decimal
@@ -36,7 +36,9 @@ class ClosedPosition:
     # 只计 USDT 计价的手续费，与 Executor.realized 口径一致
     commission: Decimal = Decimal(0)
     # 参与这笔仓位的订单，用于关联程序的计划
-    order_ids: set[int] = field(default_factory=set)
+    order_ids: set[str] = field(default_factory=set)
+    # 结算计划时核对入场成交是否全部进入已平仓仓位，不能只凭订单 ID 判断。
+    entry_quantities: dict[str, Decimal] = field(default_factory=dict)
     # 带符号的持仓量：多为正、空为负
     position: Decimal = Decimal(0)
 
@@ -70,6 +72,7 @@ def build_positions(fills: list[Fill]) -> list[ClosedPosition]:
                 part = remaining
                 pos.quantity += abs(part)
                 pos.open_value += abs(part) * fill.price
+                pos.entry_quantities[fill.order_id] = pos.entry_quantities.get(fill.order_id, Decimal(0)) + abs(part)
             else:
                 part = remaining if abs(remaining) <= abs(pos.position) else -pos.position
                 pos.close_qty += abs(part)

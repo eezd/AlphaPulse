@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Annotated, Literal
@@ -26,10 +27,11 @@ router = APIRouter(prefix="/api/chat", tags=["chat"], dependencies=[Depends(requ
 MAX_TOOL_ROUNDS = 8
 # 发给前端展示的工具结果长度
 TOOL_PREVIEW_CHARS = 2000
-STOPPED_RESULT = json.dumps({"error": "用户已停止生成，工具未执行"}, ensure_ascii=False)
+STOPPED_RESULT = json.dumps({"error": "用户已停止生成，未完成的工具结果尚未确认，请核对后再重试"}, ensure_ascii=False)
 
 # api 只有一个进程：同一时间只允许一轮生成，Reset 也要等生成结束
 generating = asyncio.Lock()
+logger = logging.getLogger("alphapulse.api.chat")
 
 
 class MessageOut(BaseModel):
@@ -180,35 +182,50 @@ async def send_message(body: SendIn) -> AsyncIterator[ServerSentEvent]:
             truncated_message = f"模型输出达到最大输出上限（{provider.max_tokens} token）被截断，可在「环境变量」页调大「最大输出」"
             if completion.truncated and not completion.tool_calls:
                 assistant["error"] = truncated_message
-            await save_messages(ChatMessage(session_id=current.id, role="assistant", content=assistant, provider_id=provider.id, usage=completion.usage))
-            messages.append({"role": "assistant", **assistant})
-            yield event("usage", completion.usage)
-            if not completion.tool_calls:
-                if completion.truncated:
-                    yield event("error", {"message": truncated_message})
-                break
-
             pending = list(completion.tool_calls)
+            assistant_saved = False
             try:
+                # 消息提交和本地进度必须一起完成，避免取消恰好发生在提交之后而留下孤立调用。
+                with anyio.CancelScope(shield=True):
+                    await save_messages(ChatMessage(session_id=current.id, role="assistant", content=assistant, provider_id=provider.id, usage=completion.usage))
+                    assistant_saved = True
+                messages.append({"role": "assistant", **assistant})
+                yield event("usage", completion.usage)
+                if not completion.tool_calls:
+                    if completion.truncated:
+                        yield event("error", {"message": truncated_message})
+                    break
                 while pending:
                     call = pending[0]
                     yield event("tool_call", {"id": call["id"], "name": call["name"], "arguments": call["arguments"]})
                     # 截断时不执行，把原因告诉模型，让它精简后重试
                     outcome = ToolOutcome(llm.TRUNCATED_RESULT) if completion.truncated else await run_tool(call["name"], call["arguments"])
                     result = {"tool_call_id": call["id"], "name": call["name"], "result": outcome.result}
-                    await save_messages(ChatMessage(session_id=current.id, role="tool", content=result))
-                    pending.pop(0)
+                    with anyio.CancelScope(shield=True):
+                        await save_messages(ChatMessage(session_id=current.id, role="tool", content=result))
+                        pending.pop(0)
                     messages.append({"role": "tool", **result})
                     yield event("tool_result", {"id": call["id"], "name": call["name"], "preview": outcome.result[:TOOL_PREVIEW_CHARS]})
                     if outcome.event:
                         yield event(*outcome.event)
             except (asyncio.CancelledError, GeneratorExit):
                 # 每个工具调用都要有结果，否则下一轮发给模型的历史不合法
-                await save_shielded(*(
-                    ChatMessage(session_id=current.id, role="tool", content={"tool_call_id": c["id"], "name": c["name"], "result": STOPPED_RESULT})
-                    for c in pending
-                ))
+                if assistant_saved and pending:
+                    await save_shielded(*(
+                        ChatMessage(session_id=current.id, role="tool", content={"tool_call_id": c["id"], "name": c["name"], "result": STOPPED_RESULT})
+                        for c in pending
+                    ))
                 raise
+            except Exception:
+                logger.exception("Chat 工具轮次失败")
+                if assistant_saved and pending:
+                    failed = json.dumps({"error": "工具轮次异常中止，执行结果未确认；后续工具未执行"}, ensure_ascii=False)
+                    await save_shielded(*(
+                        ChatMessage(session_id=current.id, role="tool", content={"tool_call_id": c["id"], "name": c["name"], "result": failed})
+                        for c in pending
+                    ))
+                yield event("error", {"message": "工具轮次执行失败，请查看服务日志"})
+                return
         yield event("done", {})
 
 

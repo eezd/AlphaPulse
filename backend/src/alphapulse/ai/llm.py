@@ -27,8 +27,7 @@ TIMEOUT_SECONDS = 600
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
 # SDK 自带重试只针对连接错误、429 和 5xx
 MAX_RETRIES = 2
-# 流内错误（上游过载等）和流式读取中的网络中断 SDK 不重试；连接失败 SDK 重试后仍可能失败（上游短暂不可达）。
-# 这些都由这里再重试，且只在还没有输出内容时重试
+# 只重试 SDK 不处理的流内错误和读取中断，且只在还没有输出内容时重试。
 STREAM_RETRIES = 3
 STREAM_RETRY_DELAY_SECONDS = 2
 # 输出被截断时回给模型的工具结果：参数不完整，不能执行
@@ -109,11 +108,11 @@ def _in_stream_error(e: Exception) -> bool:
 
 
 def _retryable(e: Exception) -> bool:
-    """流内错误事件、连接失败、读取中断可重试；超时不重试（单次已等 TIMEOUT_SECONDS）"""
+    """建连重试归 SDK；这里只处理流内错误与读取中断，超时不重试。"""
     if isinstance(e, (openai.APITimeoutError, anthropic.APITimeoutError, httpx.TimeoutException, httpx2.TimeoutException)):
         return False
     return _in_stream_error(e) or isinstance(
-        e, (openai.APIConnectionError, anthropic.APIConnectionError, httpx.TransportError, httpx2.TransportError),
+        e, (httpx.TransportError, httpx2.TransportError),
     )
 
 
@@ -169,6 +168,7 @@ async def _stream_openai(provider: AiProvider, system: str, messages: list[dict]
     result = Completion()
     # 按 index 拼接分片到达的工具调用
     calls: dict[int, dict] = {}
+    finished = False
     async with client:
         chunks = await client.chat.completions.create(
             model=provider.model, messages=_openai_messages(system, messages), max_tokens=provider.max_tokens,
@@ -179,7 +179,14 @@ async def _stream_openai(provider: AiProvider, system: str, messages: list[dict]
                 result.usage = {"input_tokens": chunk.usage.prompt_tokens, "output_tokens": chunk.usage.completion_tokens}
             if not chunk.choices:
                 continue
-            if chunk.choices[0].finish_reason == "length":
+            reason = chunk.choices[0].finish_reason
+            if reason == "content_filter":
+                raise LlmError("模型输出被内容过滤器中止")
+            if reason is not None:
+                if reason not in ("stop", "tool_calls", "length"):
+                    raise LlmError(f"模型返回了不支持的结束原因：{reason}")
+                finished = True
+            if reason == "length":
                 result.truncated = True
             delta = chunk.choices[0].delta
             if delta.content:
@@ -193,6 +200,8 @@ async def _stream_openai(provider: AiProvider, system: str, messages: list[dict]
                     call["name"] += tc.function.name
                 if tc.function and tc.function.arguments:
                     call["arguments"] += tc.function.arguments
+    if not finished:
+        raise LlmError("模型连接提前结束，未收到完整响应的结束标志")
     result.tool_calls = [_parse_call(c["id"], c["name"], c["arguments"], result.truncated) for _, c in sorted(calls.items())]
     yield result
 
@@ -238,6 +247,7 @@ async def _stream_anthropic(provider: AiProvider, system: str, messages: list[di
     result = Completion()
     blocks: dict[int, dict] = {}
     thinking: dict[int, dict] = {}
+    finished = False
     async with client:
         events = await client.messages.create(
             model=provider.model, system=system, messages=_anthropic_messages(messages), max_tokens=provider.max_tokens,
@@ -267,6 +277,10 @@ async def _stream_anthropic(provider: AiProvider, system: str, messages: list[di
             elif event.type == "message_delta":
                 result.usage["output_tokens"] = event.usage.output_tokens
                 result.truncated = event.delta.stop_reason == "max_tokens"
+            elif event.type == "message_stop":
+                finished = True
+    if not finished:
+        raise LlmError("模型连接提前结束，未收到完整响应的结束标志")
     result.tool_calls = [_parse_call(b["id"], b["name"], b["arguments"], result.truncated) for _, b in sorted(blocks.items())]
     result.thinking_blocks = [b for _, b in sorted(thinking.items())]
     yield result

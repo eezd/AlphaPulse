@@ -7,8 +7,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from alphapulse.ai.tools import LOCAL_TZ
 from alphapulse.core.db import SessionLocal
-from alphapulse.models import TradingAnalysis, TradingEvent, TradingSymbol
-from alphapulse.trading.plan import DAILY_ANALYSIS_LIMIT, MIN_ANALYSIS_GAP, next_routine_at
+from alphapulse.models import TradingAccount, TradingAnalysis, TradingEvent, TradingSymbol
+from alphapulse.trading.client import active_exchange
+from alphapulse.trading.plan import MIN_ANALYSIS_GAP, next_routine_at
 
 # 自动分析失败后的重试：间隔、连续失败上限
 RETRY_AFTER = timedelta(minutes=5)
@@ -16,14 +17,16 @@ MAX_CONSECUTIVE_FAILURES = 3
 
 
 async def daily_limit_reached(session: AsyncSession) -> bool:
+    account = await session.get(TradingAccount, 1)
+    limit = account.daily_analysis_limit if account else 60
     today = datetime.now(LOCAL_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
     count = await session.scalar(select(func.count()).where(TradingAnalysis.started_at >= today))
-    if count < DAILY_ANALYSIS_LIMIT:
+    if count < limit:
         return False
     noticed = await session.scalar(select(func.count()).where(TradingEvent.kind == "daily_limit", TradingEvent.created_at >= today))
     if not noticed:
-        session.add(TradingEvent(kind="daily_limit", level="warn",
-                                 message=f"今日自动分析已达 {DAILY_ANALYSIS_LIMIT} 次上限，之后只执行程序规则（止损、止盈、到期平仓等）"))
+        session.add(TradingEvent(exchange=await active_exchange(session), kind="daily_limit", level="warn",
+                                 message=f"今日分析已达 {limit} 次上限，暂停自动分析，继续执行程序规则（止损、止盈、到期平仓等）"))
     return True
 
 
@@ -33,7 +36,7 @@ async def request_analysis(session: AsyncSession, symbol: str, reason: str) -> N
     if target is None or not target.running or await daily_limit_reached(session):
         return
     now = datetime.now(UTC)
-    last_started = await session.scalar(select(func.max(TradingAnalysis.started_at)).where(TradingAnalysis.symbol == symbol))
+    last_started = await session.scalar(select(func.max(TradingAnalysis.started_at)).where(TradingAnalysis.exchange == await active_exchange(session), TradingAnalysis.symbol == symbol))
     at = max(now, last_started + MIN_ANALYSIS_GAP) if last_started else now
     target.analysis_requested_at = min(target.analysis_requested_at, at) if target.analysis_requested_at else at
     if reason not in target.analysis_reasons:
@@ -49,7 +52,7 @@ async def routine_requests() -> None:
             if target.analysis_requested_at is not None:
                 continue
             recent = (await session.scalars(
-                select(TradingAnalysis).where(TradingAnalysis.symbol == target.symbol)
+                select(TradingAnalysis).where(TradingAnalysis.exchange == await active_exchange(session), TradingAnalysis.symbol == target.symbol)
                 .order_by(TradingAnalysis.id.desc()).limit(MAX_CONSECUTIVE_FAILURES)
             )).all()
             if recent and recent[0].status == "running":

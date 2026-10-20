@@ -64,7 +64,11 @@ export function testProvider(id: number): Promise<TestResult> {
   return http.post(`/settings/providers/${id}/test`, null, { timeout: 1900000 })
 }
 
+export type ExchangeName = "binance" | "bybit"
+
 export interface Exchange {
+  exchange: ExchangeName
+  configured_exchanges: ExchangeName[]
   configured: boolean
   api_key_hint: string | null
   /** 是否有币种在交易：交易中不能修改 key */
@@ -86,7 +90,7 @@ export function getExchange(): Promise<Exchange> {
   return http.get("/settings/exchange")
 }
 
-export function putExchange(body: { api_key: string, api_secret: string }): Promise<Exchange> {
+export function putExchange(body: { exchange?: ExchangeName, api_key?: string, api_secret?: string }): Promise<Exchange> {
   return http.put("/settings/exchange", body)
 }
 

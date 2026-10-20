@@ -62,12 +62,18 @@ def clean(text: str) -> str:
     return re.sub(r"^(财联社)?\d{1,2}月\d{1,2}日电[，,]?", "", text).strip()[:200]
 
 
+def is_forward_sample(published_at: datetime, labeled_at: datetime) -> bool:
+    entry_at = published_at.replace(second=0, microsecond=0) + timedelta(minutes=OFFSETS["entry"])
+    return labeled_at < entry_at
+
+
 async def label_new() -> int:
     """给还没打标签的加密新闻打标签，返回本轮标注条数。模型漏掉的条目下一轮重试"""
     async with SessionLocal() as session:
         rows = (await session.execute(
             select(NewsItem.id, news_text()).outerjoin(NewsSignal, NewsSignal.news_id == NewsItem.id)
-            .where(NewsSignal.news_id.is_(None), NewsItem.published_at >= FORWARD_START, news_text().op("~")(CRYPTO_PATTERN))
+            .where(NewsSignal.news_id.is_(None), NewsItem.published_at >= FORWARD_START,
+                   NewsItem.published_at >= datetime.now(UTC) - timedelta(minutes=OFFSETS["entry"]), news_text().op("~")(CRYPTO_PATTERN))
             .order_by(NewsItem.published_at).limit(BATCH)
         )).all()
         if not rows:
@@ -113,6 +119,8 @@ async def fill_prices() -> int:
             .where(NewsSignal.prices.is_(None), NewsItem.published_at <= cutoff)
         )).all()
         for signal, published_at in pending:
+            if not is_forward_sample(published_at, signal.labeled_at):
+                continue
             minute = int(published_at.timestamp()) // 60 * 60_000
             times = {key: minute + offset * 60_000 for key, offset in OFFSETS.items()}
             prices = {}

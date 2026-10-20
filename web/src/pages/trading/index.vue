@@ -33,12 +33,13 @@ const drawerAnalysisId = ref<number | null>(null)
 const historyVisible = ref(false)
 const signalsVisible = ref(false)
 
+const exchangeName = computed(() => status.value?.exchange === "bybit" ? "Bybit" : "币安")
 const snapshot = computed(() => status.value?.snapshot ?? null)
 const account = computed(() => snapshot.value?.account ?? null)
 const positions = computed(() => snapshot.value?.positions ?? [])
 const current = computed(() => symbols.value.find(s => s.symbol === selected.value))
 const runningCount = computed(() => symbols.value.filter(s => s.running).length)
-const engineText = computed(() => snapshot.value ? `在线 · ${runningCount.value ? `${runningCount.value} 个币交易中` : "全部停止"}` : "离线")
+const engineText = computed(() => snapshot.value ? `${exchangeName.value} · 在线 · ${runningCount.value ? `${runningCount.value} 个币交易中` : "全部停止"}` : `${exchangeName.value} · 离线`)
 /** 各币交易资金合计，不超过账户权益 */
 const allocated = computed(() => symbols.value.reduce((sum, s) => sum + Number(s.capital_usdt ?? 0), 0))
 const symbolOrders = computed(() => {
@@ -117,11 +118,12 @@ async function refresh() {
 }
 
 async function refreshAnalysis() {
+  const exchange = status.value?.exchange
   const symbol = selected.value
   if (!symbol)
     return
   const [latest, { plan, orders }] = await Promise.all([listAnalyses({ symbol, limit: 1 }), getSymbolPlan(symbol)])
-  if (symbol !== selected.value)
+  if (symbol !== selected.value || exchange !== status.value?.exchange)
     return
   latestAnalysis.value = latest[0] ?? null
   livePlan.value = plan
@@ -155,10 +157,11 @@ function openAnalysis(id: number) {
 
 /** 拉取最新一页，与已加载的合并（保留已翻页加载的旧事件） */
 async function refreshEvents() {
+  const exchange = status.value?.exchange
   const symbol = selected.value
   const latest = await listEvents({ symbol: symbol || undefined, limit: EVENTS_PAGE })
   // 请求期间切换了币种：丢弃旧币种的结果
-  if (symbol !== selected.value)
+  if (symbol !== selected.value || exchange !== status.value?.exchange)
     return
   const newestId = events.value[0]?.id ?? 0
   const fresh = latest.filter(e => e.id > newestId)
@@ -168,15 +171,18 @@ async function refreshEvents() {
 }
 
 async function loadMoreEvents() {
+  const exchange = status.value?.exchange
   const symbol = selected.value
   const older = await listEvents({ symbol: symbol || undefined, before: events.value.at(-1)?.id, limit: EVENTS_PAGE })
-  if (symbol !== selected.value)
+  if (symbol !== selected.value || exchange !== status.value?.exchange)
     return
   eventsExhausted.value = older.length < EVENTS_PAGE
   events.value = [...events.value, ...older]
 }
 
-watch(selected, () => {
+watch([selected, () => status.value?.exchange], () => {
+  historyVisible.value = false
+  drawerVisible.value = false
   events.value = []
   latestAnalysis.value = null
   livePlan.value = null
@@ -194,7 +200,7 @@ async function toggleRunning(s: TradingSymbol) {
     )
   } else {
     await ElMessageBox.confirm(
-      `开始后，引擎会按触发条件和例行节奏自动分析 ${s.symbol}，并按它的交易资金在币安模拟盘下单。`,
+      `开始后，引擎会按触发条件和例行节奏自动分析 ${s.symbol}，并按它的交易资金在 ${exchangeName.value} 模拟盘下单。`,
       `开始 ${s.symbol} 行情交易`,
       { type: "info", confirmButtonText: "开始" }
     )
@@ -233,6 +239,21 @@ async function changeProvider(providerId: number | null) {
 
 async function changeEffort(effort: Effort | null) {
   status.value = await patchConfig({ reasoning_effort: effort })
+}
+
+async function editDailyLimit() {
+  const { value } = await ElMessageBox.prompt(
+    "所有币种和交易所共用，每日零点重新计数。手动分析计入今日次数，但不受自动分析上限限制。降低至已用次数时暂停新的自动分析，进行中的分析和持仓管理继续。",
+    "设置每日分析上限",
+    {
+      inputValue: String(status.value!.today.limit),
+      inputValidator: value => /^\d+$/.test(value) && Number(value) >= 1 && Number(value) <= 2147483647,
+      inputErrorMessage: "请输入 1–2147483647 之间的整数",
+      confirmButtonText: "保存"
+    }
+  )
+  status.value = await patchConfig({ daily_analysis_limit: Number(value) })
+  ElMessage.success("每日分析上限已保存，即时生效")
 }
 
 async function closePosition(symbol: string) {
@@ -338,7 +359,12 @@ onBeforeUnmount(() => clearInterval(timer))
 
       <div class="w-56">
         <div class="flex items-center justify-between text-xs text-slate-500">
-          今日分析
+          <span class="flex items-center gap-1">
+            今日分析
+            <el-button link type="primary" size="small" @click="editDailyLimit">
+              调整上限
+            </el-button>
+          </span>
           <span class="num text-sm text-slate-900 font-semibold">{{ status.today.analyses }} / {{ status.today.limit }}</span>
         </div>
         <el-progress :percentage="Math.min(100, status.today.analyses / status.today.limit * 100)" :show-text="false" :stroke-width="4" class="my-1" />
@@ -372,7 +398,7 @@ onBeforeUnmount(() => clearInterval(timer))
     </el-card>
 
     <el-alert v-if="!status.configured" type="warning" :closable="false" show-icon>
-      还没有填写币安模拟盘 key，请先到「环境变量」页填写。
+      还没有填写 {{ exchangeName }} 模拟盘 key，请先到「环境变量」页填写。
     </el-alert>
     <el-alert v-else-if="snapshot?.error" type="error" :closable="false" show-icon>
       同步模拟盘失败：{{ snapshot.error }}{{ snapshot.synced_at ? `（以下为 ${formatTime(snapshot.synced_at, "HH:mm:ss")} 的数据）` : "" }}
@@ -470,7 +496,7 @@ onBeforeUnmount(() => clearInterval(timer))
             <el-button v-if="symbols.some(s => s.symbol === row.symbol)" link type="danger" @click="closePosition(row.symbol)">
               平仓
             </el-button>
-            <span v-else class="font-sans text-slate-400" title="不在交易列表中，程序不管理，请到币安网页处理">-</span>
+            <span v-else class="font-sans text-slate-400" title="不在交易列表中，程序不管理，请到当前交易所网页处理">-</span>
           </template>
         </el-table-column>
       </el-table>

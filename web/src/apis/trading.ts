@@ -1,7 +1,7 @@
 import type { Effort } from "@/apis/settings"
 import { http } from "@/http"
 
-/** 以下数值字段都是币安返回的十进制字符串，避免浮点误差 */
+/** 以下数值字段都是交易所返回的十进制字符串，避免浮点误差 */
 export interface SnapshotPosition {
   symbol: string
   side: "LONG" | "SHORT"
@@ -42,8 +42,9 @@ export interface SnapshotAlgoOrder {
 }
 
 export interface Snapshot {
+  exchange: "binance" | "bybit"
   updated_at: string
-  /** 最近一次成功同步币安的时间 */
+  /** 最近一次成功同步交易所的时间 */
   synced_at: string | null
   error: string | null
   account: { wallet_balance: string, margin_balance: string, available_balance: string, unrealized_pnl: string } | null
@@ -53,6 +54,7 @@ export interface Snapshot {
 }
 
 export interface TradingStatus {
+  exchange: "binance" | "bybit"
   configured: boolean
   provider_id: number | null
   reasoning_effort: Effort | null
@@ -117,7 +119,7 @@ export function patchSymbol(symbol: string, body: { capital_usdt: string | null 
   return http.patch(`/trading/symbols/${symbol}`, body)
 }
 
-export function patchConfig(body: { provider_id?: number | null, reasoning_effort?: Effort | null }): Promise<TradingStatus> {
+export function patchConfig(body: { provider_id?: number | null, reasoning_effort?: Effort | null, daily_analysis_limit?: number }): Promise<TradingStatus> {
   return http.patch("/trading/config", body)
 }
 
@@ -275,7 +277,7 @@ export const TAKE_PROFIT_STEPS: Record<"long" | "short", [number, number][]> = {
   short: [[0.005, 0.8], [0.0075, 0.2]]
 }
 
-/** 由币安成交记录还原的已平仓仓位（含程序外的手动仓位）；数值为十进制字符串 */
+/** 由当前交易所成交记录还原的已平仓仓位（含程序外的手动仓位）；数值为十进制字符串 */
 export interface PositionHistory {
   symbol: string
   direction: "long" | "short"

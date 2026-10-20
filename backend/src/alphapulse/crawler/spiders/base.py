@@ -111,6 +111,7 @@ class NewsSpider(RedisSpider):
         crawler.signals.connect(spider._on_opened, signal=signals.spider_opened)
         crawler.signals.connect(spider._on_idle, signal=signals.spider_idle)
         crawler.signals.connect(spider._on_error, signal=signals.spider_error)
+        crawler.signals.connect(spider._on_item_error, signal=signals.item_error)
         crawler.signals.connect(spider._on_closed, signal=signals.spider_closed)
         return spider
 
@@ -181,6 +182,10 @@ class NewsSpider(RedisSpider):
     def _on_error(self, failure: Failure, response: Response) -> None:
         if self.run:
             self.run.errors.append(f"解析异常 {response.url}：{failure.value!r}")
+
+    def _on_item_error(self, failure: Failure) -> None:
+        if self.run:
+            self.run.errors.append(f"新闻处理或落库失败：{failure.value!r}")
 
     async def _on_closed(self) -> None:
         self.logger.info("采集进程退出")

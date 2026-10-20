@@ -14,20 +14,19 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import BigInteger, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from alphapulse.ai.tools import LOCAL_TZ
-from alphapulse.core.crypto import decrypt
 from alphapulse.core.db import SessionLocal
-from alphapulse.core.redis import KEY_PREFIX, redis
 from alphapulse.market.binance import BinanceClient
-from alphapulse.models import TradingAccount, TradingAnalysis, TradingEvent, TradingOrder, TradingSymbol
-from alphapulse.trading.client import OWN_CLIENT_ID, DemoClient, ExchangeError, mark_price, symbol_rules
-from alphapulse.trading.fills import sync_fills
+from alphapulse.models import TradingAccount, TradingAnalysis, TradingCredential, TradingEvent, TradingFill, TradingOrder, TradingSymbol
+from alphapulse.trading.client import OWN_CLIENT_ID, DemoClient, ExchangeError, create_client, credential_key, mark_price, symbol_rules
+from alphapulse.trading.fills import save_fills, sync_fills
 from alphapulse.trading.plan import (
     MAX_HOLD_HOURS, TAKE_PROFIT_STEPS, OrderSpec, SymbolRules, condition_met, desired_orders, diff_orders, round_to_step,
 )
+from alphapulse.trading.positions import build_positions
 from alphapulse.trading.schedule import request_analysis
 
 logger = logging.getLogger("alphapulse.trading.executor")
@@ -49,10 +48,8 @@ PURPOSE_LABELS = {"entry": "入场", "tp": "止盈", "stop": "止损", "close": 
 CLOSE_REASON_LABELS = {"stop": "止损", "take_profit": "止盈", "time": "到达持仓时限", "exit": "模型决定结束",
                        "external": "外部平仓（如在网页手动平仓）", "stop_failed": "止损挂单失败", "close": "市价平仓",
                        "manual_close": "一键平仓", "manual_cancel": "清除挂单"}
-# 页面上的「平仓」「清除挂单」：API 写入请求，执行器下一轮取走执行，避免和对账同时改计划
-MANUAL_ACTION_KEY = f"{KEY_PREFIX}trader:manual:{{}}"
 MANUAL_ACTIONS = {"close": "一键平仓", "cancel": "清除挂单"}
-CANCEL_REASON_LABELS = {"expired": "限价单到期未成交", "stopped": "已停止交易", "entry_failed": "入场单被拒"}
+CANCEL_REASON_LABELS = {"expired": "限价单到期未成交", "stopped": "已停止交易", "entry_failed": "入场单被拒", "replaced": "被新计划替换"}
 
 
 @dataclass
@@ -75,11 +72,11 @@ def utcnow() -> datetime:
 class Executor:
     def __init__(self) -> None:
         self.client: DemoClient | None = None
-        self.key_ciphertext: bytes | None = None
+        self.key_ciphertext: tuple | None = None
+        self.exchange = "binance"
         self.market = BinanceClient()
-        # 已设置为逐仓 3 倍的币；单向持仓是账户级，只设一次
+        # 每家交易所分别缓存已设置为单向、逐仓 3 倍的币
         self.configured: set[str] = set()
-        self.one_way_checked = False
         self.stop_failures: dict[str, int] = {}
         self.error_events: dict[str, float] = {}
         # (symbol, 周期) -> (下一根收盘时间 ms, 最近收盘价)
@@ -90,17 +87,21 @@ class Executor:
 
     # ---------- 基础 ----------
 
-    async def ensure_client(self, account: TradingAccount | None) -> DemoClient | None:
-        ciphertext = account.api_key_encrypted if account else None
+    async def ensure_client(self, account: TradingCredential | None) -> DemoClient | None:
+        ciphertext = credential_key(account)
         if ciphertext != self.key_ciphertext:
             if self.client is not None:
                 await self.client.http.aclose()
             self.client = None
             self.configured.clear()
-            self.one_way_checked = False
             self.key_ciphertext = ciphertext
             if account is not None and ciphertext is not None:
-                self.client = DemoClient(decrypt(ciphertext), decrypt(account.api_secret_encrypted))
+                self.client = create_client(account)
+                self.exchange = account.exchange
+                self.stop_failures.clear()
+                self.unmanaged_noticed.clear()
+                self.error_events.clear()
+                self.fills_due = 0
         return self.client
 
     async def report(self, session: AsyncSession, symbol: str | None, message: str, level: str = "error", analysis_id: int | None = None) -> None:
@@ -110,7 +111,7 @@ class Executor:
             return
         self.error_events[key] = time.monotonic()
         logger.warning("%s %s", symbol, message)
-        session.add(TradingEvent(symbol=symbol, analysis_id=analysis_id, kind="executor_error", level=level, message=message))
+        session.add(TradingEvent(exchange=self.exchange, symbol=symbol, analysis_id=analysis_id, kind="executor_error", level=level, message=message))
 
     async def last_close(self, symbol: str, interval: str) -> Decimal:
         """实盘该周期最近一根已收盘 K 线的收盘价；到下一根收盘前用缓存"""
@@ -131,17 +132,9 @@ class Executor:
 
     async def ensure_symbol_setup(self, client: DemoClient, symbol: str) -> None:
         """单向持仓、逐仓、3 倍杠杆。先查再改：有挂单时即使不需要修改，写操作也可能被拒（-4067）"""
-        if not self.one_way_checked:
-            if (await client.request("GET", "/fapi/v1/positionSide/dual"))["dualSidePosition"]:
-                await client.request("POST", "/fapi/v1/positionSide/dual", {"dualSidePosition": False})
-            self.one_way_checked = True
         if symbol in self.configured:
             return
-        config = (await client.request("GET", "/fapi/v1/symbolConfig", {"symbol": symbol}))[0]
-        if config["marginType"] != "ISOLATED":
-            await client.request("POST", "/fapi/v1/marginType", {"symbol": symbol, "marginType": "ISOLATED"})
-        if config["leverage"] != 3:
-            await client.request("POST", "/fapi/v1/leverage", {"symbol": symbol, "leverage": 3})
+        await client.ensure_setup(symbol)
         self.configured.add(symbol)
 
     # ---------- 订单 ----------
@@ -149,7 +142,7 @@ class Executor:
     async def place(self, session: AsyncSession, client: DemoClient, symbol: str, plan_id: int | None, purpose: str, spec: OrderSpec) -> ExchangeError | None:
         """先写流水并提交，再用 ap{id} 下单。结果不明（网络、5xx）时保持 submitting，下一轮按 id 查询，绝不换 id 重发"""
         row = TradingOrder(
-            analysis_id=plan_id, symbol=symbol, purpose=purpose, leg=spec.leg, is_algo=spec.type == "STOP_MARKET",
+            exchange=client.exchange, analysis_id=plan_id, symbol=symbol, purpose=purpose, leg=spec.leg, is_algo=spec.type == "STOP_MARKET",
             side=spec.side, type=spec.type, price=spec.price, trigger_price=spec.trigger_price, quantity=spec.quantity,
             reduce_only=purpose != "entry", status="submitting",
         )
@@ -157,21 +150,9 @@ class Executor:
         await session.commit()
         client_id = f"ap{row.id}"
         try:
-            if row.is_algo:
-                result = await client.request("POST", "/fapi/v1/algoOrder", {
-                    "algoType": "CONDITIONAL", "symbol": symbol, "side": spec.side, "type": "STOP_MARKET",
-                    "triggerPrice": fmt(spec.trigger_price), "quantity": fmt(spec.quantity), "reduceOnly": True,
-                    "workingType": "MARK_PRICE", "clientAlgoId": client_id,
-                })
-                row.exchange_id, row.status = str(result["algoId"]), "new"
-            else:
-                params = {"symbol": symbol, "side": spec.side, "type": spec.type, "quantity": fmt(spec.quantity),
-                          "reduceOnly": row.reduce_only or None, "newClientOrderId": client_id}
-                if spec.type == "LIMIT":
-                    params |= {"price": fmt(spec.price), "timeInForce": "GTC"}
-                result = await client.request("POST", "/fapi/v1/order", params)
-                row.exchange_id = str(result["orderId"])
-                row.status = ORDER_STATUSES.get(result["status"], result["status"].lower())
+            result = await client.place_order(symbol, client_id, spec, row.reduce_only)
+            row.exchange_id = str(result["algoId"] if row.is_algo else result["orderId"])
+            row.status = "new" if row.is_algo and client.exchange == "binance" else ORDER_STATUSES.get(result["status"], result["status"].lower())
         except ExchangeError as e:
             row.error = str(e)
             if not (e.retryable or e.status is None):
@@ -187,30 +168,27 @@ class Executor:
     async def cancel_client_id(self, client: DemoClient, symbol: str, client_id: str, is_algo: bool) -> None:
         """撤单后不直接改状态：可能恰好已成交，交给下一轮同步确认"""
         try:
-            if is_algo:
-                await client.request("DELETE", "/fapi/v1/algoOrder", {"clientAlgoId": client_id})
-            else:
-                await client.request("DELETE", "/fapi/v1/order", {"symbol": symbol, "origClientOrderId": client_id})
+            await client.cancel_order(symbol, client_id, is_algo)
         except ExchangeError as e:
             # -2011 / -2013：单已不在，等同步
-            if e.code not in (-2011, -2013):
+            if e.code not in (-2011, -2013, 110001):
                 raise
 
     async def sync_order(self, session: AsyncSession, client: DemoClient, row: TradingOrder, open_orders: dict, open_algos: dict) -> None:
         client_id = f"ap{row.id}"
         before = row.filled_qty
         try:
-            if row.is_algo:
+            if row.is_algo and client.exchange == "binance":
                 if client_id in open_algos:
                     row.exchange_id, row.status = str(open_algos[client_id]["algoId"]), "new"
                     return
-                algo = await client.request("GET", "/fapi/v1/algoOrder", {"clientAlgoId": client_id})
+                algo = await client.order(row.symbol, client_id, True)
                 if algo["algoStatus"] in ("NEW", "TRIGGERING"):
                     row.status = "new"
                     return
                 row.exchange_id = str(algo["algoId"])
                 if algo["algoStatus"] == "FINISHED" and algo.get("actualOrderId"):
-                    actual = await client.request("GET", "/fapi/v1/order", {"symbol": row.symbol, "orderId": algo["actualOrderId"]})
+                    actual = await client.actual_order(row.symbol, algo["actualOrderId"])
                     row.filled_qty = Decimal(actual["executedQty"])
                     row.avg_price = Decimal(actual["avgPrice"]) or None
                     row.status = "filled" if actual["status"] == "FILLED" else ORDER_STATUSES.get(actual["status"], "finished")
@@ -220,13 +198,15 @@ class Executor:
                 else:
                     row.status = algo["algoStatus"].lower()
             else:
-                order = open_orders.get(client_id) or await client.request("GET", "/fapi/v1/order", {"symbol": row.symbol, "origClientOrderId": client_id})
+                order = (open_algos if row.is_algo else open_orders).get(client_id) or await client.order(row.symbol, client_id, row.is_algo)
                 row.exchange_id = str(order["orderId"])
                 row.status = ORDER_STATUSES.get(order["status"], order["status"].lower())
                 row.filled_qty = Decimal(order["executedQty"])
                 row.avg_price = Decimal(order["avgPrice"]) or None
+                if row.status == "rejected":
+                    row.error = order.get("rejectReason") or "交易所异步拒绝订单"
         except ExchangeError as e:
-            if e.code != -2013:
+            if e.code not in (-2013, 110001):
                 raise
             if row.status == "submitting" and utcnow() - row.created_at < timedelta(seconds=SUBMIT_GRACE_SECONDS):
                 return
@@ -235,7 +215,7 @@ class Executor:
         if row.filled_qty > before:
             delta = row.filled_qty - before
             leg = f" {row.leg + 1} " if row.purpose == "tp" else ""
-            session.add(TradingEvent(
+            session.add(TradingEvent(exchange=self.exchange,
                 symbol=row.symbol, analysis_id=row.analysis_id, kind=f"{row.purpose}_filled",
                 level="warn" if row.purpose == "stop" else "info",
                 message=f"{PURPOSE_LABELS[row.purpose]}{leg}成交 {fmt(delta)} @ {row.avg_price}",
@@ -247,8 +227,10 @@ class Executor:
     async def adopt(self, session: AsyncSession, client: DemoClient, symbol: TradingSymbol, current: TradingAnalysis | None,
                     position: Position | None) -> TradingAnalysis | None:
         """采纳最新的提议；较早的提议作废。返回采纳后的当前计划"""
+        if current is not None and current.plan_status == "closing":
+            return current
         proposals = (await session.scalars(
-            select(TradingAnalysis).where(TradingAnalysis.symbol == symbol.symbol, TradingAnalysis.plan_status == "proposed")
+            select(TradingAnalysis).where(TradingAnalysis.exchange == client.exchange, TradingAnalysis.symbol == symbol.symbol, TradingAnalysis.plan_status == "proposed")
             .order_by(TradingAnalysis.id.desc())
         )).all()
         if not proposals:
@@ -261,10 +243,10 @@ class Executor:
             proposal.plan_status = "applied"
             if current is not None:
                 current.plan_status, current.close_reason = "closing", "exit"
-                session.add(TradingEvent(symbol=symbol.symbol, analysis_id=current.id, kind="plan_exit", level="warn",
+                session.add(TradingEvent(exchange=self.exchange, symbol=symbol.symbol, analysis_id=current.id, kind="plan_exit", level="warn",
                                          message=f"按分析 #{proposal.id} 结束计划：撤销入场单，有持仓则市价平仓"))
             elif position is not None:
-                session.add(TradingEvent(symbol=symbol.symbol, analysis_id=proposal.id, kind="plan_exit", level="warn",
+                session.add(TradingEvent(exchange=self.exchange, symbol=symbol.symbol, analysis_id=proposal.id, kind="plan_exit", level="warn",
                                          message=f"按分析 #{proposal.id} 市价平掉无计划的持仓 {fmt(position.qty)}"))
                 close_side = "SELL" if position.side == "long" else "BUY"
                 await self.place(session, client, symbol.symbol, proposal.id, "close", OrderSpec("close", None, close_side, "MARKET", None, None, position.qty))
@@ -274,29 +256,46 @@ class Executor:
         if qty > 0 or (current is not None and current.plan_status != "pending"):
             proposal.plan_status = "stale"
             reason = f"已有持仓 {fmt(qty)}" if qty > 0 else "计划正在平仓"
-            session.add(TradingEvent(symbol=symbol.symbol, analysis_id=proposal.id, kind="plan_stale", level="warn",
+            session.add(TradingEvent(exchange=self.exchange, symbol=symbol.symbol, analysis_id=proposal.id, kind="plan_stale", level="warn",
                                      message=f"计划未采纳：{reason}"))
             return current
         if current is not None:
-            current.plan_status, current.close_reason, current.closed_at = "replaced", "replaced", now
+            # 撤单回执不保证未成交；旧计划收尾前不能把迟到成交归到新计划。
+            await self.cancel_plan(session, current, "replaced", "等待旧入场单撤销确认后替换计划")
+            return current
         proposal.plan_status = "pending"
         proposal.valid_until = now + timedelta(hours=float(proposal.decision["valid_hours"]))
         entry = proposal.sizing["entry"]
         side = "做多" if proposal.sizing["direction"] == "long" else "做空"
-        session.add(TradingEvent(
+        session.add(TradingEvent(exchange=self.exchange,
             symbol=symbol.symbol, analysis_id=proposal.id, kind="plan_adopted",
-            message=f"采纳计划 #{proposal.id}" + (f"，替换 #{current.id}" if current else "")
-            + f"：限价{side} {entry['price']} × {entry['quantity']}，止损 {entry['stop']}（{entry['stop_pct']}%），"
+            message=f"采纳计划 #{proposal.id}：限价{side} {entry['price']} × {entry['quantity']}，止损 {entry['stop']}（{entry['stop_pct']}%），"
             f"有效至 {proposal.valid_until.astimezone(LOCAL_TZ).strftime('%H:%M')}",
         ))
         return proposal
 
-    async def realized(self, client: DemoClient, symbol: str, since: datetime | None) -> dict | None:
-        if since is None:
+    async def realized(self, session: AsyncSession, client: DemoClient, plan: TradingAnalysis, rows: list[TradingOrder]) -> dict | None:
+        if plan.first_fill_at is None:
             return None
-        trades = await client.request("GET", "/fapi/v1/userTrades", {"symbol": symbol, "startTime": int(since.timestamp() * 1000) - 1000, "limit": 1000})
-        pnl = sum((Decimal(t["realizedPnl"]) for t in trades), Decimal(0))
-        fee = sum((Decimal(t["commission"]) for t in trades if t["commissionAsset"] == "USDT"), Decimal(0))
+        entries = [r for r in rows if r.purpose == "entry" and r.filled_qty > 0]
+        if not entries:
+            raise ExchangeError(None, None, "入场成交尚未同步，暂不能结算计划盈亏")
+        if any(r.exchange_id is None for r in entries):
+            raise RuntimeError("已成交的入场单缺少交易所订单 ID")
+        since = min(r.created_at for r in entries) - timedelta(seconds=1)
+        trades = await client.trades(plan.symbol, int(since.timestamp() * 1000))
+        await save_fills(session, client.exchange, trades)
+        trade_order = cast(TradingFill.trade_id, BigInteger) if client.exchange == "binance" else TradingFill.trade_id
+        fills = list(await session.scalars(select(TradingFill).where(
+            TradingFill.exchange == client.exchange, TradingFill.symbol == plan.symbol, TradingFill.time >= since,
+        ).order_by(TradingFill.time, trade_order)))
+        entry_ids = {r.exchange_id for r in entries}
+        positions = [p for p in build_positions(fills) if p.order_ids & entry_ids]
+        complete_entries = all(sum((p.entry_quantities.get(r.exchange_id, Decimal(0)) for p in positions), Decimal(0)) == r.filled_qty for r in entries)
+        if not positions or not complete_entries:
+            raise ExchangeError(None, None, "完整的开平仓成交尚未同步，暂不能结算计划盈亏")
+        pnl = sum((p.realized_pnl for p in positions), Decimal(0))
+        fee = sum((p.commission for p in positions), Decimal(0))
         return {"realized_pnl": fmt(pnl), "commission": fmt(fee), "net": fmt(pnl - fee)}
 
     async def finish(self, session: AsyncSession, client: DemoClient, plan: TradingAnalysis, rows: list[TradingOrder]) -> None:
@@ -305,25 +304,25 @@ class Executor:
             filled = sorted((r for r in rows if r.filled_qty > 0 and r.purpose in ("stop", "tp", "close")), key=lambda r: r.updated_at)
             last = filled[-1].purpose if filled else None
             plan.close_reason = {"stop": "stop", "tp": "take_profit", "close": plan.close_reason or "close"}.get(last, "external")
-        plan.plan_status = "closed" if plan.first_fill_at else "canceled"
+        plan.result = await self.realized(session, client, plan, rows)
+        plan.plan_status = "closed" if plan.first_fill_at else "replaced" if plan.close_reason == "replaced" else "canceled"
         plan.closed_at = utcnow()
-        plan.result = await self.realized(client, plan.symbol, plan.first_fill_at)
         net = f"，净盈亏 {plan.result['net']} USDT（含手续费 {plan.result['commission']}）" if plan.result else ""
-        label = CLOSE_REASON_LABELS.get(plan.close_reason, plan.close_reason)
-        session.add(TradingEvent(symbol=plan.symbol, analysis_id=plan.id, kind="plan_closed", level="warn" if plan.close_reason in ("stop", "stop_failed", "external") else "info",
+        label = CLOSE_REASON_LABELS.get(plan.close_reason) or CANCEL_REASON_LABELS.get(plan.close_reason, plan.close_reason)
+        session.add(TradingEvent(exchange=self.exchange, symbol=plan.symbol, analysis_id=plan.id, kind="plan_closed", level="warn" if plan.close_reason in ("stop", "stop_failed", "external") else "info",
                                  message=f"计划 #{plan.id} 结束：{label}{net}", data=plan.result))
-        await request_analysis(session, plan.symbol, f"平仓（{label}）")
+        if plan.close_reason not in ("manual_close", "manual_cancel", "replaced"):
+            await request_analysis(session, plan.symbol, f"平仓（{label}）")
 
     async def cancel_plan(self, session: AsyncSession, plan: TradingAnalysis, reason: str, detail: str, level: str = "info") -> None:
-        """未入场的计划撤销，排队重新分析（停止交易时 request_analysis 不排队）"""
-        plan.plan_status, plan.close_reason, plan.closed_at = "canceled", reason, utcnow()
-        session.add(TradingEvent(symbol=plan.symbol, analysis_id=plan.id, kind="plan_canceled", level=level,
+        """先撤入场单，确认终态和持仓后才结束；迟到的成交仍由原计划保护。"""
+        plan.plan_status, plan.close_reason = "closing", reason
+        session.add(TradingEvent(exchange=self.exchange, symbol=plan.symbol, analysis_id=plan.id, kind="plan_canceled", level=level,
                                  message=f"计划 #{plan.id} 撤销：{detail}"))
-        await request_analysis(session, plan.symbol, f"计划撤销（{CANCEL_REASON_LABELS[reason]}）")
 
     async def start_closing(self, session: AsyncSession, plan: TradingAnalysis, reason: str, detail: str = "") -> None:
         plan.plan_status, plan.close_reason = "closing", reason
-        session.add(TradingEvent(symbol=plan.symbol, analysis_id=plan.id, kind="plan_closing", level="warn",
+        session.add(TradingEvent(exchange=self.exchange, symbol=plan.symbol, analysis_id=plan.id, kind="plan_closing", level="warn",
                                  message=f"{CLOSE_REASON_LABELS[reason]}{detail}：撤销入场单并市价平仓"))
 
     async def review_once(self, session: AsyncSession, plan_id: int, symbol: str, kind: str, index: int, message: str, reason: str) -> None:
@@ -333,41 +332,63 @@ class Executor:
         ))
         if exists:
             return
-        session.add(TradingEvent(symbol=symbol, analysis_id=plan_id, kind=kind, level="warn", message=message, data={"index": index}))
+        session.add(TradingEvent(exchange=self.exchange, symbol=symbol, analysis_id=plan_id, kind=kind, level="warn", message=message, data={"index": index}))
         await request_analysis(session, symbol, reason)
 
     # ---------- 对账 ----------
 
-    async def reconcile(self, session: AsyncSession, client: DemoClient, symbol: TradingSymbol, running: bool, position: Position | None,
-                        manual_action: str | None) -> None:
+    async def reconcile(self, session: AsyncSession, client: DemoClient, symbol: TradingSymbol, running: bool,
+                        manual_request: TradingEvent | None) -> None:
         name = symbol.symbol
-        rules = await symbol_rules(name)
-        open_orders = {o["clientOrderId"]: o for o in await client.request("GET", "/fapi/v1/openOrders", {"symbol": name})}
-        open_algos = {o["clientAlgoId"]: o for o in await client.request("GET", "/fapi/v1/openAlgoOrders", {"symbol": name})}
+        rules = await symbol_rules(name, client.exchange)
+        open_orders = {o["clientOrderId"]: o for o in await client.open_orders(name)}
+        open_algos = {o["clientAlgoId"]: o for o in await client.open_orders(name, True)}
 
         rows = list((await session.scalars(
-            select(TradingOrder).where(TradingOrder.symbol == name, TradingOrder.status.in_(ACTIVE_ORDER_STATUSES))
+            select(TradingOrder).where(TradingOrder.exchange == client.exchange, TradingOrder.symbol == name, TradingOrder.status.in_(ACTIVE_ORDER_STATUSES))
         )).all())
         for row in rows:
             await self.sync_order(session, client, row, open_orders, open_algos)
         await session.commit()
+
+        # 同步订单和成交可能耗时，不能用本轮开始前的仓位判断是否已经平仓。
+        position = None
+        for p in await client.positions():
+            if p["symbol"] == name and Decimal(p["positionAmt"]) != 0:
+                amount = Decimal(p["positionAmt"])
+                position = Position("long" if amount > 0 else "short", abs(amount), Decimal(p["entryPrice"]),
+                                    Decimal(p["breakEvenPrice"]), Decimal(p["markPrice"]))
 
         # 交易所上本程序的单，但流水里不是活动状态：孤儿单，撤掉（用户手动下的单不动）
         active_ids = {f"ap{r.id}" for r in rows if r.status in ACTIVE_ORDER_STATUSES}
         for client_id, order in [*open_orders.items(), *open_algos.items()]:
             if OWN_CLIENT_ID.match(client_id) and client_id not in active_ids:
                 await self.cancel_client_id(client, name, client_id, client_id in open_algos)
-                session.add(TradingEvent(symbol=name, kind="orphan_canceled", level="warn", message=f"撤销孤儿单 {client_id}（{order.get('type') or order.get('orderType')}）"))
+                session.add(TradingEvent(exchange=self.exchange, symbol=name, kind="orphan_canceled", level="warn", message=f"撤销孤儿单 {client_id}（{order.get('type') or order.get('orderType')}）"))
 
         plan = await session.scalar(
-            select(TradingAnalysis).where(TradingAnalysis.symbol == name, TradingAnalysis.plan_status.in_(LIVE_PLAN_STATUSES))
+            select(TradingAnalysis).where(TradingAnalysis.exchange == client.exchange, TradingAnalysis.symbol == name, TradingAnalysis.plan_status.in_(LIVE_PLAN_STATUSES))
             .order_by(TradingAnalysis.id.desc()).limit(1)
         )
-        plan = await self.adopt(session, client, symbol, plan, position)
+        if manual_request is None and running:
+            pending_old_entry = any(r.purpose == "entry" and r.status in ACTIVE_ORDER_STATUSES and (plan is None or r.analysis_id != plan.id) for r in rows)
+            if not pending_old_entry:
+                plan = await self.adopt(session, client, symbol, plan, position)
+        else:
+            for proposal in await session.scalars(select(TradingAnalysis).where(
+                TradingAnalysis.exchange == client.exchange, TradingAnalysis.symbol == name, TradingAnalysis.plan_status == "proposed",
+            )):
+                proposal.plan_status = "stale"
         await session.commit()
-        if manual_action is not None:
-            await self.manual(session, client, name, manual_action, plan, position, open_orders, open_algos)
+        if manual_request is not None:
+            await self.manual(session, client, name, manual_request.data["action"], plan, position, open_orders, open_algos)
             await session.commit()
+            if position is None and not open_orders and not open_algos and not any(r.status in ACTIVE_ORDER_STATUSES for r in rows) and (plan is None or plan.plan_status not in LIVE_PLAN_STATUSES):
+                session.add(TradingEvent(exchange=self.exchange, symbol=name, kind="manual_completed",
+                                         message=f"{MANUAL_ACTIONS[manual_request.data['action']]}完成：已确认无持仓、无挂单",
+                                         data={"request_id": manual_request.id}))
+                await session.commit()
+                return
 
         # 不属于当前计划的活动订单（被替换、已结束的计划）：入场和止盈先撤；止损等新止损挂上后再撤，不留无保护窗口
         stale = [r for r in rows if r.status in ACTIVE_ORDER_STATUSES and r.purpose != "close" and (plan is None or r.analysis_id != plan.id)]
@@ -378,13 +399,13 @@ class Executor:
 
         if plan is None:
             for row in stale:
-                if row.purpose == "stop":
+                if row.purpose == "stop" and position is None and not stale_entry_canceled:
                     await self.cancel(client, row)
             if position is None:
                 self.unmanaged_noticed.pop(name, None)
-            elif running:
+            elif running and manual_request is None:
                 await self.unmanaged(session, client, name, position, open_algos)
-            if running:
+            if running and manual_request is None:
                 await self.check_reevaluate(session, name, position.mark if position else None)
             await session.commit()
             return
@@ -397,6 +418,12 @@ class Executor:
         qty = position.qty if position else Decimal(0)
         now = utcnow()
         plan_rows = list((await session.scalars(select(TradingOrder).where(TradingOrder.analysis_id == plan.id))).all())
+        entry_pending = any(r.purpose == "entry" and r.status in ACTIVE_ORDER_STATUSES for r in plan_rows)
+        close_pending = any(r.purpose == "close" and r.status in ACTIVE_ORDER_STATUSES for r in plan_rows)
+        filled_entry = any(r.purpose == "entry" and r.filled_qty > 0 for r in plan_rows)
+        if plan.first_fill_at is None and (qty > 0 or filled_entry):
+            plan.first_fill_at = now
+            plan.close_deadline = now + timedelta(hours=MAX_HOLD_HOURS)
 
         if plan.plan_status == "pending":
             entry_rows = [r for r in plan_rows if r.purpose == "entry"]
@@ -405,7 +432,7 @@ class Executor:
             if qty > 0 or any(r.filled_qty > 0 for r in entry_rows):
                 plan.plan_status, plan.first_fill_at = "open", now
                 plan.close_deadline = now + timedelta(hours=MAX_HOLD_HOURS)
-                session.add(TradingEvent(symbol=name, analysis_id=plan.id, kind="plan_open",
+                session.add(TradingEvent(exchange=self.exchange, symbol=name, analysis_id=plan.id, kind="plan_open",
                                          message=f"限价单成交，计划 #{plan.id} 进入持仓；最晚 {plan.close_deadline.astimezone(LOCAL_TZ).strftime('%m-%d %H:%M')} 平仓"))
             elif not running:
                 await self.cancel_plan(session, plan, "stopped", "已停止交易，撤销未成交的限价单")
@@ -416,24 +443,31 @@ class Executor:
                 await self.cancel_plan(session, plan, "entry_failed", f"限价单被拒：{rejected.error or rejected.status}", "error")
         elif plan.plan_status == "open":
             if qty == 0:
-                await self.finish(session, client, plan, plan_rows)
+                if entry_pending or close_pending:
+                    await self.start_closing(session, plan, "external")
+                else:
+                    await self.finish(session, client, plan, plan_rows)
             elif now >= plan.close_deadline:
                 await self.start_closing(session, plan, "time")
-        elif plan.plan_status == "closing" and qty == 0:
-            await self.finish(session, client, plan, plan_rows)
+        elif plan.plan_status == "closing":
+            if plan.close_reason in CANCEL_REASON_LABELS and (qty > 0 or filled_entry):
+                plan.plan_status, plan.close_reason = "open", None
+            elif qty == 0 and not entry_pending and not close_pending:
+                await self.finish(session, client, plan, plan_rows)
         await session.commit()
 
+        protected = False
         if plan.plan_status in LIVE_PLAN_STATUSES:
-            await self.sync_orders(session, client, plan, plan_rows, position, running, rules, stale_entry_canceled)
+            protected = await self.sync_orders(session, client, plan, plan_rows, position, running, rules, stale_entry_canceled)
         else:
             # 计划已结束：只减仓止损不会被交易所自动撤销，必须主动撤，以免作用到之后的新仓位
             for row in plan_rows:
                 if row.status in ACTIVE_ORDER_STATUSES and row.purpose != "close":
                     await self.cancel(client, row)
         for row in stale:
-            if row.purpose == "stop":
+            if row.purpose == "stop" and not stale_entry_canceled and (protected or position is None and plan.plan_status not in LIVE_PLAN_STATUSES):
                 await self.cancel(client, row)
-        if running and plan.plan_status != "closing":
+        if running and manual_request is None and plan.plan_status != "closing":
             await self.check_reevaluate(session, name, position.mark if position else None)
         await session.commit()
 
@@ -442,21 +476,14 @@ class Executor:
         """一键平仓、清除挂单：撤掉该币全部挂单（含止损止盈和手动挂的），有持仓就市价平仓——程序不留没有止损的仓位。
         本程序的单通过结束计划撤销，否则下一轮对账会按计划补挂回来。撤销计划不像到期那样排队重新分析，免得马上又挂单"""
         reason = f"manual_{action}"
-        label = MANUAL_ACTIONS[action]
         for client_id in [*open_orders, *open_algos]:
             if not OWN_CLIENT_ID.match(client_id):
                 await self.cancel_client_id(client, symbol, client_id, client_id in open_algos)
-        detail = f"，市价平仓 {fmt(position.qty)}" if position else ""
-        session.add(TradingEvent(symbol=symbol, analysis_id=plan.id if plan else None, kind=reason, level="warn",
-                                 message=f"{label}：撤销全部挂单{detail}"))
-        if plan is not None and plan.plan_status in ("pending", "open") and position is not None:
-            # 平仓中的计划：撤入场和止盈、市价平仓，持仓归零后结束并撤掉止损
-            plan.plan_status, plan.close_reason = "closing", reason
-        elif plan is not None and plan.plan_status == "pending":
-            plan.plan_status, plan.close_reason, plan.closed_at = "canceled", reason, utcnow()
+        if plan is not None and plan.close_reason != reason:
+            await self.start_closing(session, plan, reason)
         elif plan is None and position is not None:
             closing = await session.scalar(select(func.count()).where(
-                TradingOrder.symbol == symbol, TradingOrder.purpose == "close", TradingOrder.status.in_(ACTIVE_ORDER_STATUSES),
+                TradingOrder.exchange == client.exchange, TradingOrder.symbol == symbol, TradingOrder.purpose == "close", TradingOrder.status.in_(ACTIVE_ORDER_STATUSES),
             ))
             if not closing:
                 close_side = "SELL" if position.side == "long" else "BUY"
@@ -465,13 +492,13 @@ class Executor:
     async def check_reevaluate(self, session: AsyncSession, symbol: str, mark: Decimal | None) -> None:
         """最近一次交易中分析给出的 reevaluate 条件：满足任一个就排队分析"""
         latest = await session.scalar(
-            select(TradingAnalysis).where(TradingAnalysis.symbol == symbol, TradingAnalysis.status == "done", TradingAnalysis.dry_run.is_(False))
+            select(TradingAnalysis).where(TradingAnalysis.exchange == self.exchange, TradingAnalysis.symbol == symbol, TradingAnalysis.status == "done", TradingAnalysis.dry_run.is_(False))
             .order_by(TradingAnalysis.id.desc()).limit(1)
         )
         if latest is None or not latest.decision["reevaluate"]:
             return
         if mark is None and any(c["timeframe"] == "mark" for c in latest.decision["reevaluate"]):
-            mark = await mark_price(symbol)
+            mark = await mark_price(symbol, self.exchange)
         for i, condition in enumerate(latest.decision["reevaluate"]):
             met, price = await self.condition_met(symbol, condition, mark)
             if met:
@@ -481,24 +508,31 @@ class Executor:
     async def unmanaged(self, session: AsyncSession, client: DemoClient, symbol: str, position: Position, open_algos: dict) -> None:
         """有持仓但没有计划：有止损就只提示，没有止损就市价平仓"""
         close_side = "SELL" if position.side == "long" else "BUY"
-        has_stop = any(o["side"] == close_side and o["orderType"].startswith("STOP") for o in open_algos.values())
+        has_stop = any(
+            o["side"] == close_side and o["orderType"] == "STOP_MARKET" and (o["reduceOnly"] or o["closePosition"])
+            and (o["closePosition"] or Decimal(o["quantity"]) >= position.qty)
+            for o in open_algos.values()
+        )
         if has_stop:
             if self.unmanaged_noticed.get(symbol) != position.entry:
                 self.unmanaged_noticed[symbol] = position.entry
-                session.add(TradingEvent(symbol=symbol, kind="unmanaged_position", level="warn",
+                session.add(TradingEvent(exchange=self.exchange, symbol=symbol, kind="unmanaged_position", level="warn",
                                          message=f"{symbol} 有持仓 {fmt(position.qty)} 和止损但没有计划：程序不管理，由止损保护"))
             return
         closing = await session.scalar(select(func.count()).where(
-            TradingOrder.symbol == symbol, TradingOrder.purpose == "close", TradingOrder.status.in_(ACTIVE_ORDER_STATUSES),
+            TradingOrder.exchange == client.exchange, TradingOrder.symbol == symbol, TradingOrder.purpose == "close", TradingOrder.status.in_(ACTIVE_ORDER_STATUSES),
         ))
         if closing:
             return
-        session.add(TradingEvent(symbol=symbol, kind="unmanaged_closed", level="error",
+        session.add(TradingEvent(exchange=self.exchange, symbol=symbol, kind="unmanaged_closed", level="error",
                                  message=f"{symbol} 有持仓 {fmt(position.qty)} 但没有计划也没有止损，市价平仓"))
         await self.place(session, client, symbol, None, "close", OrderSpec("close", None, close_side, "MARKET", None, None, position.qty))
 
     async def sync_orders(self, session: AsyncSession, client: DemoClient, plan: TradingAnalysis, plan_rows: list[TradingOrder],
-                          position: Position | None, running: bool, rules: SymbolRules, block_entries: bool) -> None:
+                          position: Position | None, running: bool, rules: SymbolRules, block_entries: bool) -> bool:
+        if client.exchange == "bybit" and plan.plan_status != "closing" and any(r.purpose == "stop" and r.status in ("rejected", "failed") for r in plan_rows):
+            await self.start_closing(session, plan, "stop_failed")
+            return False
         sizing = plan.sizing
         qty = position.qty if position else Decimal(0)
         long = sizing["direction"] == "long"
@@ -508,10 +542,10 @@ class Executor:
             for row in active:
                 if row.purpose != "stop":
                     await self.cancel(client, row)
-            if qty > 0 and not any(r.purpose == "close" and r.status in ACTIVE_ORDER_STATUSES for r in plan_rows):
+            if qty > 0 and plan.close_reason not in CANCEL_REASON_LABELS and not any(r.purpose == "close" and r.status in ACTIVE_ORDER_STATUSES for r in plan_rows):
                 close_side = "SELL" if long else "BUY"
                 await self.place(session, client, plan.symbol, plan.id, "close", OrderSpec("close", None, close_side, "MARKET", None, None, qty))
-            return
+            return False
 
         entry_rows = [r for r in plan_rows if r.purpose == "entry" and r.filled_qty > 0]
         filled = sum((r.filled_qty for r in entry_rows), Decimal(0))
@@ -541,20 +575,23 @@ class Executor:
             error = await self.place(session, client, plan.symbol, plan.id, "stop", spec)
             if error is not None:
                 await self.stop_failed(session, plan, error)
-                return
+                return False
         self.stop_failures.pop(plan.symbol, None)
+        has_stop = any(r.purpose == "stop" and r.status == "new" for r in active if r not in to_cancel) or (client.exchange == "binance" and any(d.purpose == "stop" for d in to_place))
         # 2. 撤多余的单
         canceled_entry = False
         for row in to_cancel:
+            if row.purpose == "stop" and not has_stop:
+                continue
             await self.cancel(client, row)
             canceled_entry = canceled_entry or row.purpose == "entry"
         # 3. 补止盈；入场单只在本轮没有撤旧入场单、且止损在场时下
-        has_stop = any(r.purpose == "stop" for r in active if r not in to_cancel) or any(d.purpose == "stop" for d in to_place)
         for spec in [d for d in to_place if d.purpose == "tp"]:
             await self.place(session, client, plan.symbol, plan.id, "tp", spec)
         if entries and has_stop and not canceled_entry and not block_entries:
             for spec in entries:
                 await self.place(session, client, plan.symbol, plan.id, "entry", spec)
+        return has_stop
 
     async def stop_failed(self, session: AsyncSession, plan: TradingAnalysis, error: ExchangeError) -> None:
         """会立即触发（-2021）或不可重试的错误：撤单平仓；可重试的错误连续失败多次后同样处理"""
@@ -565,7 +602,7 @@ class Executor:
                 return
         self.stop_failures.pop(plan.symbol, None)
         reason = "止损价已越过现价" if error.code == -2021 else f"挂止损失败：{error}"
-        session.add(TradingEvent(symbol=plan.symbol, analysis_id=plan.id, kind="stop_failed", level="error", message=reason))
+        session.add(TradingEvent(exchange=self.exchange, symbol=plan.symbol, analysis_id=plan.id, kind="stop_failed", level="error", message=reason))
         await self.start_closing(session, plan, "stop_failed")
 
     # ---------- 主循环 ----------
@@ -573,12 +610,13 @@ class Executor:
     async def tick(self) -> None:
         async with SessionLocal() as session:
             account = await session.get(TradingAccount, 1)
-            symbols = list((await session.scalars(select(TradingSymbol))).all())
-            client = await self.ensure_client(account)
+            symbols = list((await session.scalars(select(TradingSymbol.symbol))).all())
+            credential = await session.get(TradingCredential, account.exchange) if account else None
+            client = await self.ensure_client(credential)
             if client is None:
                 return
             positions = {}
-            for p in await client.request("GET", "/fapi/v3/positionRisk"):
+            for p in await client.positions():
                 amount = Decimal(p["positionAmt"])
                 if amount != 0:
                     positions[p["symbol"]] = Position(
@@ -591,23 +629,30 @@ class Executor:
                 self.fills_due = time.monotonic() + FILLS_SYNC_SECONDS
                 try:
                     async with SessionLocal() as fills_session:
-                        fetched = await sync_fills(fills_session, client, {s.symbol for s in symbols} | set(positions))
+                        fetched = await sync_fills(fills_session, client, set(symbols) | set(positions))
                     if fetched:
                         logger.info("同步成交记录 %d 条", fetched)
                 except Exception:
                     logger.warning("同步成交记录失败，%ds 后重试", FILLS_SYNC_SECONDS, exc_info=True)
-            for symbol in symbols:
+            for name in symbols:
                 try:
-                    manual_action = await redis.getdel(MANUAL_ACTION_KEY.format(symbol.symbol))
-                    await self.reconcile(session, client, symbol, symbol.running, positions.get(symbol.symbol), manual_action)
+                    symbol = await session.get(TradingSymbol, name)
+                    completed = select(TradingEvent.data["request_id"].as_integer()).where(
+                        TradingEvent.exchange == client.exchange, TradingEvent.symbol == name, TradingEvent.kind == "manual_completed",
+                    )
+                    manual_request = await session.scalar(select(TradingEvent).where(
+                        TradingEvent.exchange == client.exchange, TradingEvent.symbol == name, TradingEvent.kind == "manual_requested",
+                        TradingEvent.id.not_in(completed),
+                    ).order_by(TradingEvent.id).limit(1))
+                    await self.reconcile(session, client, symbol, symbol.running, manual_request)
                 except ExchangeError as e:
                     await session.rollback()
-                    await self.report(session, symbol.symbol, f"对账失败：{e}")
+                    await self.report(session, name, f"对账失败：{e}")
                     await session.commit()
                 except Exception as e:
-                    logger.exception("%s 对账出错", symbol.symbol)
+                    logger.exception("%s 对账出错", name)
                     await session.rollback()
-                    await self.report(session, symbol.symbol, f"对账出错：{e!r}")
+                    await self.report(session, name, f"对账出错：{e!r}")
                     await session.commit()
 
 

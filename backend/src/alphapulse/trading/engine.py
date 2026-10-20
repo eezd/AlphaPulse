@@ -15,7 +15,7 @@ from alphapulse.trading.analyst import run_analysis
 from alphapulse.trading.executor import executor_loop
 from alphapulse.trading.news_signals import news_signal_loop
 from alphapulse.trading.schedule import routine_requests
-from alphapulse.trading.snapshot import snapshot_loop
+from alphapulse.trading.snapshot import SnapshotError, read_snapshot, require_fresh_snapshot, snapshot_loop
 
 logger = logging.getLogger("alphapulse.trading.engine")
 
@@ -36,6 +36,11 @@ async def fail_interrupted() -> None:
 
 async def claim_requests(limit: int, busy: set[str]) -> list[tuple[str, list[str]]]:
     """取出到期的分析请求并清空，同一请求里的多个触发原因合并为一次分析"""
+    try:
+        require_fresh_snapshot(await read_snapshot())
+    except SnapshotError:
+        # 领取后就会创建分析记录；账户未就绪时保留请求，避免空耗次数和分析间隔。
+        return []
     async with SessionLocal() as session:
         symbols = (await session.scalars(
             select(TradingSymbol)
