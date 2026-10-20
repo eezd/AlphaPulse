@@ -151,8 +151,24 @@ def test_action_rules():
     assert check_setup(TradePlan(action="wait", summary="s", reasons="r", risks="x"), context()) == {}
     satisfied = TradePlan(action="wait", summary="s", reasons="r", risks="x",
                           reevaluate=[{"direction": "above", "price": "80000", "timeframe": "5m", "basis": "x"}])
-    assert "已经满足" in errors_of(satisfied, context())
+    assert "已经满足" in errors_of(satisfied, context(closed_prices={"5m": Decimal("81000")}))
     assert "只能 keep 或 exit" in errors_of(setup_plan(), context(position_side="long", has_plan=True))
+
+
+@pytest.mark.parametrize("direction,mark,closed,satisfied", [
+    ("above", "110", "100", False), ("above", "100", "110", True),
+    ("below", "100", "110", False), ("below", "110", "100", True),
+])
+@pytest.mark.parametrize("timeframe", ["mark", "5m"])
+def test_reevaluate_uses_its_own_price(direction, mark, closed, satisfied, timeframe):
+    plan = TradePlan(action="wait", summary="s", reasons="r", risks="x",
+                     reevaluate=[{"direction": direction, "price": "105", "timeframe": timeframe, "basis": "x"}])
+    ctx = context(mark_price=Decimal(mark), closed_prices={"5m": Decimal(closed)})
+    expected = satisfied if timeframe == "5m" else not satisfied
+    if expected:
+        assert "已经满足" in errors_of(plan, ctx)
+    else:
+        assert check_setup(plan, ctx) == {}
 
 
 # ---------- 应有订单 ----------

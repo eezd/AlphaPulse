@@ -2,6 +2,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -287,4 +288,34 @@ def test_replacement_proposal_survives_old_plan_cancellation(trading):
             assert proposal.plan_status == "pending"
         finally:
             await engine.market.http.aclose()
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("closed,mark,rejected", [("100", "110", False), ("110", "100", True)])
+@pytest.mark.parametrize("last_bar_closed", [False, True])
+def test_submit_reevaluate_uses_latest_closed_candle(trading, monkeypatch, closed, mark, rejected, last_bar_closed):
+    from alphapulse.trading import analyst
+    from alphapulse.trading.plan import PlanContext
+
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
+    rows = [[0, "0", "0", "0", closed, "0", now_ms - 1000],
+            [1, "0", "0", "0", mark, "0", now_ms + 60_000]]
+    if last_bar_closed:
+        rows[-1][4], rows[-1][6] = closed, now_ms - 1
+    monkeypatch.setattr(analyst.market_client, "get", AsyncMock(return_value=rows))
+    monkeypatch.setattr(analyst, "mark_price", AsyncMock(return_value=Decimal(mark)))
+    monkeypatch.setattr(analyst, "recent_atr", AsyncMock(return_value=Decimal(1)))
+    monkeypatch.setattr(analyst, "read_snapshot", AsyncMock(return_value=None))
+    monkeypatch.setattr(analyst, "add_event", AsyncMock())
+    ctx = PlanContext(Decimal(mark), Decimal(1000), RULES, Decimal(1), False, None)
+    prepared = SimpleNamespace(exchange="bybit", context=ctx)
+
+    async def check():
+        result, outcome = await analyst.submit(prepared, "BTCUSDT", 1, {
+            "action": "wait", "summary": "s", "reasons": "r", "risks": "x",
+            "reevaluate": [{"direction": "above", "price": "105", "timeframe": "5m", "basis": "收盘确认"}],
+        })
+        assert ctx.closed_prices == {"5m": Decimal(closed)}
+        assert (outcome is None) == rejected
+        assert ("已经满足" in result) == rejected
     asyncio.run(check())

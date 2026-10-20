@@ -285,6 +285,12 @@ async def submit(prepared: Prepared, symbol: str, analysis_id: int, arguments: d
     snapshot = await read_snapshot()
     if snapshot:
         prepared.context.position_side = position_side(snapshot, symbol)
+    prepared.context.closed_prices = {}
+    for interval in sorted({c.timeframe for c in plan.reevaluate if c.timeframe != "mark"}):
+        rows = await market_client.get("um", "klines", {"symbol": symbol, "interval": interval, "limit": 2})
+        now_ms = datetime.now(UTC).timestamp() * 1000
+        closed = rows[-1] if rows[-1][6] < now_ms else rows[-2]
+        prepared.context.closed_prices[interval] = Decimal(closed[4])
     try:
         sizing = check_setup(plan, prepared.context)
     except PlanError as e:

@@ -5,7 +5,7 @@
 下方常量与 main/README 的数字重复，并写进了分析器的提示词；改 README 时要同步修改。
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from typing import Annotated, Literal
@@ -98,6 +98,8 @@ class PlanContext:
     atr: Decimal
     has_plan: bool
     position_side: Direction | None
+    # 非 mark 复核条件使用的最近已收盘价，由提交边界按需获取。
+    closed_prices: dict[str, Decimal] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -204,9 +206,9 @@ def check_action(plan: TradePlan, ctx: PlanContext) -> list[str]:
     if plan.action == "plan" and ctx.position_side is not None:
         errors.append("已有持仓：持仓由程序按止损、止盈和持仓时限管理，只能 keep 或 exit")
     for i, c in enumerate(plan.reevaluate, 1):
-        satisfied = ctx.mark_price > c.price if c.direction == "above" else ctx.mark_price < c.price
-        if satisfied:
-            errors.append(f"reevaluate 第 {i} 个条件（{c.direction} {c.price}）按现价 {ctx.mark_price} 已经满足，提交后会立即触发")
+        price = ctx.mark_price if c.timeframe == "mark" else ctx.closed_prices[c.timeframe]
+        if condition_met(c.direction, c.price, price):
+            errors.append(f"reevaluate 第 {i} 个条件（{c.timeframe} {c.direction} {c.price}）按价格 {price} 已经满足，提交后会立即触发")
     return errors
 
 
