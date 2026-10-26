@@ -1,7 +1,6 @@
 <script lang="ts" setup>
 import type { FormInstance, FormRules } from "element-plus"
 import { getCaptchaApi, loginApi } from "@@/apis/auth"
-import { TrendCharts } from "@element-plus/icons-vue"
 import axios, { CanceledError } from "axios"
 import { useUserStore } from "@/pinia/stores/user"
 import { safeRedirect } from "@/router/guards"
@@ -96,9 +95,7 @@ async function submit() {
     <el-card class="w-90" shadow="never" body-class="px-8 pb-8 pt-6">
       <div class="mb-6 text-center">
         <div class="flex-center gap-2 text-2xl text-slate-900 font-bold">
-          <el-icon :size="26" color="var(--el-color-primary)">
-            <TrendCharts />
-          </el-icon>
+          <img src="/favicon.svg" alt="" aria-hidden="true" width="32" height="32" class="shrink-0">
           AlphaPulse
         </div>
         <div class="mt-1 text-xs text-slate-500">

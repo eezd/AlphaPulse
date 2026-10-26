@@ -1,5 +1,5 @@
 <script lang="ts" setup>
-import { SwitchButton, TrendCharts } from "@element-plus/icons-vue"
+import { SwitchButton } from "@element-plus/icons-vue"
 import { useUserStore } from "@/pinia/stores/user"
 import { menuRoutes } from "@/router/routes"
 
@@ -16,9 +16,7 @@ async function logout() {
   <div class="h-full flex flex-col">
     <header class="app-header h-auto flex shrink-0 flex-wrap items-center gap-x-3 gap-y-0 border-b border-b-slate-200 border-b-solid bg-white px-3 pt-2 shadow-sm lg:h-14 lg:flex-nowrap lg:gap-6 lg:px-6 lg:pt-0">
       <div class="brand flex flex-1 shrink-0 items-center gap-2 text-base lg:flex-none lg:text-lg text-slate-900 font-bold">
-        <el-icon :size="22" color="var(--el-color-primary)">
-          <TrendCharts />
-        </el-icon>
+        <img src="/favicon.svg" alt="" aria-hidden="true" width="24" height="24" class="shrink-0">
         AlphaPulse
       </div>
       <nav class="app-nav order-4 h-10 min-w-0 flex flex-1 basis-full gap-5 overflow-x-auto text-sm lg:order-none lg:h-full lg:basis-auto lg:gap-6">
