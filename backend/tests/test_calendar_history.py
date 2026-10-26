@@ -170,7 +170,8 @@ def test_umich_poll_waits_for_final_instead_of_reusing_preliminary(trading):
         <tr><td></td><td>Oct</td><td>Sep</td></tr><tr><td></td><td>2026</td><td>2026</td></tr>
         <tr><td>Index of Consumer Sentiment</td><td>49.0</td><td>48.1</td></tr></table>"""
         worker.fetch = AsyncMock(return_value=(httpx.Response(200, text=html, request=httpx.Request("GET", "https://www.sca.isr.umich.edu/")), 1))
-        row = SimpleNamespace(source="umich", family="umich", period="2026-10", stage="final", scheduled_at=datetime.now(UTC))
+        row = SimpleNamespace(source="umich", family="umich", period="2026-10", stage="final", scheduled_at=datetime.now(UTC),
+                              first_received_at=None)
         try:
             assert await worker.result_page(row) is None
             row.period = "2026-09"

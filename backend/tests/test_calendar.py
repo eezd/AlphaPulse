@@ -158,11 +158,52 @@ def test_result_date_mismatch_waits_without_using_stale_release(trading):
             response = httpx.Response(200, text='<html><body>October 14, 2026</body></html>',
                                       request=httpx.Request("GET", "https://www.bls.gov/example"))
             worker.fetch = AsyncMock(return_value=(response, 1))
-            row = SimpleNamespace(source="bls", family="cpi", scheduled_at=datetime(2026, 11, 10, 13, 30, tzinfo=UTC))
+            row = SimpleNamespace(source="bls", family="cpi", scheduled_at=datetime(2026, 11, 10, 13, 30, tzinfo=UTC),
+                                  first_received_at=None)
             assert await worker.result_page(row) is None
             row.scheduled_at = datetime(2026, 9, 10, 12, 30, tzinfo=UTC)
             with pytest.raises(ValueError, match="日期与日历不符"):
                 await worker.result_page(row)
+        finally:
+            await worker.http.aclose()
+            await worker.bls.aclose()
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("source", ["bls", "umich"])
+def test_rolling_page_rollover_preserves_received_result_without_source_error(trading, monkeypatch, source):
+    import httpx
+    from alphapulse.calendar import worker as module
+
+    async def check():
+        first_received = datetime(2026, 9, 24, 14, tzinfo=UTC)
+        values = {"cpi_yoy" if source == "bls" else "umich_sentiment": {"actual": "2.5", "previous": "2.4"}}
+        row = SimpleNamespace(id=1, source=source, family="cpi" if source == "bls" else "umich",
+                              scheduled_at=first_received, first_received_at=first_received,
+                              period="2026-09", stage="final" if source == "umich" else None,
+                              values=values.copy(), revision_no=3, error="旧的采集错误")
+        session = SimpleNamespace(scalar=AsyncMock(return_value=row), commit=AsyncMock())
+
+        class Context:
+            async def __aenter__(self):
+                return session
+            async def __aexit__(self, *args):
+                pass
+
+        monkeypatch.setattr(module, "SessionLocal", Context)
+        html = ('<html><body>October 22, 2026</body></html>' if source == "bls" else
+                '<h1>Preliminary Results for October 2026</h1><table id="front_table">'
+                '<tr><td></td><td>Oct</td><td>Sep</td></tr><tr><td></td><td>2026</td><td>2026</td></tr>'
+                '<tr><td>Index of Consumer Sentiment</td><td>49.0</td><td>48.1</td></tr></table>')
+        worker = module.CalendarWorker()
+        worker.fetch = AsyncMock(return_value=(httpx.Response(200, text=html,
+                                request=httpx.Request("GET", "https://www.example.com/")), 9))
+        try:
+            await worker.poll_one(1)
+            assert row.error is None
+            assert row.first_received_at == first_received
+            assert row.values == values and row.revision_no == 3
+            session.commit.assert_awaited_once()
         finally:
             await worker.http.aclose()
             await worker.bls.aclose()

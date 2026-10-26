@@ -179,6 +179,8 @@ class CalendarWorker:
                 return response, raw_id
             if period < row.period or (period == row.period and stage == "preliminary" and row.stage == "final"):
                 return None
+            if row.first_received_at is not None:
+                return None  # 最新页已换期；保留已取得的当期值，不误报历史缺口。
             raise ValueError("密歇根当前页已晚于所选历史期次，未取得当期公告")
         if row.source == "bls":
             code = "empsit" if row.family == "jobs" else row.family
@@ -202,6 +204,8 @@ class CalendarWorker:
         published = release_date(response.text).date()
         if row.source == "bls" and published < date:
             return None  # 到点后官网仍缓存上一期，等待当期公告，不填旧值。
+        if row.source == "bls" and published > date and row.first_received_at is not None:
+            return None  # 滚动最新页不再包含本期，不能据此否认已取得的结果。
         if published != date:
             raise ValueError("官方公告日期与日历不符，历史公布值尚未取得")
         return response, raw_id
