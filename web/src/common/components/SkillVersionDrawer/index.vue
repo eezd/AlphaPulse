@@ -3,6 +3,7 @@ import type { SkillNode, SkillVersion } from "@@/apis/skills/type"
 import { listSkillVersionsApi, publishSkillVersionApi } from "@@/apis/skills"
 import { useSessionScope } from "@@/composables/useSessionScope"
 import { diffLines, formatTime } from "@@/utils/text"
+import { CanceledError } from "axios"
 
 const props = defineProps<{ skill: SkillNode | null }>()
 
@@ -16,32 +17,53 @@ const visible = defineModel<boolean>({ required: true })
 const versions = ref<SkillVersion[]>([])
 const selectedId = ref<number | null>(null)
 const publishing = ref(false)
+const loading = ref(false)
+const failed = ref(false)
+let requestSeq = 0
 
 const published = computed(() => versions.value.find(v => v.version_no === props.skill?.published_version_no) ?? null)
 const selected = computed(() => versions.value.find(v => v.id === selectedId.value) ?? null)
 const diff = computed(() => selected.value ? diffLines((published.value?.content ?? "").split("\n"), selected.value.content.split("\n")) : [])
 
 async function load() {
-  if (!props.skill)
-    return
-  versions.value = await listSkillVersionsApi(props.skill.id)
-  // 默认选中最新版本，直接看到草稿相对已发布版本的改动
-  selectedId.value = versions.value[0]?.id ?? null
+  const seq = ++requestSeq
+  const id = props.skill?.id
+  versions.value = []
+  selectedId.value = null
+  failed.value = false
+  loading.value = false
+  if (!visible.value || id === undefined) return
+  loading.value = true
+  try {
+    const result = await listSkillVersionsApi(id)
+    if (seq !== requestSeq || !visible.value || id !== props.skill?.id) return
+    versions.value = result
+    // 默认选中最新版本，直接看到草稿相对已发布版本的改动
+    selectedId.value = result[0]?.id ?? null
+  } catch (error) {
+    if (seq === requestSeq) failed.value = true
+    throw error
+  } finally {
+    if (seq === requestSeq) loading.value = false
+  }
 }
 
-watch([visible, () => props.skill?.id, () => props.skill?.latest_version_no], ([open]) => {
-  if (open)
-    load()
-})
+watch([visible, () => props.skill?.id, () => props.skill?.latest_version_no], load)
+onBeforeUnmount(() => ++requestSeq)
 
 async function publish(version: SkillVersion) {
+  const skillId = props.skill!.id
+  const seq = requestSeq
   const current = props.skill?.published_version_no
   const action = current !== null && current !== undefined && version.version_no < current ? "回退到" : "发布"
   await ElMessageBox.confirm(`${action} v${version.version_no}？发布后 Chat 下一轮起按此版本判断。`, "发布确认", { type: "warning" })
   sessionScope.assertCurrent()
+  if (seq !== requestSeq || !visible.value || skillId !== props.skill?.id)
+    throw new CanceledError("查看的 Skill 已切换")
   publishing.value = true
   try {
-    await publishSkillVersionApi(props.skill!.id, version.id)
+    await publishSkillVersionApi(skillId, version.id)
+    if (seq !== requestSeq) return
     ElMessage.success(`已${action} v${version.version_no}`)
     emit("published")
   } finally {
@@ -52,7 +74,12 @@ async function publish(version: SkillVersion) {
 
 <template>
   <el-drawer v-model="visible" :title="`版本历史：${skill?.path ?? ''}`" size="60%">
-    <div class="h-full flex gap-3">
+    <el-empty v-if="failed" description="版本历史读取失败">
+      <el-button type="primary" @click="load">
+        重试
+      </el-button>
+    </el-empty>
+    <div v-else v-loading="loading" class="h-full flex gap-3">
       <el-scrollbar class="w-60 shrink-0">
         <div
           v-for="v in versions" :key="v.id"

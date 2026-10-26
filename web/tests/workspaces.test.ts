@@ -1,12 +1,178 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import { setImmediate } from "node:timers/promises"
+import axios from "axios"
 import * as vue from "vue"
 import { moduleLoader } from "./module-loader.ts"
 
 const globals = { ...vue, onMounted() {}, onBeforeUnmount() {}, onBeforeRouteLeave() {}, ElMessage: { success() {}, warning() {} } }
 
 const tradingStatus = (limit = 120) => ({ exchange: "bybit", configured: true, provider_id: null, reasoning_effort: null, snapshot: null, today: { analyses: 10, limit, input_tokens: 0, output_tokens: 0 } })
+
+test("分析详情只采用当前请求；关闭、卸载和旧失败都不能覆盖新详情", async () => {
+  const pending: ReturnType<typeof Promise.withResolvers>[] = []
+  let unmount = () => {}
+  const props = vue.reactive({ analysisId: 1 })
+  const load = moduleLoader({
+    "vue": { ...vue, useModel: () => vue.ref(false) },
+    "@@/apis/trading": { getAnalysisApi: () => {
+      const request = Promise.withResolvers()
+      pending.push(request)
+      return request.promise
+    } }
+  }, { ...globals, onBeforeUnmount: (callback: () => void) => unmount = callback })
+  const page = load("@/pages/trading/components/AnalysisDrawer.vue").default.setup(props, { expose() {} })
+  page.visible.value = true
+  await vue.nextTick()
+  props.analysisId = 2
+  await vue.nextTick()
+  pending[1].resolve({ id: 2 })
+  await setImmediate()
+  pending[0].resolve({ id: 1 })
+  await setImmediate()
+  assert.equal(page.detail.value.id, 2)
+
+  const old = page.load()
+  const rejected = assert.rejects(old, /旧请求失败/)
+  const current = page.load()
+  pending[3].resolve({ id: 2 })
+  await current
+  pending[2].reject(new Error("旧请求失败"))
+  await rejected
+  assert.equal(page.failed.value, false)
+  assert.equal(page.detail.value.id, 2)
+
+  const closed = page.load()
+  page.visible.value = false
+  await vue.nextTick()
+  pending[4].resolve({ id: 2 })
+  await closed
+  assert.equal(page.detail.value, undefined)
+  assert.equal(page.loading.value, false)
+
+  page.visible.value = true
+  await vue.nextTick()
+  unmount()
+  pending[5].resolve({ id: 2 })
+  await setImmediate()
+  assert.equal(page.detail.value, undefined)
+})
+
+test("分析详情失败停止加载，明确失败并允许重试", async () => {
+  let fail = true
+  const load = moduleLoader({
+    "vue": { ...vue, useModel: () => vue.ref(true) },
+    "@@/apis/trading": { getAnalysisApi: async () => {
+      if (fail) throw new Error("读取失败")
+      return { id: 1 }
+    } }
+  }, globals)
+  const page = load("@/pages/trading/components/AnalysisDrawer.vue").default.setup({ analysisId: 1 }, { expose() {} })
+  await assert.rejects(page.load(), /读取失败/)
+  assert.equal(page.loading.value, false)
+  assert.equal(page.failed.value, true)
+  fail = false
+  await page.load()
+  assert.equal(page.failed.value, false)
+  assert.equal(page.detail.value.id, 1)
+})
+
+test("Skill 版本绑定当前对象；确认期间切换后不发布旧版本", async () => {
+  const pending: ReturnType<typeof Promise.withResolvers>[] = []
+  const confirmation = Promise.withResolvers<void>()
+  const writes: unknown[] = []
+  const props = vue.reactive({ skill: { id: 1, published_version_no: null, latest_version_no: 1 } })
+  const load = moduleLoader({
+    "vue": { ...vue, useModel: () => vue.ref(false) },
+    "@@/apis/skills": {
+      listSkillVersionsApi: () => {
+        const request = Promise.withResolvers()
+        pending.push(request)
+        return request.promise
+      },
+      publishSkillVersionApi: async (...args: unknown[]) => writes.push(args)
+    },
+    "@@/utils/text": { diffLines: () => [], formatTime: (value: string) => value },
+    "@@/composables/useSessionScope": { useSessionScope: () => ({ assertCurrent() {} }) }
+  }, { ...globals, ElMessageBox: { confirm: () => confirmation.promise } })
+  const page = load("@@/components/SkillVersionDrawer/index.vue").default.setup(props, { expose() {}, emit() {} })
+  page.visible.value = true
+  await vue.nextTick()
+  props.skill = { id: 2, published_version_no: null, latest_version_no: 1 }
+  await vue.nextTick()
+  const version = { id: 22, version_no: 1, content: "B" }
+  pending[1].resolve([version])
+  await setImmediate()
+  pending[0].resolve([{ id: 11, version_no: 1, content: "A" }])
+  await setImmediate()
+  assert.equal(page.versions.value[0].id, 22)
+
+  const publishing = page.publish(version)
+  const rejected = assert.rejects(publishing, error => axios.isCancel(error))
+  props.skill = { id: 3, published_version_no: null, latest_version_no: 1 }
+  await vue.nextTick()
+  assert.equal(page.versions.value.length, 0)
+  assert.equal(page.selectedId.value, null)
+  confirmation.resolve()
+  await rejected
+  assert.equal(writes.length, 0)
+  page.visible.value = false
+  await vue.nextTick()
+  pending[2].resolve([{ id: 33, version_no: 1, content: "C" }])
+  await setImmediate()
+  assert.equal(page.versions.value.length, 0)
+
+  page.visible.value = true
+  await vue.nextTick()
+  pending[3].resolve([{ id: 33, version_no: 1, content: "C" }])
+  await setImmediate()
+  const failing = page.load()
+  pending[4].reject(new Error("版本读取失败"))
+  await assert.rejects(failing, /版本读取失败/)
+  assert.equal(page.failed.value, true)
+  assert.equal(page.loading.value, false)
+  assert.equal(page.versions.value.length, 0)
+  const retry = page.load()
+  pending[5].resolve([{ id: 33, version_no: 1, content: "C" }])
+  await retry
+  assert.equal(page.failed.value, false)
+  await page.publish(page.versions.value[0])
+  assert.deepEqual(writes, [[3, 33]])
+})
+
+test("历史仓位失败不展示旧筛选结果；旧失败不影响新查询，重试可恢复", async () => {
+  const pending: ReturnType<typeof Promise.withResolvers>[] = []
+  const load = moduleLoader({
+    "vue": { ...vue, useModel: () => vue.ref(false) },
+    "@@/apis/trading": { listPositionHistoryApi: () => {
+      const request = Promise.withResolvers()
+      pending.push(request)
+      return request.promise
+    } }
+  }, globals)
+  const page = load("@/pages/trading/components/PositionHistoryDrawer.vue").default.setup({}, { expose() {} })
+  const first = page.load()
+  pending[0].resolve({ items: [{ symbol: "BTCUSDT" }], total: 1 })
+  await first
+  page.filters.symbol = "ETHUSDT"
+  const failing = page.load()
+  assert.equal(page.result.value, undefined)
+  pending[1].reject(new Error("读取失败"))
+  await assert.rejects(failing, /读取失败/)
+  assert.equal(page.failed.value, true)
+  assert.equal(page.loading.value, false)
+  assert.equal(page.result.value, undefined)
+
+  const old = page.load()
+  const rejected = assert.rejects(old, /旧请求失败/)
+  const current = page.load()
+  pending[3].resolve({ items: [{ symbol: "ETHUSDT" }], total: 1 })
+  await current
+  pending[2].reject(new Error("旧请求失败"))
+  await rejected
+  assert.equal(page.failed.value, false)
+  assert.equal(page.result.value.items[0].symbol, "ETHUSDT")
+})
 
 test("交易配置草稿抵抗轮询、仅保存改动字段；失败保留草稿并拒绝重复提交", async () => {
   const pending = Promise.withResolvers<unknown>()

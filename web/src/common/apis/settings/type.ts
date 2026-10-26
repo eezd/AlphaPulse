@@ -30,6 +30,7 @@ export interface ProviderForm {
   context_window: number
   /** 为空表示不传，由模型决定 */
   reasoning_effort: Effort | null
+  /** 修改时不能直接取消当前默认模型；通过将其他模型设为默认切换。 */
   is_default: boolean
 }
 

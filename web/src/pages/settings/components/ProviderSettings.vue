@@ -14,6 +14,7 @@ const PROTOCOL_LABELS = { openai: "OpenAI 格式（/v1/chat/completions）", ant
 const providers = ref<Provider[]>([])
 const dialogVisible = ref(false)
 const editingId = ref<number | null>(null)
+const editingDefault = ref(false)
 const saving = ref(false)
 const testing = ref<number | null>(null)
 
@@ -58,6 +59,7 @@ async function load() {
 
 function openCreate() {
   editingId.value = null
+  editingDefault.value = false
   form.value = emptyForm()
   formRef.value?.clearValidate()
   dialogVisible.value = true
@@ -65,6 +67,7 @@ function openCreate() {
 
 function openEdit(p: Provider) {
   editingId.value = p.id
+  editingDefault.value = p.is_default
   // key 不回显，留空表示不修改
   form.value = {
     name: p.name,
@@ -240,7 +243,8 @@ onMounted(load)
           <span class="ml-2 text-xs">Chat 默认值，可在 Chat 页按轮调整；留空则不传，由模型决定。越高越慢、越贵</span>
         </el-form-item>
         <el-form-item label="设为默认">
-          <el-switch v-model="form.is_default" />
+          <el-switch v-model="form.is_default" :disabled="editingDefault" />
+          <span v-if="editingDefault" class="ml-2 text-xs">请将其他模型设为默认以切换</span>
         </el-form-item>
       </el-form>
       <template #footer>

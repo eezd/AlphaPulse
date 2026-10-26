@@ -67,6 +67,7 @@ class ProviderPatch(BaseModel):
     context_window: Annotated[int | None, Field(ge=4096, le=2000000)] = None
     # 显式传 null 表示不传思考强度
     reasoning_effort: llm.Effort | None = None
+    # 只能将另一模型设为默认，不能直接取消当前默认模型。
     is_default: bool | None = None
 
 
@@ -120,6 +121,8 @@ async def create_provider(body: ProviderIn, session: Annotated[AsyncSession, Dep
 @router.patch("/providers/{provider_id}")
 async def patch_provider(provider_id: int, body: ProviderPatch, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[ProviderOut]:
     provider = await get_provider(session, provider_id)
+    if body.is_default is False and provider.is_default:
+        raise HTTPException(status.HTTP_409_CONFLICT, "不能直接取消默认模型，请将其他模型设为默认")
     values = body.model_dump(exclude_unset=True, exclude={"api_key", "base_url", "is_default"})
     # reasoning_effort 显式传 null 表示清除，其他字段为 null 时忽略
     for field, value in values.items():

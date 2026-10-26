@@ -8,12 +8,32 @@ const props = defineProps<{ analysisId: number | null }>()
 const visible = defineModel<boolean>({ required: true })
 
 const detail = ref<AnalysisDetail>()
+const loading = ref(false)
+const failed = ref(false)
+let requestSeq = 0
 
-watch(() => [visible.value, props.analysisId] as const, async ([open, id]) => {
+async function load() {
+  const seq = ++requestSeq
+  const id = props.analysisId
   detail.value = undefined
-  if (open && id)
-    detail.value = await getAnalysisApi(id)
-})
+  failed.value = false
+  loading.value = false
+  if (!visible.value || id === null) return
+  loading.value = true
+  try {
+    const result = await getAnalysisApi(id)
+    if (seq === requestSeq && visible.value && id === props.analysisId)
+      detail.value = result
+  } catch (error) {
+    if (seq === requestSeq) failed.value = true
+    throw error
+  } finally {
+    if (seq === requestSeq) loading.value = false
+  }
+}
+
+watch(() => [visible.value, props.analysisId] as const, load)
+onBeforeUnmount(() => ++requestSeq)
 
 const toolResults = computed(() => {
   const results = new Map<string, string>()
@@ -165,7 +185,12 @@ function promptMarkdown(text: string) {
         </el-collapse>
       </el-card>
     </div>
-    <div v-else v-loading="true" class="h-40" />
+    <el-empty v-else-if="failed" description="分析详情读取失败">
+      <el-button type="primary" @click="load">
+        重试
+      </el-button>
+    </el-empty>
+    <div v-else v-loading="loading" class="h-40" />
   </el-drawer>
 </template>
 

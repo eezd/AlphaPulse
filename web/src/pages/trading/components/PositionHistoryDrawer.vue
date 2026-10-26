@@ -25,12 +25,15 @@ const page = ref(1)
 const result = ref<PositionHistoryPage>()
 const symbols = ref<string[]>([])
 const loading = ref(false)
+const failed = ref(false)
 // 快速切换筛选时只采用最后一次请求的结果
 let requestSeq = 0
 
 async function load() {
   const seq = ++requestSeq
   loading.value = true
+  failed.value = false
+  result.value = undefined
   try {
     const data = await listPositionHistoryApi({
       symbol: filters.symbol,
@@ -44,6 +47,9 @@ async function load() {
     })
     if (seq === requestSeq)
       result.value = data
+  } catch (error) {
+    if (seq === requestSeq) failed.value = true
+    throw error
   } finally {
     if (seq === requestSeq)
       loading.value = false
@@ -52,15 +58,18 @@ async function load() {
 
 function search() {
   page.value = 1
-  load()
+  return load()
 }
 
 watch(visible, async (open) => {
-  if (!open)
+  if (!open) {
+    ++requestSeq
+    loading.value = false
     return
-  search()
-  symbols.value = await listPositionHistorySymbolsApi()
+  }
+  await Promise.all([search(), listPositionHistorySymbolsApi().then(list => symbols.value = list)])
 })
+onBeforeUnmount(() => ++requestSeq)
 
 const winRate = computed(() => {
   const s = result.value?.summary
@@ -121,6 +130,12 @@ function pnlClass(value: string) {
         </el-radio-group>
       </div>
 
+      <el-alert v-if="failed" type="error" :closable="false" title="历史仓位查询失败">
+        <el-button link @click="load">
+          重试
+        </el-button>
+      </el-alert>
+
       <div v-if="result" class="flex flex-wrap gap-x-8 gap-y-1 border border-slate-200 rounded-lg border-solid bg-slate-50 px-4 py-3 text-xs text-slate-500">
         <span>笔数 <b class="num ml-1 text-sm text-slate-900">{{ result.summary.count }}</b></span>
         <span>盈利 <b class="num ml-1 text-sm text-slate-900">{{ result.summary.wins }}</b></span>
@@ -129,7 +144,7 @@ function pnlClass(value: string) {
         <span>手续费 <b class="num ml-1 text-sm text-slate-900">{{ Number(result.summary.commission).toFixed(2) }} USDT</b></span>
       </div>
 
-      <el-table v-loading="loading" :data="result?.items ?? []" cell-class-name="num" empty-text="没有符合条件的仓位">
+      <el-table v-loading="loading" :data="result?.items ?? []" cell-class-name="num" :empty-text="failed ? '查询失败' : '没有符合条件的仓位'">
         <el-table-column label="币种" min-width="84">
           <template #default="{ row }">
             <span class="text-slate-900 font-semibold">{{ row.symbol }}</span>
