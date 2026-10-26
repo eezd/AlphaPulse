@@ -12,7 +12,7 @@ x-backend: &backend
 services:
   api:
     <<: *backend
-    command: [uvicorn, alphapulse.api.main:app, --host, 0.0.0.0, --port, "8000", --proxy-headers, --forwarded-allow-ips, "*"]
+    command: [uvicorn, alphapulse.api.main:app, --host, 0.0.0.0, --port, "8000", --proxy-headers, --forwarded-allow-ips, "172.18.0.0/16"]
 
   crawler:
     <<: *backend
@@ -28,6 +28,10 @@ services:
     <<: *backend
     command: [python, -m, alphapulse.trading.engine]
 
+  calendar:
+    <<: *backend
+    command: [python, -m, alphapulse.calendar.worker]
+
   web:
     build:
       context: ../web
@@ -35,7 +39,7 @@ services:
     restart: unless-stopped
     depends_on: [api]
     ports:
-      - 127.0.0.1:21030:80
+      - 127.0.0.1:21005:80
     networks: [dev_default]
 
 networks:
