@@ -87,6 +87,7 @@ UMICH_HOME = "https://www.sca.isr.umich.edu/"
 UMICH_HISTORY = "https://data.sca.isr.umich.edu/technical-docs.php"
 UMICH_INFO = "https://data.sca.isr.umich.edu/survey-info.php"
 UMICH_CSV = "https://www.sca.isr.umich.edu/files/tbmics.csv"
+UMICH_REPORTS = "https://data.sca.isr.umich.edu/reports.php"
 SCHEDULE_URLS = {
     "bls": "https://www.bls.gov/schedule/news_release/bls.ics",
     "bea": "https://www.bea.gov/news/schedule/ics/online-calendar-subscription.ics",

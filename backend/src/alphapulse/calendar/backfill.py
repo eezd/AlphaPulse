@@ -4,6 +4,8 @@ uv run python -m alphapulse.calendar.backfill --start 2025-01-01 [--stored-only]
 按北京时间的公布日期筛选。归档可能已修订，first_received_at 保留真实采集时间，
 不能把本次回补用作当时已知信息。失败与无公告缺口会写入 JSON 输出并返回非零状态。
 写入时应暂停 calendar 进程，完成后恢复，避免与日程同步并发创建同一事件。
+密歇根历史初值/终值取官方年度报告索引与当期 PDF，核对正式日期及日程；
+归档尚未公开的报告仍列为缺失，当前月度修订序列不用于填补当期公告。
 """
 import argparse
 import asyncio
@@ -21,12 +23,12 @@ import httpx
 from parsel import Selector
 from sqlalchemy import select, text
 
-from alphapulse.calendar.archives import Announcement, parse_announcements
+from alphapulse.calendar.archives import Announcement, parse_announcements, parse_umich_report
 from alphapulse.calendar import europe
-from alphapulse.calendar.catalog import UMICH_CSV, UMICH_HISTORY, UMICH_HOME, UMICH_INFO
+from alphapulse.calendar.catalog import UMICH_CSV, UMICH_HISTORY, UMICH_HOME, UMICH_INFO, UMICH_REPORTS
 from alphapulse.calendar.parsers import Scheduled, bea_family, compact
 from alphapulse.calendar.service import record_revision, save_raw, save_result, save_schedule, save_series
-from alphapulse.calendar.umich import current_result, document_links, monthly_series, parse_schedule, pdf_text
+from alphapulse.calendar.umich import current_result, document_links, monthly_series, parse_schedule, pdf_text, report_links
 from alphapulse.core.db import SessionLocal
 from alphapulse.core.official_sources import HOSTS as EUROPE_HOSTS
 from alphapulse.models import EconomicRelease, RawBody, RawResponse
@@ -206,6 +208,27 @@ async def fetch_documents(start: date, end: date, known: set[str], errors: list[
                         documents.append(await fetch("umich", link))
             except (httpx.HTTPError, ValueError) as exc:
                 report_error("umich", str(exc.request.url) if isinstance(exc, httpx.HTTPError) else url, exc)
+        # 公告可能在次月公布（如 2025-07 终值在 8 月 1 日）；保留开始月份的前一期，最终按 PDF 正式日期过滤。
+        first_period = (start.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+        for year in (range(int(first_period[:4]), end.year + 1) if "umich" in selected else ()):
+            if "umich" in stopped_sources:
+                break
+            url = f"{UMICH_REPORTS}?year={year}"
+            try:
+                index = await fetch("umich", url)
+                documents.append(index)
+                links = report_links(index.body.decode("utf-8"), year)
+                for (period, _), link in links.items():
+                    if first_period <= period <= end.strftime("%Y-%m") and link not in known:
+                        try:
+                            documents.append(await fetch("umich", link))
+                            known.add(link)
+                        except (httpx.HTTPError, ValueError) as exc:
+                            if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (429, 503):
+                                raise
+                            report_error("umich", link, exc)
+            except (httpx.HTTPError, ValueError) as exc:
+                report_error("umich", str(exc.request.url) if isinstance(exc, httpx.HTTPError) else url, exc)
     return documents
 
 
@@ -267,22 +290,34 @@ async def run(start: date, end: date, *, commit: bool = False, stored_only: bool
             EconomicRelease.source.in_(selected), EconomicRelease.scheduled_at >= begin, EconomicRelease.scheduled_at < finish)))
     if not stored_only:
         documents += await fetch_documents(start, end, {d.url for d in documents}, errors, **({"sources": sources} if sources is not None else {}))
-    schedules: dict[str, tuple[Scheduled, Document]] = {}
     announcements = []
     series_points = []
     # 先处理历史表，再处理年度更正；重跑的稳定身份不依赖日程 PDF 的文件名。
     parsed_schedules = []
+    reports = []
     for document in (d for d in documents if d.source == "umich" and d.body.startswith(b"%PDF")):
         try:
             content = await asyncio.to_thread(pdf_text, document.body)
+            if "Index of Consumer Sentiment" in content:
+                reports.append((document, await asyncio.to_thread(parse_umich_report, content)))
+                continue
             parsed_schedules.append((bool(re.search(r"RELEASE DATES FOR 20\d\d", content)), document,
                                      await asyncio.to_thread(parse_schedule, content)))
         except ValueError as exc:
             errors.append({"url": document.url, "error": str(exc)})
+    all_schedules: dict[str, tuple[Scheduled, Document]] = {}
     for _, document, events in sorted(parsed_schedules, key=lambda item: (item[0], item[1].captured_at)):
         for event in events:
-            if begin <= event.at < finish:
-                schedules[event.external_id] = event, document
+            all_schedules[event.external_id] = event, document
+    schedules = {identity: item for identity, item in all_schedules.items() if begin <= item[0].at < finish}
+    for document, announcement in sorted(reports, key=lambda item: item[0].captured_at):
+        if not begin <= announcement.at < finish:
+            continue
+        identity = f"umich-{announcement.period}-{announcement.stage}"
+        if identity not in schedules or schedules[identity][0].at != announcement.at:
+            errors.append({"url": document.url, "error": "密歇根历史报告的期次、阶段或正式日期与官方日程不符"})
+            continue
+        announcements.append((document, "umich", announcement, schedules[identity][0].title))
     for document in sorted(documents, key=lambda d: d.captured_at):
         try:
             if document.source == "umich":
@@ -292,10 +327,11 @@ async def run(start: date, end: date, *, commit: bool = False, stored_only: bool
                 elif document.url.rstrip("/") == UMICH_HOME.rstrip("/"):
                     period, stage, values = current_result(document.body.decode())
                     identity = f"umich-{period}-{stage}"
-                    if identity not in schedules:
+                    if identity not in all_schedules:
                         raise ValueError("密歇根当前期次未找到官方公布日程")
-                    event, _ = schedules[identity]
-                    announcements.append((document, "umich", Announcement(event.at, period, stage, values), event.title))
+                    event, _ = all_schedules[identity]
+                    if begin <= event.at < finish:
+                        announcements.append((document, "umich", Announcement(event.at, period, stage, values), event.title))
                 continue
             family = family_for(document)
             if family is None:

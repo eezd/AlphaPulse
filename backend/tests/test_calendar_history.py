@@ -263,3 +263,91 @@ def test_archive_limit_stops_entire_source_preserves_documents_and_continues_oth
         assert limited_path in errors[0]["url"]
         assert "/bls/news-release/ppi.htm" not in calls and "/news.release/cpi_03122025.htm" not in calls
     asyncio.run(check())
+
+
+@pytest.mark.parametrize("status", [200, 429, 503])
+def test_umich_report_fetch_skips_stored_documents_and_stops_on_rate_limit(trading, monkeypatch, status):
+    import httpx
+    from unittest.mock import AsyncMock
+    from alphapulse.calendar import backfill
+
+    async def check():
+        calls = []
+        known = {"https://data.sca.isr.umich.edu/fetchdoc.php?docid=1"}
+        def respond(request):
+            calls.append(str(request.url))
+            if request.url.path == "/reports.php":
+                year = int(request.url.params["year"])
+                links = ('<a href="fetchdoc.php?docid=1">December Final Results</a>' if year == 2024 else
+                         '<a href="fetchdoc.php?docid=2">January Preliminary Results</a>'
+                         '<a href="fetchdoc.php?docid=3">January Final Results</a>')
+                return httpx.Response(200, text=f'<div id="report_heading"><span class="title">{year} Reports</span></div>' + links)
+            if request.url.path == "/fetchdoc.php":
+                assert request.url.params["docid"] != "1", "已存报告不应重复下载"
+                if request.url.params["docid"] == "2":
+                    return httpx.Response(status, content=b"%PDF report", headers={"Retry-After": "120"})
+                assert status == 200, "限流后不应继续下载该来源"
+                return httpx.Response(200, content=b"%PDF report")
+            if request.url.path == "/technical-docs.php":
+                return httpx.Response(200, text='<a href="/schedule.pdf">Historical Prelim/Final Release Dates</a>')
+            if request.url.path == "/survey-info.php":
+                return httpx.Response(200, text='<a href="/schedule.pdf">2025 Release Dates</a>')
+            return httpx.Response(200, text="Other official document")
+
+        client = httpx.AsyncClient
+        monkeypatch.setattr(backfill.httpx, "AsyncClient", lambda **kwargs: client(**kwargs, transport=httpx.MockTransport(respond)))
+        monkeypatch.setattr(backfill, "ensure_quiet_window", AsyncMock())
+        monkeypatch.setattr(backfill.asyncio, "sleep", AsyncMock())
+        errors = []
+        docs = await backfill.fetch_documents(date(2025, 1, 1), date(2025, 12, 31), known, errors, sources={"umich"})
+        assert any(d.url.endswith("reports.php?year=2024") for d in docs)
+        report_urls = [d.url for d in docs if "/fetchdoc.php" in d.url]
+        if status == 200:
+            assert len(report_urls) == 2 and not errors
+        else:
+            assert not report_urls and len(errors) == 1
+            assert errors[0]["source"] == "umich" and errors[0]["retry_after"] == "120"
+            assert not any("docid=3" in url for url in calls)
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("schedule_date,valid", [("1/24/2025", True), ("1/23/2025", False)])
+def test_umich_preview_matches_report_date_to_schedule_without_writes(trading, monkeypatch, schedule_date, valid):
+    from unittest.mock import AsyncMock
+    from alphapulse.calendar import backfill
+
+    async def check():
+        now = datetime(2026, 10, 26, tzinfo=UTC)
+        report = (Path(__file__).parent / "fixtures/calendar/umich-2025-01-final.txt").read_text()
+        docs = [backfill.Document("umich", "https://data.sca.isr.umich.edu/fetchdoc.php?docid=1", b"%PDF schedule", now),
+                backfill.Document("umich", "https://data.sca.isr.umich.edu/fetchdoc.php?docid=2", b"%PDF report", now),
+                backfill.Document("umich", backfill.UMICH_HOME, b'''<h1>Final Results for January 2026</h1>
+                <table id="front_table"><tr><td></td><td>Jan</td><td>Dec</td></tr>
+                <tr><td></td><td>2026</td><td>2025</td></tr>
+                <tr><td>Index of Consumer Sentiment</td><td>56.4</td><td>52.9</td></tr></table>''', now)]
+        class Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                pass
+
+            async def execute(self, _):
+                return SimpleNamespace(all=lambda: [])
+
+            async def scalars(self, _):
+                return []
+
+        monkeypatch.setattr(backfill, "SessionLocal", Session)
+        monkeypatch.setattr(backfill, "fetch_documents", AsyncMock(return_value=docs))
+        monkeypatch.setattr(backfill, "pdf_text", lambda body: report if body == b"%PDF report" else
+                            f"Jan 2025 1/10/2025 {schedule_date}\nJan 2026 1/9/2026 1/23/2026")
+        save = AsyncMock()
+        monkeypatch.setattr(backfill, "save_announcement", save)
+        result = await backfill.run(date(2025, 1, 1), date(2025, 12, 31), sources={"umich"})
+        assert result["mode"] == "dry-run" and result["changed_announcements"] == 0
+        save.assert_not_awaited()
+        assert result["announcements"].get("umich", 0) == int(valid)
+        assert bool(result["errors"]) is not valid
+        assert {x["stage"] for x in result["missing_announcements"]} == ({"preliminary"} if valid else {"preliminary", "final"})
+    asyncio.run(check())
