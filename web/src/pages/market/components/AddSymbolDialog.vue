@@ -1,6 +1,6 @@
 <script lang="ts" setup>
-import type { Market, TradableSymbol } from "@/apis/market"
-import { addSymbol, listTradable } from "@/apis/market"
+import type { Market, TradableSymbol } from "@@/apis/market/type"
+import { addSymbolApi, listTradableApi } from "@@/apis/market"
 
 const emit = defineEmits<{ added: [market: Market, symbol: string] }>()
 const visible = defineModel<boolean>({ required: true })
@@ -19,7 +19,7 @@ watch([visible, market], async ([open]) => {
   symbol.value = ""
   loading.value = true
   try {
-    tradable.value = await listTradable(market.value)
+    tradable.value = await listTradableApi(market.value)
   } finally {
     loading.value = false
   }
@@ -28,7 +28,7 @@ watch([visible, market], async ([open]) => {
 async function submit() {
   submitting.value = true
   try {
-    await addSymbol(market.value, symbol.value)
+    await addSymbolApi(market.value, symbol.value)
     ElMessage.success(`已添加 ${symbol.value}，后台开始补齐全历史数据`)
     emit("added", market.value, symbol.value)
     visible.value = false

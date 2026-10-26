@@ -1,9 +1,12 @@
 <script lang="ts" setup>
-import type { SkillNode, SkillVersion } from "@/apis/skills"
-import { listSkillTree, listSkillVersions, patchSkillNode, publishSkillVersion, saveSkillDraft } from "@/apis/skills"
-import SkillTree from "@/components/SkillTree.vue"
-import SkillVersionDrawer from "@/components/SkillVersionDrawer.vue"
-import { renderMarkdown } from "@/utils/markdown"
+import type { SkillNode, SkillVersion } from "@@/apis/skills/type"
+import { listSkillTreeApi, listSkillVersionsApi, patchSkillNodeApi, publishSkillVersionApi, saveSkillDraftApi } from "@@/apis/skills"
+import SkillTree from "@@/components/SkillTree/index.vue"
+import SkillVersionDrawer from "@@/components/SkillVersionDrawer/index.vue"
+import { useSessionScope } from "@@/composables/useSessionScope"
+import { renderMarkdown } from "@@/utils/markdown"
+
+const sessionScope = useSessionScope()
 
 const nodes = ref<SkillNode[]>([])
 const selectedId = ref<number | null>(null)
@@ -20,7 +23,7 @@ const historyVisible = ref(false)
 const preview = computed(() => renderMarkdown(content.value))
 
 async function loadTree() {
-  nodes.value = await listSkillTree()
+  nodes.value = await listSkillTreeApi()
   if (selectedId.value !== null && !selected.value)
     selectedId.value = null
 }
@@ -36,7 +39,7 @@ async function loadContent() {
   }
   loadingContent.value = true
   try {
-    const versions = await listSkillVersions(skill.id)
+    const versions = await listSkillVersionsApi(skill.id)
     if (version !== contentVersion)
       return
     latest.value = versions[0] ?? null
@@ -52,6 +55,7 @@ async function select(node: SkillNode) {
     return
   if (dirty.value)
     await ElMessageBox.confirm("当前 skill 有未保存的修改，切换后会丢失。继续？", "未保存", { type: "warning" })
+  sessionScope.assertCurrent()
   selectedId.value = node.id
   await loadContent()
 }
@@ -65,7 +69,7 @@ async function saveDraft(): Promise<SkillVersion | null> {
   const version = contentVersion
   saving.value = true
   try {
-    const saved = await saveSkillDraft(id, content.value)
+    const saved = await saveSkillDraftApi(id, content.value)
     if (version !== contentVersion)
       return null
     latest.value = saved
@@ -87,9 +91,10 @@ async function publishLatest() {
   if (!version || selectedId.value !== id || contentRequest !== contentVersion)
     return
   await ElMessageBox.confirm(`发布 v${version.version_no}？发布后 Chat 下一轮起按此版本判断。`, "发布确认", { type: "warning" })
+  sessionScope.assertCurrent()
   if (selectedId.value !== id || contentRequest !== contentVersion)
     return
-  await publishSkillVersion(id, version.id)
+  await publishSkillVersionApi(id, version.id)
   ElMessage.success(`已发布 v${version.version_no}`)
   await loadTree()
 }
@@ -97,7 +102,7 @@ async function publishLatest() {
 async function updateMeta(body: { priority?: number, enabled?: boolean }) {
   if (!selected.value)
     return
-  await patchSkillNode(selected.value.id, body)
+  await patchSkillNodeApi(selected.value.id, body)
   await loadTree()
 }
 
@@ -114,16 +119,18 @@ function beforeUnload(e: BeforeUnloadEvent) {
 onMounted(() => window.addEventListener("beforeunload", beforeUnload))
 onBeforeUnmount(() => window.removeEventListener("beforeunload", beforeUnload))
 onBeforeRouteLeave(async () => {
+  if (!sessionScope.isCurrent()) return true
   if (dirty.value)
     await ElMessageBox.confirm("当前 skill 有未保存的修改，离开后会丢失。继续？", "未保存", { type: "warning" })
+  sessionScope.assertCurrent()
 })
 
-loadTree()
+onMounted(loadTree)
 </script>
 
 <template>
-  <div class="h-full flex gap-4">
-    <el-card class="w-80 flex shrink-0 flex-col" body-class="min-h-0 flex-1" shadow="never">
+  <div class="skills-workspace h-full flex flex-col gap-3 lg:flex-row">
+    <el-card class="skills-tree max-h-56 w-full flex shrink-0 flex-col lg:max-h-none lg:w-64" body-class="min-h-0 flex-1" shadow="never">
       <template #header>
         Skills
       </template>
@@ -173,11 +180,11 @@ loadTree()
           优先级越高越先读取，冲突时以优先级高的为准。只有「已发布」的版本会进入 Chat 的判断；保存只生成草稿。
         </div>
 
-        <div class="min-h-0 flex flex-1 gap-3">
+        <div class="skills-editor min-h-0 flex flex-1 flex-col gap-3 lg:flex-row">
           <textarea
             v-model="content" placeholder="用 Markdown 写下投资经验、判断流程或输出规范"
             :disabled="loadingContent || saving"
-            class="box-border flex-1 resize-none border border-slate-300 rounded-lg border-solid p-3 text-sm text-slate-800 leading-6 font-mono outline-none focus:border-[var(--el-color-primary)]"
+            class="box-border min-w-0 flex-1 resize-none border border-slate-300 rounded-lg border-solid p-3 text-sm text-slate-800 leading-6 font-mono outline-none focus:border-[var(--el-color-primary)]"
           />
           <el-scrollbar class="flex-1 border border-slate-200 rounded-lg border-solid bg-slate-50/50">
             <!-- markdown-it 已关闭 html，内容中的标签按文本显示 -->
@@ -185,7 +192,7 @@ loadTree()
           </el-scrollbar>
         </div>
 
-        <div class="flex gap-2">
+        <div class="flex flex-wrap gap-2">
           <el-button :disabled="loadingContent || !dirty" :loading="saving" @click="saveDraft">
             保存草稿
           </el-button>

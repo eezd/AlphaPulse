@@ -1,10 +1,14 @@
 <script lang="ts" setup>
-import type { MarketSymbol } from "@/apis/market"
-import { deleteSymbol } from "@/apis/market"
-import { INTERVAL_LABELS } from "@/pages/market/chart"
+import type { MarketSymbol } from "@@/apis/market/type"
+import { deleteSymbolApi } from "@@/apis/market"
+import { useSessionScope } from "@@/composables/useSessionScope"
+import { INTERVAL_LABELS } from "../chart"
 
 defineProps<{ symbols: MarketSymbol[] }>()
 const emit = defineEmits<{ changed: [] }>()
+
+const sessionScope = useSessionScope()
+
 const visible = defineModel<boolean>({ required: true })
 
 const STATUS = {
@@ -22,7 +26,8 @@ function overall(s: MarketSymbol) {
 
 async function remove(s: MarketSymbol) {
   await ElMessageBox.confirm(`删除 ${s.symbol}（${s.market === "spot" ? "现货" : "永续"}）及其全部 K 线？之后可重新添加并补齐。`, "删除确认", { type: "warning" })
-  await deleteSymbol(s.id)
+  sessionScope.assertCurrent()
+  await deleteSymbolApi(s.id)
   ElMessage.success("已删除")
   emit("changed")
 }

@@ -1,9 +1,9 @@
 <script lang="ts" setup>
-import type { NewsDetail, Revision } from "@/apis/news"
+import type { NewsDetail, Revision } from "@@/apis/news/type"
+import { getNewsApi, listRevisionsApi } from "@@/apis/news"
+import { useSourceNames } from "@@/composables/useSourceNames"
+import { diffLines, formatTime, htmlToLines } from "@@/utils/text"
 import { Link } from "@element-plus/icons-vue"
-import { getNews, listRevisions } from "@/apis/news"
-import { useSourceNames } from "@/composables/useSourceNames"
-import { diffLines, formatTime, htmlToLines } from "@/utils/text"
 
 const props = defineProps<{ newsId: number | null }>()
 
@@ -11,6 +11,8 @@ const sourceNames = useSourceNames()
 const detail = ref<NewsDetail>()
 const revisions = ref<Revision[]>([])
 const activeTab = ref("content")
+const summaryOnly = computed(() => detail.value?.extra.content_scope === "feed_summary"
+  || detail.value?.extra.content_scope === "public_summary")
 // 当前查看的修订序号，与上一版对比
 const selectedRevision = ref<number>()
 // 加载失败（错误提示已由 http 拦截器弹出）：停止转圈，显示重试
@@ -22,7 +24,7 @@ async function load(id: number) {
   const seq = ++requestSeq
   failed.value = false
   try {
-    const [news, revs] = await Promise.all([getNews(id), listRevisions(id)])
+    const [news, revs] = await Promise.all([getNewsApi(id), listRevisionsApi(id)])
     if (seq !== requestSeq)
       return
     detail.value = news
@@ -42,8 +44,8 @@ watch(() => props.newsId, (id) => {
   if (id == null)
     requestSeq++
   else
-    load(id)
-})
+    return load(id)
+}, { immediate: true })
 
 // 第三方正文放进无脚本权限的 sandbox iframe，避免其中的脚本访问本站
 const srcdoc = computed(() => detail.value && `<!doctype html><html><head><meta charset="utf-8">
@@ -102,8 +104,13 @@ const diffStats = computed(() => ({
           </el-link>
         </div>
       </div>
+      <el-alert
+        v-if="summaryOnly"
+        title="此条新闻仅采集公开摘要，完整内容请查看原文链接。"
+        type="info" :closable="false" show-icon
+      />
       <el-tabs v-model="activeTab" class="min-h-0 flex flex-1 flex-col">
-        <el-tab-pane label="正文" name="content" class="h-full">
+        <el-tab-pane :label="summaryOnly ? '摘要' : '正文'" name="content" class="h-full">
           <iframe :srcdoc="srcdoc" sandbox="allow-popups allow-popups-to-escape-sandbox" class="h-full w-full border-0" />
         </el-tab-pane>
         <el-tab-pane :label="`修订（${revisions.length}）`" name="revisions" class="h-full overflow-auto">

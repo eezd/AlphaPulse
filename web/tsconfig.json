@@ -7,6 +7,7 @@
     "module": "esnext",
     "moduleResolution": "bundler",
     "paths": {
+      "@@/*": ["./src/common/*"],
       "@/*": ["./src/*"]
     },
     "resolveJsonModule": true,
@@ -17,6 +18,6 @@
     "isolatedModules": true,
     "skipLibCheck": true
   },
-  "include": ["src/**/*.ts", "src/**/*.vue", "types/**/*.d.ts", "*.ts"],
+  "include": ["tests/**/*.ts", "src/**/*.ts", "src/**/*.vue", "types/**/*.d.ts", "*.ts"],
   "exclude": ["node_modules", "dist"]
 }

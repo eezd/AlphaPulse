@@ -1,11 +1,11 @@
 <script lang="ts" setup>
-import type { CrawlLog, SourceInfo } from "@/apis/crawler"
-import type { NewsBrief } from "@/apis/news"
+import type { CrawlLog, SourceInfo } from "@@/apis/crawler/type"
+import type { NewsBrief } from "@@/apis/news/type"
+import { patchSourceApi } from "@@/apis/crawler"
+import { listNewsApi } from "@@/apis/news"
+import { formatTime } from "@@/utils/text"
 import { CircleCheck, RefreshRight } from "@element-plus/icons-vue"
 import dayjs from "dayjs"
-import { patchSource } from "@/apis/crawler"
-import { listNews } from "@/apis/news"
-import { formatTime } from "@/utils/text"
 
 /** logs 只用来发现「本轮完成」以刷新最新入库；alert 为连续失败达到告警阈值 */
 const props = defineProps<{
@@ -23,24 +23,24 @@ const latest = ref<NewsBrief[]>([])
 const interval = ref(props.source.interval_seconds)
 
 async function loadLatest() {
-  latest.value = (await listNews({ source: [props.source.code], limit: 5 })).items
+  latest.value = (await listNewsApi({ source: [props.source.code], limit: 5 })).items
 }
 
 // 本来源有新的“本轮完成”日志时刷新最新入库列表
 watch(() => props.logs.at(-1), (log) => {
   if (log?.message.startsWith("本轮完成") && !log.message.includes("新增 0，修订 0"))
-    loadLatest()
+    return loadLatest()
 })
 
 async function toggleEnabled(enabled: boolean | string | number) {
-  await patchSource(props.source.code, { enabled: Boolean(enabled) })
+  await patchSourceApi(props.source.code, { enabled: Boolean(enabled) })
   emit("changed")
 }
 
 async function saveInterval() {
   if (interval.value === props.source.interval_seconds)
     return
-  await patchSource(props.source.code, { interval_seconds: interval.value })
+  await patchSourceApi(props.source.code, { interval_seconds: interval.value })
   ElMessage.success("已保存，下一轮起生效")
   emit("changed")
 }
@@ -67,13 +67,13 @@ const history = computed(() => {
 
 async function startHistory() {
   // 按北京时间当天 0 点
-  await patchSource(props.source.code, { history_target: dayjs(`${historyDate.value}T00:00:00+08:00`).toISOString() })
+  await patchSourceApi(props.source.code, { history_target: dayjs(`${historyDate.value}T00:00:00+08:00`).toISOString() })
   ElMessage.success("已开始，下一轮起分段回补")
   emit("changed")
 }
 
 async function cancelHistory() {
-  await patchSource(props.source.code, { history_target: null })
+  await patchSourceApi(props.source.code, { history_target: null })
   ElMessage.success("已取消，断点保留")
   emit("changed")
 }
@@ -93,7 +93,7 @@ const statusTag = computed(() => {
   return { type: "success", text: "运行中" } as const
 })
 
-loadLatest()
+onMounted(loadLatest)
 </script>
 
 <template>
@@ -160,7 +160,7 @@ loadLatest()
         <span v-else>不可用</span>
       </div>
       <template v-if="!source.supports_history">
-        该来源的列表接口只能翻最近几页，无法回补历史
+        此来源不支持控制台连续翻页回补；官方归档由独立任务处理。
       </template>
       <template v-else>
         <div class="flex items-center gap-2">

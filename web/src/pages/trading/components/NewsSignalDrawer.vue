@@ -1,8 +1,8 @@
 <script lang="ts" setup>
-import type { NewsSignalItem, NewsSignals } from "@/apis/trading"
-import { getNewsSignals } from "@/apis/trading"
-import { useSourceNames } from "@/composables/useSourceNames"
-import { formatTime } from "@/utils/text"
+import type { NewsSignalItem, NewsSignals } from "@@/apis/trading/type"
+import { getNewsSignalsApi } from "@@/apis/trading"
+import { useSourceNames } from "@@/composables/useSourceNames"
+import { formatTime } from "@@/utils/text"
 
 const visible = defineModel<boolean>({ required: true })
 
@@ -19,7 +19,7 @@ watch(visible, async (open) => {
     return
   loading.value = true
   try {
-    data.value = await getNewsSignals()
+    data.value = await getNewsSignalsApi()
   } finally {
     loading.value = false
   }

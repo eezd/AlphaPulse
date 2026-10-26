@@ -1,8 +1,9 @@
 <script lang="ts" setup>
-import type { PositionHistory, PositionHistoryPage } from "@/apis/trading"
+import type { PositionHistory, PositionHistoryPage } from "@@/apis/trading/type"
+import { listPositionHistoryApi, listPositionHistorySymbolsApi } from "@@/apis/trading"
+import { formatTime } from "@@/utils/text"
 import dayjs from "dayjs"
-import { CLOSE_REASON_LABELS, listPositionHistory, listPositionHistorySymbols } from "@/apis/trading"
-import { formatTime } from "@/utils/text"
+import { CLOSE_REASON_LABELS } from "../plan-display"
 
 const emit = defineEmits<{ detail: [id: number] }>()
 const visible = defineModel<boolean>({ required: true })
@@ -31,7 +32,7 @@ async function load() {
   const seq = ++requestSeq
   loading.value = true
   try {
-    const data = await listPositionHistory({
+    const data = await listPositionHistoryApi({
       symbol: filters.symbol,
       // 日期范围按自然日：结束日当天整天都算
       start: filters.range ? dayjs(filters.range[0]).startOf("day").toISOString() : undefined,
@@ -58,7 +59,7 @@ watch(visible, async (open) => {
   if (!open)
     return
   search()
-  symbols.value = await listPositionHistorySymbols()
+  symbols.value = await listPositionHistorySymbolsApi()
 })
 
 const winRate = computed(() => {

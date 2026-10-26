@@ -5,6 +5,8 @@ export default antfu(
   {
     // 使用外部格式化程序格式化 css、html、markdown 等文件
     formatters: true,
+    // 使用 Node 内置测试，不引入 Vitest。
+    test: { overrides: { "test/no-import-node-test": "off" } },
     // 启用样式规则
     stylistic: {
       // 缩进级别
@@ -15,7 +17,7 @@ export default antfu(
       semi: false
     },
     // 忽略文件
-    ignores: ["types/auto-imports.d.ts", "types/components.d.ts"]
+    ignores: ["types/auto/**"]
   },
   {
     // 对所有文件都生效的规则

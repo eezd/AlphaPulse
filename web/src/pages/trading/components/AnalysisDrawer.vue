@@ -1,8 +1,8 @@
 <script lang="ts" setup>
-import type { AnalysisDetail } from "@/apis/trading"
-import { getAnalysis } from "@/apis/trading"
-import { renderMarkdown } from "@/utils/markdown"
-import { formatTime } from "@/utils/text"
+import type { AnalysisDetail } from "@@/apis/trading/type"
+import { getAnalysisApi } from "@@/apis/trading"
+import { renderMarkdown } from "@@/utils/markdown"
+import { formatTime } from "@@/utils/text"
 
 const props = defineProps<{ analysisId: number | null }>()
 const visible = defineModel<boolean>({ required: true })
@@ -12,7 +12,7 @@ const detail = ref<AnalysisDetail>()
 watch(() => [visible.value, props.analysisId] as const, async ([open, id]) => {
   detail.value = undefined
   if (open && id)
-    detail.value = await getAnalysis(id)
+    detail.value = await getAnalysisApi(id)
 })
 
 const toolResults = computed(() => {

@@ -1,85 +1,72 @@
 <script lang="ts" setup>
-import type { CrawlLog, SourcesInfo } from "@/apis/crawler"
+import type { SourcesInfo } from "@@/apis/crawler/type"
+import { listSourcesApi, restartCrawlerApi } from "@@/apis/crawler"
+import { useSessionScope } from "@@/composables/useSessionScope"
+import { formatTime } from "@@/utils/text"
 import { Monitor, RefreshRight } from "@element-plus/icons-vue"
-import { listLogs, listSources, restartCrawler } from "@/apis/crawler"
-import { useEventSource } from "@/composables/useEventSource"
-import SourcePanel from "@/pages/crawler/components/SourcePanel.vue"
-import { formatTime } from "@/utils/text"
+import { logRequestError } from "@/http/axios"
+import CalendarSourcePanel from "./components/CalendarSourcePanel.vue"
+import SourcePanel from "./components/SourcePanel.vue"
+import { useCrawlerLogs } from "./composables/useCrawlerLogs"
 
-const MAX_LOGS = 1000
+const sessionScope = useSessionScope()
+
 // 连续失败达到该次数时卡片告警
 const FAILURE_ALERT = 3
 const RESTART_TIMEOUT_MS = 60_000
-const LEVELS = ["INFO", "WARNING", "ERROR"]
 
 const info = ref<SourcesInfo>()
-const logs = reactive<Record<string, CrawlLog[]>>({})
+const loading = ref(false)
+const failed = ref(false)
+const detailVisible = ref(false)
+const detailCode = ref("")
+const detailKind = ref<"news" | "calendar">("news")
+const newsDetail = computed(() => detailKind.value === "news" ? info.value?.sources.find(s => s.code === detailCode.value) : undefined)
+const calendarDetail = computed(() => detailKind.value === "calendar" ? info.value?.calendar_sources.find(s => s.code === detailCode.value) : undefined)
+function openDetail(code: string, kind: "news" | "calendar") {
+  detailCode.value = code
+  detailKind.value = kind
+  detailVisible.value = true
+}
+const collector = ref("all")
+const region = ref("all")
+const regions = { all: "全部地域", CN: "中国", US: "美国", EA: "欧元区", GB: "英国", DE: "德国", FR: "法国", GLOBAL: "全球" }
+const newsSources = computed(() => info.value?.sources.filter(s => region.value === "all" || s.region_code === region.value) ?? [])
+const calendarSources = computed(() => info.value?.calendar_sources.filter(s => region.value === "all" || s.region_code === region.value) ?? [])
 // 正在等待重新上线的来源
 const restarting = reactive(new Set<string>())
+const { logs, logSource, levels, autoScroll, logBox, visibleLogs, levelClass, connected, loadHistory, LEVELS } = useCrawlerLogs(code => restarting.delete(code))
 // 日志面板筛选：空字符串为全部来源
-const logSource = ref("")
-const levels = ref([...LEVELS])
-const autoScroll = ref(true)
-const logBox = ref<HTMLElement>()
 
 async function refresh() {
-  info.value = await listSources()
+  loading.value = info.value === undefined
+  try {
+    info.value = await listSourcesApi()
+    failed.value = false
+  } catch (error) {
+    failed.value = true
+    throw error
+  } finally {
+    loading.value = false
+  }
 }
 
 const sourceNames = computed(() => Object.fromEntries(info.value?.sources.map(s => [s.code, s.name]) ?? []))
 
-// 各来源日志按全局自增 id 合并
-const visibleLogs = computed(() => Object.values(logs).flat().filter(log => (!logSource.value || log.source_code === logSource.value)
-  && (levels.value.includes(log.level) || (log.level === "CRITICAL" && levels.value.includes("ERROR")))).sort((a, b) => a.id - b.id).slice(-MAX_LOGS))
-
-watch(() => visibleLogs.value.at(-1)?.id, async () => {
-  if (!autoScroll.value)
-    return
-  await nextTick()
-  logBox.value?.scrollTo({ top: logBox.value.scrollHeight })
-})
-
-function levelClass(level: string) {
-  if (level === "WARNING")
-    return "bg-amber-500/20 text-amber-300"
-  if (level === "ERROR" || level === "CRITICAL")
-    return "bg-rose-500/20 text-rose-300"
-  return "bg-sky-500/20 text-sky-300"
-}
-
-function appendLog(log: CrawlLog) {
-  const list = (logs[log.source_code] ??= [])
-  // SSE 可能早于历史日志到达，按 id 去重
-  if (list.length && list.at(-1)!.id >= log.id)
-    return
-  list.push(log)
-  if (list.length > MAX_LOGS)
-    list.splice(0, list.length - MAX_LOGS)
-  if (log.message.startsWith("子进程已启动"))
-    restarting.delete(log.source_code)
-}
-
-const { connected } = useEventSource<CrawlLog>("/api/crawler/logs/stream", "log", appendLog)
-
-async function loadHistory(code: string) {
-  const history = await listLogs(code, 200)
-  const live = logs[code] ?? []
-  const firstLiveId = live[0]?.id ?? Infinity
-  logs[code] = [...history.filter(log => log.id < firstLiveId), ...live]
-}
-
 async function restart(source: string) {
   const label = source === "all" ? "全部来源" : info.value?.sources.find(s => s.code === source)?.name
   await ElMessageBox.confirm(`确定重启 ${label} 的采集进程？`, "重启确认", { type: "warning" })
+  sessionScope.assertCurrent()
   const codes = source === "all" ? info.value!.sources.map(s => s.code) : [source]
   codes.forEach(code => restarting.add(code))
   try {
-    await restartCrawler(source)
+    await restartCrawlerApi(source)
   } catch (error) {
     codes.forEach(code => restarting.delete(code))
     throw error
   }
   setTimeout(() => {
+    if (!sessionScope.isCurrent()) return
     const stuck = codes.filter(code => restarting.has(code))
     if (stuck.length) {
       stuck.forEach(code => restarting.delete(code))
@@ -92,14 +79,27 @@ function formatBytes(bytes: number) {
   return bytes > 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(2)} GB` : `${(bytes / 1024 ** 2).toFixed(1)} MB`
 }
 
-const timer = setInterval(refresh, 3000)
+const timer = setInterval(() => refresh().catch(logRequestError), 3000)
 onBeforeUnmount(() => clearInterval(timer))
 
-refresh().then(() => Promise.all(info.value!.sources.map(s => loadHistory(s.code))))
+onMounted(async () => {
+  await refresh()
+  await Promise.all(info.value!.sources.map(s => loadHistory(s.code)))
+})
 </script>
 
 <template>
-  <div v-if="info" class="flex flex-col gap-4">
+  <div v-if="!info" v-loading="loading" class="min-h-40">
+    <el-result v-if="failed" icon="error" title="采集状态读取失败">
+      <template #extra>
+        <el-button @click="refresh">
+          重试
+        </el-button>
+      </template>
+    </el-result>
+  </div>
+  <div v-else class="flex flex-col gap-4">
+    <el-alert v-if="failed" type="error" :closable="false" title="状态刷新失败，以下为上次读取的数据" />
     <el-card shadow="never" body-class="flex flex-wrap items-center gap-x-6 gap-y-2">
       <div class="flex items-center gap-2 text-sm text-slate-900 font-semibold">
         <el-icon><Monitor /></el-icon>
@@ -123,24 +123,112 @@ refresh().then(() => Promise.all(info.value!.sources.map(s => loadHistory(s.code
       </div>
       <div class="flex-1" />
       <el-button type="danger" plain :icon="RefreshRight" :loading="restarting.size > 0" @click="restart('all')">
-        重启全部采集
+        重启全部新闻采集
       </el-button>
     </el-card>
 
-    <div class="text-sm text-slate-900 font-semibold">
-      采集来源（{{ info.sources.length }}）
+    <div class="flex flex-wrap items-center gap-3">
+      <el-select v-model="collector" class="w-40">
+        <el-option value="all" label="全部采集类型" /><el-option value="news" label="新闻" /><el-option value="calendar" label="经济日历" />
+      </el-select>
+      <el-select v-model="region" class="w-36">
+        <el-option v-for="(name, code) in regions" :key="code" :value="code" :label="name" />
+      </el-select>
     </div>
-    <div class="grid grid-cols-[repeat(auto-fill,minmax(320px,1fr))] gap-4">
-      <SourcePanel
-        v-for="source in info.sources" :key="source.code"
-        :source="source"
-        :logs="logs[source.code] ?? []"
-        :restarting="restarting.has(source.code)"
-        :alert="source.consecutive_failures >= FAILURE_ALERT"
-        @restart="restart(source.code)"
-        @changed="refresh"
-      />
-    </div>
+    <el-card v-if="collector !== 'calendar'" shadow="never" body-class="p-0">
+      <template #header>
+        新闻来源 · {{ newsSources.length }}
+      </template>
+      <el-table :data="newsSources" size="small" @row-click="row => openDetail(row.code, 'news')">
+        <el-table-column prop="name" label="来源" min-width="170" />
+        <el-table-column label="地域" width="95">
+          <template #default="{ row }">
+            {{ regions[row.region_code as keyof typeof regions] ?? row.region_code }}
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="110">
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.enabled && row.process?.state === 'running' ? 'success' : 'info'">
+              {{ !row.enabled ? '已停用' : row.process?.state === 'running' ? '运行中' : '未运行' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="频率" width="85">
+          <template #default="{ row }">
+            {{ row.interval_seconds }} 秒
+          </template>
+        </el-table-column>
+        <el-table-column label="今日新增 / 修订" width="130">
+          <template #default="{ row }">
+            {{ row.today_new }} / {{ row.today_revised }}
+          </template>
+        </el-table-column>
+        <el-table-column label="最近成功" width="155">
+          <template #default="{ row }">
+            {{ row.last_success_at ? formatTime(row.last_success_at) : '—' }}
+          </template>
+        </el-table-column>
+        <el-table-column label="异常 / 回补" min-width="230">
+          <template #default="{ row }">
+            <span :class="row.consecutive_failures >= FAILURE_ALERT ? 'text-red-600' : ''">{{ row.last_error || (row.history_done ? '历史回补完成' : row.history_position ? `回补至 ${row.history_position}` : '—') }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="80" fixed="right">
+          <template #default="{ row }">
+            <el-button link type="primary" @click.stop="openDetail(row.code, 'news')">
+              详情
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-card>
+    <el-card v-if="collector !== 'news'" shadow="never" body-class="p-0">
+      <template #header>
+        经济日历 · {{ calendarSources.length }} <span class="text-xs text-slate-500 font-normal">（只读）</span>
+      </template>
+      <el-table :data="calendarSources" size="small" @row-click="row => openDetail(row.code, 'calendar')">
+        <el-table-column prop="name" label="来源" min-width="170" />
+        <el-table-column label="地域" width="95">
+          <template #default="{ row }">
+            {{ regions[row.region_code as keyof typeof regions] }}
+          </template>
+        </el-table-column>
+        <el-table-column label="采集进程" width="110">
+          <template #default="{ row }">
+            <el-tag :type="row.worker_alive ? 'success' : 'danger'" size="small">
+              {{ row.worker_alive ? '在线' : '离线' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="日程更新" min-width="155">
+          <template #default="{ row }">
+            {{ row.schedule_success_at ? formatTime(row.schedule_success_at) : '—' }}
+          </template>
+        </el-table-column>
+        <el-table-column label="下个事件" min-width="155">
+          <template #default="{ row }">
+            {{ row.next_event_at ? formatTime(row.next_event_at) : '—' }}
+          </template>
+        </el-table-column>
+        <el-table-column prop="overdue_count" label="待取结果" width="90" />
+        <el-table-column label="异常" min-width="230">
+          <template #default="{ row }">
+            <span class="text-red-600">{{ row.errors.join('；') || '—' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="80" fixed="right">
+          <template #default="{ row }">
+            <el-button link type="primary" @click.stop="openDetail(row.code, 'calendar')">
+              详情
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-card>
+    <el-drawer v-model="detailVisible" :title="newsDetail?.name ?? calendarDetail?.name ?? '来源详情'" size="min(640px, 100vw)">
+      <SourcePanel v-if="newsDetail" :key="newsDetail.code" :source="newsDetail" :logs="logs[newsDetail.code] ?? []" :restarting="restarting.has(newsDetail.code)" :alert="newsDetail.consecutive_failures >= FAILURE_ALERT" @restart="restart(newsDetail.code)" @changed="refresh" />
+      <CalendarSourcePanel v-if="calendarDetail" :source="calendarDetail" />
+    </el-drawer>
 
     <el-card shadow="never">
       <template #header>

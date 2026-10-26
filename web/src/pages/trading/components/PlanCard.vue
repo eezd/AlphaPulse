@@ -1,8 +1,8 @@
 <script lang="ts" setup>
-import type { Analysis, OrderRow, PlanCondition, TradingSymbol } from "@/apis/trading"
+import type { Analysis, OrderRow, PlanCondition, TradingSymbol } from "@@/apis/trading/type"
+import { formatTime } from "@@/utils/text"
 import { Document, Edit, Lightning, SwitchButton, VideoPlay } from "@element-plus/icons-vue"
-import { CLOSE_REASON_LABELS, PLAN_STATUS_LABELS, TAKE_PROFIT_STEPS } from "@/apis/trading"
-import { formatTime } from "@/utils/text"
+import { CLOSE_REASON_LABELS, PLAN_STATUS_LABELS, TAKE_PROFIT_STEPS } from "../plan-display"
 
 /** analysis：执行中的计划，没有时为最近一次分析；latest：最近一次分析（与 analysis 不同时另行提示） */
 const props = defineProps<{ symbol: TradingSymbol, analysis: Analysis | null, latest: Analysis | null, orders: OrderRow[], requesting: boolean, toggling: boolean }>()

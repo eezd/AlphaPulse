@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc && vite build",
-    "lint": "eslint . --fix"
+    "lint": "eslint . --fix",
+    "lint:check": "eslint .",
+    "typecheck": "vue-tsc --noEmit",
+    "test": "node --experimental-strip-types --test tests/*.test.ts"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",

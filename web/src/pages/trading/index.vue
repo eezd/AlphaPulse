@@ -1,32 +1,29 @@
 <script lang="ts" setup>
-import type { Effort, Provider } from "@/apis/settings"
-import type { Analysis, OrderRow, SnapshotPosition, TradingEvent, TradingStatus, TradingSymbol } from "@/apis/trading"
+import type { Provider } from "@@/apis/settings/type"
+import type { SnapshotPosition, TradingStatus, TradingSymbol } from "@@/apis/trading/type"
+import { listProvidersApi } from "@@/apis/settings"
+import { deleteSymbolApi, getStatusApi, manualActionApi, patchSymbolApi, requestAnalysisApi, startTradingApi, stopTradingApi } from "@@/apis/trading"
+import { useSessionScope } from "@@/composables/useSessionScope"
+import { formatTime } from "@@/utils/text"
 import { Clock, Plus, Reading } from "@element-plus/icons-vue"
-import { EFFORTS, listProviders } from "@/apis/settings"
-import { deleteSymbol, getStatus, getSymbolPlan, isOwnOrder, listAnalyses, listEvents, listSymbols, manualAction, patchConfig, patchSymbol, requestAnalysis, startTrading, stopTrading } from "@/apis/trading"
-import { usePersisted } from "@/utils/storage"
-import { formatTime } from "@/utils/text"
+import { CanceledError } from "axios"
 import AddSymbolDialog from "./components/AddSymbolDialog.vue"
 import AnalysisDrawer from "./components/AnalysisDrawer.vue"
 import NewsSignalDrawer from "./components/NewsSignalDrawer.vue"
 import PlanCard from "./components/PlanCard.vue"
 import PositionHistoryDrawer from "./components/PositionHistoryDrawer.vue"
+import TradingConfig from "./components/TradingConfig.vue"
+import { useTradingData } from "./composables/useTradingData"
+import { isOwnOrder } from "./plan-display"
 
-const STATUS_REFRESH_MS = 3000
-const EVENTS_PAGE = 50
+const sessionScope = useSessionScope()
+const { status, symbols, selected, events, eventsExhausted, latestAnalysis, livePlan, planOrders, current, loading, failed, refresh, refreshEvents, loadMoreEvents } = useTradingData()
+
 const LEVEL_TYPES = { info: "primary", warn: "warning", error: "danger" } as const
 
-const status = ref<TradingStatus>()
-const symbols = ref<TradingSymbol[]>([])
 const providers = ref<Provider[]>([])
-const selected = usePersisted("trading.symbol", "")
-const events = ref<TradingEvent[]>([])
-const eventsExhausted = ref(false)
 const addVisible = ref(false)
 const toggling = ref(false)
-const latestAnalysis = ref<Analysis | null>(null)
-const livePlan = ref<Analysis | null>(null)
-const planOrders = ref<OrderRow[]>([])
 const requesting = ref(false)
 const drawerVisible = ref(false)
 const drawerAnalysisId = ref<number | null>(null)
@@ -37,7 +34,6 @@ const exchangeName = computed(() => status.value?.exchange === "bybit" ? "Bybit"
 const snapshot = computed(() => status.value?.snapshot ?? null)
 const account = computed(() => snapshot.value?.account ?? null)
 const positions = computed(() => snapshot.value?.positions ?? [])
-const current = computed(() => symbols.value.find(s => s.symbol === selected.value))
 const runningCount = computed(() => symbols.value.filter(s => s.running).length)
 const engineText = computed(() => snapshot.value ? `${exchangeName.value} · 在线 · ${runningCount.value ? `${runningCount.value} 个币交易中` : "全部停止"}` : `${exchangeName.value} · 离线`)
 /** 各币交易资金合计，不超过账户权益 */
@@ -110,26 +106,6 @@ function symbolState(s: TradingSymbol) {
   return { label: "空仓", type: "info" } as const
 }
 
-async function refresh() {
-  [status.value, symbols.value] = await Promise.all([getStatus(), listSymbols()])
-  if (!current.value && symbols.value.length)
-    selected.value = symbols.value[0].symbol
-  await refreshAnalysis()
-}
-
-async function refreshAnalysis() {
-  const exchange = status.value?.exchange
-  const symbol = selected.value
-  if (!symbol)
-    return
-  const [latest, { plan, orders }] = await Promise.all([listAnalyses({ symbol, limit: 1 }), getSymbolPlan(symbol)])
-  if (symbol !== selected.value || exchange !== status.value?.exchange)
-    return
-  latestAnalysis.value = latest[0] ?? null
-  livePlan.value = plan
-  planOrders.value = orders
-}
-
 /** 持仓的平仓倒计时：取该币执行中计划的最晚平仓时间 */
 function closeCountdown(symbol: string) {
   const deadline = symbols.value.find(s => s.symbol === symbol)?.close_deadline
@@ -142,7 +118,7 @@ function closeCountdown(symbol: string) {
 async function analyze() {
   requesting.value = true
   try {
-    await requestAnalysis(selected.value)
+    await requestAnalysisApi(selected.value)
     ElMessage.success(current.value?.running ? "已排队分析" : "已排队试运行分析：计划只记录，不下单")
     await refresh()
   } finally {
@@ -156,29 +132,6 @@ function openAnalysis(id: number) {
 }
 
 /** 拉取最新一页，与已加载的合并（保留已翻页加载的旧事件） */
-async function refreshEvents() {
-  const exchange = status.value?.exchange
-  const symbol = selected.value
-  const latest = await listEvents({ symbol: symbol || undefined, limit: EVENTS_PAGE })
-  // 请求期间切换了币种：丢弃旧币种的结果
-  if (symbol !== selected.value || exchange !== status.value?.exchange)
-    return
-  const newestId = events.value[0]?.id ?? 0
-  const fresh = latest.filter(e => e.id > newestId)
-  if (!events.value.length)
-    eventsExhausted.value = latest.length < EVENTS_PAGE
-  events.value = [...fresh, ...events.value]
-}
-
-async function loadMoreEvents() {
-  const exchange = status.value?.exchange
-  const symbol = selected.value
-  const older = await listEvents({ symbol: symbol || undefined, before: events.value.at(-1)?.id, limit: EVENTS_PAGE })
-  if (symbol !== selected.value || exchange !== status.value?.exchange)
-    return
-  eventsExhausted.value = older.length < EVENTS_PAGE
-  events.value = [...events.value, ...older]
-}
 
 watch([selected, () => status.value?.exchange], () => {
   historyVisible.value = false
@@ -187,27 +140,37 @@ watch([selected, () => status.value?.exchange], () => {
   latestAnalysis.value = null
   livePlan.value = null
   planOrders.value = []
-  refreshEvents()
-  refreshAnalysis()
 })
 
+async function assertActionExchange(exchange: TradingStatus["exchange"]) {
+  sessionScope.assertCurrent()
+  const currentStatus = await getStatusApi()
+  if (currentStatus.exchange !== exchange) {
+    ElMessage.warning("交易所已切换，请重新确认操作")
+    throw new CanceledError("交易所已切换")
+  }
+}
+
 async function toggleRunning(s: TradingSymbol) {
-  if (s.running) {
+  const exchange = status.value!.exchange
+  const { symbol, running } = s
+  if (running) {
     await ElMessageBox.confirm(
-      `停止后 ${s.symbol} 不再做新的分析，并撤销未成交的限价单。已有持仓保留，止损、止盈、到期平仓等程序规则继续执行。`,
-      `停止 ${s.symbol} 行情交易`,
+      `停止后 ${symbol} 不再做新的分析，并撤销未成交的限价单。已有持仓保留，止损、止盈、到期平仓等程序规则继续执行。`,
+      `停止 ${symbol} 行情交易`,
       { type: "warning", confirmButtonText: "停止" }
     )
   } else {
     await ElMessageBox.confirm(
-      `开始后，引擎会按触发条件和例行节奏自动分析 ${s.symbol}，并按它的交易资金在 ${exchangeName.value} 模拟盘下单。`,
-      `开始 ${s.symbol} 行情交易`,
+      `开始后，引擎会按触发条件和例行节奏自动分析 ${symbol}，并按它的交易资金在 ${exchangeName.value} 模拟盘下单。`,
+      `开始 ${symbol} 行情交易`,
       { type: "info", confirmButtonText: "开始" }
     )
   }
+  await assertActionExchange(exchange)
   toggling.value = true
   try {
-    await (s.running ? stopTrading(s.symbol) : startTrading(s.symbol))
+    await (running ? stopTradingApi(symbol) : startTradingApi(symbol))
     await refresh()
     await refreshEvents()
   } finally {
@@ -216,10 +179,12 @@ async function toggleRunning(s: TradingSymbol) {
 }
 
 async function editCapital(s: TradingSymbol) {
+  const exchange = status.value!.exchange
+  const symbol = s.symbol
   const others = allocated.value - Number(s.capital_usdt ?? 0)
   const { value } = await ElMessageBox.prompt(
-    `${s.symbol} 的仓位按它的交易资金计算：单笔风险 1%（置信度低时 0.5%），名义仓位不超过 3 倍交易资金。各币交易资金合计不能超过账户权益 ${money(account.value?.margin_balance)} USDT（其他币已分配 ${others.toFixed(2)}）；账户权益低于它时按权益计算。`,
-    `设置 ${s.symbol} 交易资金（USDT）`,
+    `${symbol} 的仓位按它的交易资金计算：单笔风险 1%（置信度低时 0.5%），名义仓位不超过 3 倍交易资金。各币交易资金合计不能超过账户权益 ${money(account.value?.margin_balance)} USDT（其他币已分配 ${others.toFixed(2)}）；账户权益低于它时按权益计算。`,
+    `设置 ${symbol} 交易资金（USDT）`,
     {
       inputValue: s.capital_usdt ? num(s.capital_usdt) : "",
       inputPattern: /^(?:[1-9]\d*|0)(?:\.\d{1,2})?$/,
@@ -227,59 +192,45 @@ async function editCapital(s: TradingSymbol) {
       confirmButtonText: "保存"
     }
   )
-  await patchSymbol(s.symbol, { capital_usdt: value })
+  await assertActionExchange(exchange)
+  await patchSymbolApi(symbol, { capital_usdt: value })
   ElMessage.success("已保存")
   await refresh()
   await refreshEvents()
 }
 
-async function changeProvider(providerId: number | null) {
-  status.value = await patchConfig({ provider_id: providerId })
-}
-
-async function changeEffort(effort: Effort | null) {
-  status.value = await patchConfig({ reasoning_effort: effort })
-}
-
-async function editDailyLimit() {
-  const { value } = await ElMessageBox.prompt(
-    "所有币种和交易所共用，每日零点重新计数。手动分析计入今日次数，但不受自动分析上限限制。降低至已用次数时暂停新的自动分析，进行中的分析和持仓管理继续。",
-    "设置每日分析上限",
-    {
-      inputValue: String(status.value!.today.limit),
-      inputValidator: value => /^\d+$/.test(value) && Number(value) >= 1 && Number(value) <= 2147483647,
-      inputErrorMessage: "请输入 1–2147483647 之间的整数",
-      confirmButtonText: "保存"
-    }
-  )
-  status.value = await patchConfig({ daily_analysis_limit: Number(value) })
-  ElMessage.success("每日分析上限已保存，即时生效")
-}
-
 async function closePosition(symbol: string) {
+  const exchange = status.value!.exchange
   await ElMessageBox.confirm(
     `撤销 ${symbol} 的全部挂单（含止损、止盈和手动挂的单），市价平掉持仓，并停止 ${symbol} 的行情交易（其他币不受影响）。`,
     "一键平仓",
     { type: "warning", confirmButtonText: "平仓" }
   )
-  await manualAction(symbol, "close")
+  await assertActionExchange(exchange)
+  await manualActionApi(symbol, "close")
   ElMessage.success("已提交，几秒内执行，结果见时间线")
   await refresh()
 }
 
 async function clearOrders() {
+  const exchange = status.value!.exchange
+  const symbol = selected.value
   await ElMessageBox.confirm(
-    `撤销 ${selected.value} 的全部挂单，包括止损、止盈和手动挂的单。有持仓时会一并市价平仓，程序不保留没有止损的仓位。行情交易不停止。`,
+    `撤销 ${symbol} 的全部挂单，包括止损、止盈和手动挂的单。有持仓时会一并市价平仓，程序不保留没有止损的仓位。行情交易不停止。`,
     "清除挂单",
     { type: "warning", confirmButtonText: "清除" }
   )
-  await manualAction(selected.value, "cancel")
+  await assertActionExchange(exchange)
+  await manualActionApi(symbol, "cancel")
   ElMessage.success("已提交，几秒内执行，结果见时间线")
 }
 
 async function remove(s: TradingSymbol) {
-  await ElMessageBox.confirm(`把 ${s.symbol} 移出交易列表？历史分析和时间线会保留。`, "删除确认", { type: "warning" })
-  await deleteSymbol(s.symbol)
+  const exchange = status.value!.exchange
+  const symbol = s.symbol
+  await ElMessageBox.confirm(`把 ${symbol} 移出交易列表？历史分析和时间线会保留。`, "删除确认", { type: "warning" })
+  await assertActionExchange(exchange)
+  await deleteSymbolApi(symbol)
   ElMessage.success("已移出")
   await refresh()
 }
@@ -289,18 +240,21 @@ async function onAdded(symbol: string) {
   selected.value = symbol
 }
 
-refresh()
-refreshEvents()
-listProviders().then(list => providers.value = list)
-const timer = setInterval(() => {
-  refresh()
-  refreshEvents()
-}, STATUS_REFRESH_MS)
-onBeforeUnmount(() => clearInterval(timer))
+onMounted(() => listProvidersApi().then(list => providers.value = list))
 </script>
 
 <template>
-  <div v-if="status" class="flex flex-col gap-4">
+  <div v-if="!status" v-loading="loading" class="min-h-40">
+    <el-result v-if="failed" icon="error" title="无法读取模拟盘状态">
+      <template #extra>
+        <el-button @click="refresh">
+          重试
+        </el-button>
+      </template>
+    </el-result>
+  </div>
+  <div v-else class="flex flex-col gap-4">
+    <el-alert v-if="failed" type="error" :closable="false" title="状态刷新失败，以下为上次读取的数据" />
     <!-- 顶部：引擎状态、启停、账户 -->
     <el-card shadow="never" body-class="flex flex-wrap items-center gap-4">
       <div class="flex flex-col gap-2">
@@ -361,9 +315,7 @@ onBeforeUnmount(() => clearInterval(timer))
         <div class="flex items-center justify-between text-xs text-slate-500">
           <span class="flex items-center gap-1">
             今日分析
-            <el-button link type="primary" size="small" @click="editDailyLimit">
-              调整上限
-            </el-button>
+
           </span>
           <span class="num text-sm text-slate-900 font-semibold">{{ status.today.analyses }} / {{ status.today.limit }}</span>
         </div>
@@ -374,28 +326,9 @@ onBeforeUnmount(() => clearInterval(timer))
       </div>
 
       <div class="flex-1" />
-
-      <div class="flex flex-col gap-2 text-xs text-slate-500">
-        <div class="flex items-center gap-2">
-          <span class="w-14">模型</span>
-          <el-select
-            :model-value="status.provider_id" size="small" class="w-44" clearable :value-on-clear="null" placeholder="跟随默认配置"
-            @update:model-value="changeProvider"
-          >
-            <el-option v-for="p in providers" :key="p.id" :value="p.id" :label="`${p.name}（${p.model}）`" />
-          </el-select>
-        </div>
-        <div class="flex items-center gap-2">
-          <span class="w-14">思考强度</span>
-          <el-select
-            :model-value="status.reasoning_effort" size="small" class="w-44" clearable :value-on-clear="null" placeholder="跟随配置"
-            @update:model-value="changeEffort"
-          >
-            <el-option v-for="e in EFFORTS" :key="e" :value="e" :label="e" />
-          </el-select>
-        </div>
-      </div>
     </el-card>
+
+    <TradingConfig :status="status" :providers="providers" @saved="status = $event" />
 
     <el-alert v-if="!status.configured" type="warning" :closable="false" show-icon>
       还没有填写 {{ exchangeName }} 模拟盘 key，请先到「环境变量」页填写。
@@ -502,7 +435,7 @@ onBeforeUnmount(() => clearInterval(timer))
       </el-table>
     </el-card>
 
-    <div class="grid grid-cols-[260px_minmax(0,1fr)_340px] items-start gap-4">
+    <div class="trading-workspace grid items-start gap-3">
       <!-- 左：交易币种 -->
       <el-card shadow="never" body-class="flex flex-col gap-2">
         <template #header>
@@ -630,6 +563,23 @@ onBeforeUnmount(() => clearInterval(timer))
 </template>
 
 <style scoped>
+.trading-workspace {
+  grid-template-columns: 220px minmax(0, 1fr) 320px;
+}
+@media (max-width: 1280px) {
+  .trading-workspace {
+    grid-template-columns: 200px minmax(0, 1fr);
+  }
+  .trading-workspace > :last-child {
+    grid-column: 1 / -1;
+  }
+}
+@media (max-width: 700px) {
+  .trading-workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .metric {
   min-width: 120px;
   padding: 8px 12px;

@@ -1,73 +1,19 @@
-<script lang="ts" setup>
-import type { NewsBrief, NewsEvent } from "@/apis/news"
+<script setup lang="ts">
+import { formatTime } from "@@/utils/text"
 import { Refresh, Search } from "@element-plus/icons-vue"
-import { listNews } from "@/apis/news"
-import { useEventSource } from "@/composables/useEventSource"
-import { useSourceNames } from "@/composables/useSourceNames"
-import NewsDetail from "@/pages/news/components/NewsDetail.vue"
-import { usePersisted } from "@/utils/storage"
-import { formatTime } from "@/utils/text"
+import NewsDetail from "./components/NewsDetail.vue"
+import { useNewsFeed } from "./composables/useNewsFeed"
 
-const sourceNames = useSourceNames()
-const filters = reactive({
-  source: [] as string[],
-  q: "",
-  range: null as [Date, Date] | null
+const { sourceNames, filters, items, total, page, pageSize, loading, failed, pendingCount, openedId, listBox, connected, load, search } = useNewsFeed()
+const mobile = ref(false)
+let media: MediaQueryList
+const updateMobile = () => mobile.value = media.matches
+onMounted(() => {
+  media = window.matchMedia("(max-width: 760px)")
+  updateMobile()
+  media.addEventListener("change", updateMobile)
 })
-const items = ref<NewsBrief[]>([])
-const total = ref(0)
-const page = ref(1)
-const pageSize = usePersisted("news-page-size", 30)
-const loading = ref(false)
-const pendingCount = ref(0)
-const openedId = ref<number | null>(null)
-const listBox = ref<HTMLElement>()
-
-// 多次快速翻页时只采用最后一次请求的结果
-let requestSeq = 0
-
-async function load() {
-  const seq = ++requestSeq
-  loading.value = true
-  try {
-    const result = await listNews({
-      source: filters.source.length ? filters.source : undefined,
-      q: filters.q || undefined,
-      start: filters.range?.[0].toISOString(),
-      end: filters.range?.[1].toISOString(),
-      page: page.value,
-      limit: pageSize.value
-    })
-    if (seq !== requestSeq)
-      return
-    items.value = result.items
-    total.value = result.total
-    if (page.value === 1)
-      pendingCount.value = 0
-    listBox.value?.scrollTo({ top: 0 })
-  } finally {
-    if (seq === requestSeq)
-      loading.value = false
-  }
-}
-
-function search() {
-  page.value = 1
-  load()
-}
-
-function changePageSize() {
-  page.value = 1
-  load()
-}
-
-// 只提示符合当前来源筛选的新条目；关键字和时间范围由刷新后的查询决定
-const { connected } = useEventSource<NewsEvent>("/api/news/stream", "news", (event) => {
-  if (event.kind === "new" && (filters.source.length === 0 || filters.source.includes(event.source_code)))
-    pendingCount.value++
-})
-
-load()
+onBeforeUnmount(() => media?.removeEventListener("change", updateMobile))
 </script>
 
 <template>
@@ -89,11 +35,9 @@ load()
 
     <el-card shadow="never" body-class="flex flex-wrap items-center gap-3">
       <span class="text-xs text-slate-500">来源</span>
-      <el-checkbox-group v-model="filters.source" @change="search">
-        <el-checkbox v-for="(name, code) in sourceNames" :key="code" :value="code" border class="mr-2!">
-          {{ name }}
-        </el-checkbox>
-      </el-checkbox-group>
+      <el-select v-model="filters.source" multiple collapse-tags collapse-tags-tooltip filterable clearable class="w-64" placeholder="全部来源" @change="search">
+        <el-option v-for="(name, code) in sourceNames" :key="code" :value="code" :label="name" />
+      </el-select>
       <el-input v-model="filters.q" :prefix-icon="Search" placeholder="关键字" clearable class="w-60" @keyup.enter="search" @clear="search" />
       <el-date-picker
         v-model="filters.range" type="datetimerange" start-placeholder="开始" end-placeholder="结束"
@@ -104,18 +48,18 @@ load()
       </el-button>
     </el-card>
 
-    <div class="min-h-0 flex flex-1 gap-4">
-      <el-card shadow="never" class="w-2/5 flex shrink-0 flex-col" body-class="min-h-0 flex-1 flex flex-col p-0">
+    <div class="news-workspace min-h-0 flex flex-1 gap-3">
+      <el-card shadow="never" class="news-list min-w-0 flex flex-col" body-class="min-h-0 flex-1 flex flex-col p-0">
         <template #header>
           <div class="flex items-center justify-between">
             消息流
             <span class="num text-xs text-slate-500 font-normal">共 {{ total.toLocaleString() }} 条</span>
           </div>
         </template>
-        <div ref="listBox" v-loading="loading" class="min-h-0 flex flex-1 flex-col gap-2 overflow-auto p-3">
+        <div ref="listBox" v-loading="loading" class="min-h-0 flex flex-1 flex-col overflow-auto">
           <div
             v-for="item in items" :key="item.id"
-            class="cursor-pointer border rounded-lg border-solid p-3 transition-colors"
+            class="cursor-pointer border-b border-solid px-3 py-2 transition-colors"
             :class="item.id === openedId ? 'border-[var(--el-color-primary)] bg-sky-50/50' : 'border-slate-200 hover:border-slate-300 hover:bg-slate-50'"
             @click="openedId = item.id"
           >
@@ -135,22 +79,40 @@ load()
             <div v-if="item.title" class="mb-1 text-slate-900 font-semibold">
               {{ item.title }}
             </div>
-            <div class="line-clamp-3 text-sm text-slate-600 leading-relaxed">
+            <div class="line-clamp-2 text-sm text-slate-600 leading-relaxed">
               {{ item.summary || item.excerpt }}
             </div>
           </div>
-          <el-empty v-if="!loading && items.length === 0" description="没有符合条件的新闻" />
+          <el-alert v-if="failed" type="error" :closable="false" title="新闻读取失败；已有内容保留">
+            <el-button link @click="load">
+              重试
+            </el-button>
+          </el-alert>
+          <el-empty v-if="!loading && !failed && items.length === 0" description="没有符合条件的新闻" />
         </div>
         <div class="border-t border-t-slate-200 border-t-solid px-3 py-2">
           <el-pagination
             v-model:current-page="page" v-model:page-size="pageSize" :total="total" :page-sizes="[20, 30, 50, 100]" :pager-count="5"
             layout="sizes, prev, pager, next, jumper" size="small" background
-            @current-change="load" @size-change="changePageSize"
           />
         </div>
       </el-card>
 
-      <NewsDetail :news-id="openedId" class="min-w-0 flex-1" />
+      <NewsDetail v-if="!mobile" :news-id="openedId" class="min-w-0 flex-1" />
     </div>
+    <el-drawer :model-value="mobile && openedId !== null" title="新闻详情" size="100%" @close="openedId = null">
+      <NewsDetail v-if="mobile" :news-id="openedId" class="h-full" />
+    </el-drawer>
   </div>
 </template>
+
+<style scoped>
+.news-list {
+  flex: 0 0 40%;
+}
+@media (max-width: 760px) {
+  .news-list {
+    flex: 1;
+  }
+}
+</style>

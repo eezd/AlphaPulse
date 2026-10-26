@@ -1,8 +1,8 @@
 <script lang="ts" setup>
-import type { ChatContext } from "@/apis/chat"
-import { getChatContext, listChatContextVersions, saveChatContext } from "@/apis/chat"
-import { renderMarkdown } from "@/utils/markdown"
-import { formatTime } from "@/utils/text"
+import type { ChatContext } from "@@/apis/chat/type"
+import { getChatContextApi, listChatContextVersionsApi, saveChatContextApi } from "@@/apis/chat"
+import { renderMarkdown } from "@@/utils/markdown"
+import { formatTime } from "@@/utils/text"
 
 const SOURCE_LABELS = { user: "我", chat: "Chat", reset: "Reset 清空" } as const
 
@@ -19,7 +19,7 @@ async function load() {
     return
   const seq = ++loadSeq
   const previous = content.value
-  const [context, history] = await Promise.all([getChatContext(), listChatContextVersions()])
+  const [context, history] = await Promise.all([getChatContextApi(), listChatContextVersionsApi()])
   if (seq !== loadSeq)
     return
   current.value = context
@@ -33,11 +33,11 @@ async function save() {
   // 失效保存前的读取，保存期间也不启动新的读取，避免旧版本覆盖编辑区。
   ++loadSeq
   try {
-    const saved = await saveChatContext(content.value)
+    const saved = await saveChatContextApi(content.value)
     // 保存回执就是已保存版本，编辑区保留后续输入。
     current.value = saved
     ElMessage.success("已保存")
-    versions.value = await listChatContextVersions()
+    versions.value = await listChatContextVersionsApi()
   } finally {
     saving.value = false
   }
@@ -53,7 +53,7 @@ async function restore(version: ChatContext) {
 /** Chat 更新了 CONTEXT.md：编辑区没有未保存修改时直接刷新 */
 async function refreshFromChat() {
   if (dirty.value) {
-    versions.value = await listChatContextVersions()
+    versions.value = await listChatContextVersionsApi()
     ElMessage.warning("Chat 更新了 CONTEXT.md，你有未保存的修改，未自动刷新")
     return
   }
@@ -61,7 +61,7 @@ async function refreshFromChat() {
 }
 
 defineExpose({ refreshFromChat, load, dirty })
-load()
+onMounted(load)
 </script>
 
 <template>

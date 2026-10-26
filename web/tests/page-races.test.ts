@@ -1,12 +1,6 @@
 import assert from "node:assert/strict"
-import { readFileSync } from "node:fs"
-import { createRequire, Module } from "node:module"
-import { runInNewContext } from "node:vm"
-import ts from "typescript"
 import * as vue from "vue"
-import { compileScript, parse } from "vue/compiler-sfc"
-
-const require = createRequire(import.meta.url)
+import { moduleLoader } from "./module-loader.ts"
 
 interface Version {
   id: number
@@ -15,12 +9,9 @@ interface Version {
 }
 
 function setupComponent(component: string, modules: Record<string, unknown>, confirm: () => Promise<unknown> = async () => {}) {
-  const filename = new URL(`../src/pages/${component}`, import.meta.url)
-  const { descriptor } = parse(readFileSync(filename, "utf8"))
-  const script = compileScript(descriptor, { id: component }).content
-  const code = ts.transpileModule(script, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
   const globals = {
     ref: vue.ref,
+    shallowRef: vue.shallowRef,
     reactive: vue.reactive,
     computed: vue.computed,
     watch: vue.watch,
@@ -31,18 +22,16 @@ function setupComponent(component: string, modules: Record<string, unknown>, con
     ElMessage: { success() {}, warning() {} },
     ElMessageBox: { confirm }
   }
-  const mod = new Module(filename.pathname)
-  const load = (path: string) => path in modules ? modules[path] : require(path)
-  runInNewContext(code, { require: load, module: mod, exports: mod.exports, ...globals }, { filename: component })
-  return mod.exports.default.setup({}, { expose() {} })
+  const load = moduleLoader({ "@/http/axios": { logRequestError() {} }, "@@/composables/useSessionScope": { useSessionScope: () => ({ isCurrent: () => true, assertCurrent() {} }) }, ...modules }, globals)
+  return load(`@/pages/${component}`).default.setup({}, { expose() {} })
 }
 
 function skills(api: Record<string, unknown>, confirm?: () => Promise<unknown>) {
   return setupComponent("skills/index.vue", {
-    "@/apis/skills": api,
-    "@/components/SkillTree.vue": {},
-    "@/components/SkillVersionDrawer.vue": {},
-    "@/utils/markdown": { renderMarkdown: (text: string) => text }
+    "@@/apis/skills": api,
+    "@@/components/SkillTree/index.vue": {},
+    "@@/components/SkillVersionDrawer/index.vue": {},
+    "@@/utils/markdown": { renderMarkdown: (text: string) => text }
   }, confirm)
 }
 
@@ -52,9 +41,9 @@ async function checkSkillSwitch() {
   const drafts: { id: number, content: string }[] = []
   const nodes = [{ id: 1, kind: "skill" }, { id: 2, kind: "skill" }]
   const page = skills({
-    listSkillTree: async () => nodes,
-    listSkillVersions: (id: number) => id === 1 ? a.promise : b.promise,
-    saveSkillDraft: async (id: number, content: string) => {
+    listSkillTreeApi: async () => nodes,
+    listSkillVersionsApi: (id: number) => id === 1 ? a.promise : b.promise,
+    saveSkillDraftApi: async (id: number, content: string) => {
       drafts.push({ id, content })
       return { id: 20, version_no: 2, content }
     }
@@ -79,8 +68,8 @@ async function checkSkillReload() {
   const old = Promise.withResolvers<Version[]>()
   let calls = 0
   const page = skills({
-    listSkillTree: async () => [{ id: 1, kind: "skill" }],
-    listSkillVersions: () => ++calls === 1 ? old.promise : Promise.resolve([{ id: 2, content: "最新" }])
+    listSkillTreeApi: async () => [{ id: 1, kind: "skill" }],
+    listSkillVersionsApi: () => ++calls === 1 ? old.promise : Promise.resolve([{ id: 2, content: "最新" }])
   })
   await page.loadTree()
   page.selectedId.value = 1
@@ -96,10 +85,10 @@ async function checkPublishSwitch() {
   const published: [number, number][] = []
   const nodes = [{ id: 1, kind: "skill" }, { id: 2, kind: "skill" }]
   const page = skills({
-    listSkillTree: async () => nodes,
-    listSkillVersions: async (id: number) => [{ id, content: `内容 ${id}` }],
-    saveSkillDraft: () => saved.promise,
-    publishSkillVersion: async (id: number, version: number) => published.push([id, version])
+    listSkillTreeApi: async () => nodes,
+    listSkillVersionsApi: async (id: number) => [{ id, content: `内容 ${id}` }],
+    saveSkillDraftApi: () => saved.promise,
+    publishSkillVersionApi: async (id: number, version: number) => published.push([id, version])
   })
   await page.loadTree()
   await page.select(nodes[0])
@@ -115,15 +104,17 @@ async function checkPublishSwitch() {
 async function checkTickerSwitch() {
   const btc = Promise.withResolvers<Record<string, string>>()
   const eth = Promise.withResolvers<Record<string, string>>()
-  const page = setupComponent("market/index.vue", {
-    "@/apis/market": { getTicker: (_: string, symbol: string) => symbol === "BTCUSDT" ? btc.promise : eth.promise },
-    "@/utils/storage": { usePersisted: (_: string, value: unknown) => vue.ref(value) },
+  const load = moduleLoader({
+    "@/http/axios": { logRequestError() {} },
+    "@@/apis/market": { getTickerApi: (_: string, symbol: string) => symbol === "BTCUSDT" ? btc.promise : eth.promise },
+    "@@/utils/storage": { usePersisted: (_: string, value: unknown) => vue.ref(value) },
     "./chart": { DEFAULT_FAVORITE_INTERVALS: [], INTERVAL_LABELS: {}, MAIN_INDICATORS: [], SUB_INDICATORS: [] },
     "./useMarketSocket": { useMarketSocket: () => ({ connected: vue.ref(true), subscribe() {} }) },
     "./components/AddSymbolDialog.vue": {},
     "./components/SymbolManager.vue": {},
     "klinecharts": {}
-  })
+  }, { ...vue, onMounted() {}, onBeforeUnmount() {}, setInterval() {} })
+  const page = load("@/pages/market/composables/useMarketChart").useMarketChart()
   const first = page.loadTicker()
   page.selection.value = { market: "um", symbol: "ETHUSDT" }
   await vue.nextTick()
@@ -141,9 +132,9 @@ async function checkPublishConfirmationSwitch() {
   const published: [number, number][] = []
   const nodes = [{ id: 1, kind: "skill" }, { id: 2, kind: "skill" }]
   const page = skills({
-    listSkillTree: async () => nodes,
-    listSkillVersions: async (id: number) => [{ id, content: `内容 ${id}`, version_no: 1 }],
-    publishSkillVersion: async (id: number, version: number) => published.push([id, version])
+    listSkillTreeApi: async () => nodes,
+    listSkillVersionsApi: async (id: number) => [{ id, content: `内容 ${id}`, version_no: 1 }],
+    publishSkillVersionApi: async (id: number, version: number) => published.push([id, version])
   }, () => confirmation.promise)
   await page.loadTree()
   await page.select(nodes[0])
@@ -157,21 +148,21 @@ async function checkPublishConfirmationSwitch() {
 
 function contextEditor(api: Record<string, unknown>) {
   return setupComponent("chat/components/ContextTab.vue", {
-    "@/apis/chat": api,
-    "@/utils/markdown": { renderMarkdown: (text: string) => text },
-    "@/utils/text": { formatTime: (text: string) => text }
+    "@@/apis/chat": api,
+    "@@/utils/markdown": { renderMarkdown: (text: string) => text },
+    "@@/utils/text": { formatTime: (text: string) => text }
   })
 }
 
 async function checkContextRefresh() {
   const updated = Promise.withResolvers<{ id: number, content: string }>()
   const api = {
-    getChatContext: async () => ({ id: 1, content: "原内容" }),
-    listChatContextVersions: async () => []
+    getChatContextApi: async () => ({ id: 1, content: "原内容" }),
+    listChatContextVersionsApi: async () => []
   }
   const page = contextEditor(api)
   await new Promise(resolve => setImmediate(resolve))
-  api.getChatContext = () => updated.promise
+  api.getChatContextApi = () => updated.promise
   const refresh = page.refreshFromChat()
   page.content.value = "刷新期间的新输入"
   updated.resolve({ id: 2, content: "Chat 更新" })
@@ -185,9 +176,9 @@ async function checkContextSave() {
   const saved = Promise.withResolvers<{ id: number, content: string }>()
   let submitted = ""
   const page = contextEditor({
-    getChatContext: async () => ({ id: 1, content: "原内容" }),
-    listChatContextVersions: async () => [],
-    saveChatContext: (content: string) => {
+    getChatContextApi: async () => ({ id: 1, content: "原内容" }),
+    listChatContextVersionsApi: async () => [],
+    saveChatContextApi: (content: string) => {
       submitted = content
       return saved.promise
     }
@@ -207,13 +198,13 @@ async function checkContextSave() {
 async function checkContextReloadAfterSave() {
   const stale = Promise.withResolvers<{ id: number, content: string }>()
   const api = {
-    getChatContext: async () => ({ id: 1, content: "原内容" }),
-    listChatContextVersions: async () => [],
-    saveChatContext: async (content: string) => ({ id: 2, content })
+    getChatContextApi: async () => ({ id: 1, content: "原内容" }),
+    listChatContextVersionsApi: async () => [],
+    saveChatContextApi: async (content: string) => ({ id: 2, content })
   }
   const page = contextEditor(api)
   await new Promise(resolve => setImmediate(resolve))
-  api.getChatContext = () => stale.promise
+  api.getChatContextApi = () => stale.promise
   const loading = page.load()
   page.content.value = "已保存修改"
   await page.save()
@@ -227,9 +218,9 @@ async function checkContextReloadAfterSave() {
 async function checkContextRefreshDuringSave() {
   const saved = Promise.withResolvers<{ id: number, content: string }>()
   const page = contextEditor({
-    getChatContext: async () => ({ id: 1, content: "原内容" }),
-    listChatContextVersions: async () => [],
-    saveChatContext: () => saved.promise
+    getChatContextApi: async () => ({ id: 1, content: "原内容" }),
+    listChatContextVersionsApi: async () => [],
+    saveChatContextApi: () => saved.promise
   })
   await new Promise(resolve => setImmediate(resolve))
   page.content.value = "提交的修改"
@@ -245,15 +236,15 @@ async function checkContextFailedSave() {
   const saved = Promise.withResolvers<{ id: number, content: string }>()
   const stale = Promise.withResolvers<{ id: number, content: string }>()
   const api = {
-    getChatContext: async () => ({ id: 1, content: "原内容" }),
-    listChatContextVersions: async () => [],
-    saveChatContext: () => saved.promise
+    getChatContextApi: async () => ({ id: 1, content: "原内容" }),
+    listChatContextVersionsApi: async () => [],
+    saveChatContextApi: () => saved.promise
   }
   const page = contextEditor(api)
   await new Promise(resolve => setImmediate(resolve))
   page.content.value = "保存失败后应保留的草稿"
   const saving = page.save()
-  api.getChatContext = () => stale.promise
+  api.getChatContextApi = () => stale.promise
   const loading = page.load()
   saved.reject(new Error("保存失败"))
   await assert.rejects(saving, /保存失败/)

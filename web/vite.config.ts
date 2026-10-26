@@ -9,6 +9,7 @@ import { defineConfig } from "vite"
 export default defineConfig({
   resolve: {
     alias: {
+      "@@": resolve(import.meta.dirname, "src/common"),
       "@": resolve(import.meta.dirname, "src")
     }
   },
@@ -32,11 +33,11 @@ export default defineConfig({
     UnoCSS(),
     AutoImport({
       imports: ["vue", "vue-router", "pinia"],
-      dts: "types/auto-imports.d.ts",
+      dts: "types/auto/auto-imports.d.ts",
       resolvers: [ElementPlusResolver()]
     }),
     Components({
-      dts: "types/components.d.ts",
+      dts: "types/auto/components.d.ts",
       resolvers: [ElementPlusResolver()]
     })
   ]

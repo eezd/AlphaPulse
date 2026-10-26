@@ -1,6 +1,6 @@
 <script lang="ts" setup>
-import type { SymbolOption } from "@/apis/trading"
-import { addSymbol, listSymbolOptions } from "@/apis/trading"
+import type { SymbolOption } from "@@/apis/trading/type"
+import { addSymbolApi, listSymbolOptionsApi } from "@@/apis/trading"
 
 const emit = defineEmits<{ added: [symbol: string] }>()
 const visible = defineModel<boolean>({ required: true })
@@ -18,7 +18,7 @@ watch(visible, async (open) => {
   symbol.value = ""
   loading.value = true
   try {
-    symbolOptions.value = await listSymbolOptions()
+    symbolOptions.value = await listSymbolOptionsApi()
   } finally {
     loading.value = false
   }
@@ -27,7 +27,7 @@ watch(visible, async (open) => {
 async function submit() {
   submitting.value = true
   try {
-    await addSymbol(symbol.value)
+    await addSymbolApi(symbol.value)
     ElMessage.success(`已加入 ${symbol.value}`)
     emit("added", symbol.value)
     visible.value = false
