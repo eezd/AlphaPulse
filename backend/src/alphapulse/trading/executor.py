@@ -574,6 +574,11 @@ class Executor:
                      for j in range(len(TAKE_PROFIT_STEPS[sizing["direction"]]))]
         stop = Decimal(sizing["entry"]["stop"])
         if tp_filled[0] > 0 and position is not None:
+            # 撤销剩余入场不依赖手续费；先撤，避免保本计算失败后仍可能继续加仓。
+            for row in active:
+                if row.purpose == "entry":
+                    await self.cancel(client, row)
+            active = [r for r in active if r.purpose != "entry"]
             fee_per_unit = await self.entry_fee_per_unit(session, client, plan.symbol, entry_rows)
             break_even = remaining_break_even(sizing["direction"], average, fee_per_unit,
                                               ESTIMATED_CLOSE_FEE_RATES[client.exchange], rules.tick_size)

@@ -172,6 +172,7 @@ def test_missing_entry_fees_leave_existing_protection_untouched(trading, monkeyp
         engine, client = trading.Executor(), Client()
         p, entry, old = plan(trading), order(trading, "entry"), order(trading, "stop")
         entry.exchange_id, entry.filled_qty, entry.avg_price = "entry-id", Decimal(1), Decimal(100)
+        entry.status = "filled"
         entry.created_at = datetime.now(UTC)
         tp = trading.TradingOrder(purpose="tp", leg=0, filled_qty=Decimal("0.6"), status="filled")
         monkeypatch.setattr(client, "trades", AsyncMock(return_value=[]), raising=False)
@@ -182,6 +183,44 @@ def test_missing_entry_fees_leave_existing_protection_untouched(trading, monkeyp
                                          trading.Position("long", Decimal("0.4"), Decimal(100), Decimal(101)), True, RULES, False)
             assert client.created == client.canceled == []
             assert client.trades.await_count == 1
+        finally:
+            await engine.market.http.aclose()
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("exchange", ["binance", "bybit"])
+@pytest.mark.parametrize("fees_complete", [False, True])
+def test_tp1_cancels_remaining_entry_before_fee_lookup(trading, monkeypatch, exchange, fees_complete):
+    async def check():
+        engine, client = trading.Executor(), Client()
+        client.exchange = engine.exchange = exchange
+        p, entry, old = plan(trading), order(trading, "entry"), order(trading, "stop")
+        p.plan_status = "open"
+        entry.exchange_id, entry.filled_qty, entry.avg_price = "entry-id", Decimal("0.5"), Decimal(100)
+        entry.status, entry.created_at = "partially_filled", datetime.now(UTC)
+        old.trigger_price = Decimal(90)
+        tp = trading.TradingOrder(purpose="tp", leg=0, filled_qty=Decimal("0.3"), status="filled")
+        fill = SimpleNamespace(order_id="entry-id", qty=entry.filled_qty, commission_asset="USDT", commission=Decimal("0.01"))
+        session = Session(groups=[[fill]] if fees_complete else [[], []])
+        position = trading.Position("long", Decimal("0.2"), Decimal(100), Decimal(101))
+
+        async def trades(*args):
+            # 补取仍缺手续费时，撤入场单也必须先完成。
+            assert client.canceled == ["ap2"]
+            return []
+
+        monkeypatch.setattr(client, "trades", AsyncMock(side_effect=trades), raising=False)
+        monkeypatch.setattr(trading, "save_fills", AsyncMock())
+        try:
+            if fees_complete:
+                await engine.sync_orders(session, client, p, [entry, old, tp], position, True, RULES, False)
+            else:
+                with pytest.raises(ExchangeError, match="手续费尚未完整同步"):
+                    await engine.sync_orders(session, client, p, [entry, old, tp], position, True, RULES, False)
+                assert client.created == []
+                assert client.canceled == ["ap2"]
+            assert client.canceled.count("ap2") == 1
+            assert all(spec.purpose != "entry" for spec in client.created)
         finally:
             await engine.market.http.aclose()
     asyncio.run(check())
