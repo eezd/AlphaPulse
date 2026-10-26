@@ -1,0 +1,35 @@
+<rss version="2.0">
+  <channel>
+    <title>ONS Release Calendar RSS Feed.</title>
+    <link>https://www.ons.gov.uk/releasecalendar</link>
+    <description>Latest ONS releases</description>
+    <item>
+      <title>Construction statistics, Great Britain: 2025</title>
+      <link>https://www.ons.gov.uk/releases/constructionstatisticsgreatbritain2025</link>
+      <description>Statistics on the construction industry, including value of output, new orders by sector, number of firms and total employment, insolvencies and construction Output Price Indices.</description>
+      <guid>https://www.ons.gov.uk/releases/constructionstatisticsgreatbritain2025</guid>
+      <pubDate>Fri, 23 Oct 2026 08:30:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>Labour demand volumes by Standard Occupation Classification (SOC 2020), UK: January 2017 to September 2026</title>
+      <link>https://www.ons.gov.uk/releases/labourdemandvolumesbystandardoccupationclassificationsoc2020ukjanuary2017toseptember2026</link>
+      <description>These tables contain the number of online job adverts split by different geographies and occupation (SOC 2020).</description>
+      <guid>https://www.ons.gov.uk/releases/labourdemandvolumesbystandardoccupationclassificationsoc2020ukjanuary2017toseptember2026</guid>
+      <pubDate>Fri, 23 Oct 2026 08:30:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>UK trade, quarterly goods and services: April to June 2026</title>
+      <link>https://www.ons.gov.uk/releases/uktradequarterlygoodsandservicesapriltojune2026</link>
+      <description>Quarterly estimates of total trade, trade in goods, and trade in services by country.</description>
+      <guid>https://www.ons.gov.uk/releases/uktradequarterlygoodsandservicesapriltojune2026</guid>
+      <pubDate>Fri, 23 Oct 2026 08:30:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>Estimates of the very old, including centenarians, UK: 2002 to 2025</title>
+      <link>https://www.ons.gov.uk/releases/estimatesoftheveryoldincludingcentenariansuk2002to2025</link>
+      <description>Annual mid-year population estimates of people aged 90 years and over by sex and single year of age to 105 years and over, and comparisons between UK countries.</description>
+      <guid>https://www.ons.gov.uk/releases/estimatesoftheveryoldincludingcentenariansuk2002to2025</guid>
+      <pubDate>Fri, 23 Oct 2026 08:30:00 +0000</pubDate>
+    </item>
+    </channel>
+</rss>

@@ -1,0 +1,43 @@
+<rss version="2.0">
+    <channel>
+        <title>Publications conjoncturelles</title>
+        <link>https://www.insee.fr</link>
+        <description>Les dernières mises à jour, les parutions d’indicateurs conjoncturels et de publications</description>
+        <language>fr</language>
+        <copyright>© Copyright Insee</copyright>
+        <webMaster>webmaster@insee.fr</webMaster>
+        <pubDate>Fri, 23 Oct 2026 10:00:00 GMT</pubDate>
+        <image>
+            <url>https://www.insee.fr/static/img/logoInseeFr.svg</url>
+            <title>Institut national de la statistique et des études économiques</title>
+            <link>https://www.insee.fr/fr/statistiques?debut=0&amp;categorie=10</link>
+            <width>50</width>
+            <height>50</height>
+            <description>Institut national de la statistique et des études économiques</description>
+        </image>
+        <item>
+            <title>En octobre 2026, les perspectives de mises en chantier continuent de baisser fortement dans la promotion immobilière</title>
+            <link>https://www.insee.fr/fr/statistiques/9096575</link>
+            <description>En octobre 2026, l’opinion des promoteurs concernant les perspectives de mises en chantier de logements continue de se dégrader nettement. Cette nouvelle baisse concerne aussi bien le solde relatif aux logements destinés à la vente que celui relatif aux logements destinés à l’habitat social. Les promoteurs se montrent à nouveau plus pessimistes qu’au trimestre précédent concernant les perspectives d’évolution des moyens de financement de leur clientèle et l’évolution passée de l’apport personnel des candidats à l’acquisition d’un logement.</description>
+            <pubDate>Fri, 23 Oct 2026 10:00:00 GMT</pubDate>
+        </item>
+        <item>
+            <title>En octobre 2026, la conjoncture dans les travaux publics se détériore encore un peu plus</title>
+            <link>https://www.insee.fr/fr/statistiques/9097247</link>
+            <description>En octobre 2026, l’opinion des entrepreneurs de travaux publics au sujet de leur activité, passée comme prévue, se détériore de nouveau. L’opinion des entrepreneurs sur leurs carnets de commandes continue également de se dégrader, atteignant un niveau inobservé depuis avril 2016.</description>
+            <pubDate>Fri, 23 Oct 2026 10:00:00 GMT</pubDate>
+        </item>
+        <item>
+            <title>En octobre 2026, le climat des affaires dans le bâtiment diminue</title>
+            <link>https://www.insee.fr/fr/statistiques/9094600</link>
+            <description>Selon les chefs d’entreprise interrogés en octobre 2026, le climat des affaires dans le bâtiment diminue. À 95, l’indicateur synthétique baisse d’un point (après arrondi) et s’écarte de sa moyenne de long terme (100). L’opinion des entrepreneurs du bâtiment sur leur activité passée se dégrade nettement, tandis que celle sur leurs perspectives d’activité s’améliore à nouveau. Le solde lié à l’incertitude économique ressentie par les entrepreneurs augmente très fortement, et atteint son plus haut niveau depuis le début de cette série en 2021, tandis que celui lié aux prix prévus est stable.</description>
+            <pubDate>Thu, 22 Oct 2026 06:45:00 GMT</pubDate>
+        </item>
+        <item>
+            <title>En octobre 2026, le climat des affaires dans le commerce de détail et d’automobiles s’assombrit de nouveau</title>
+            <link>https://www.insee.fr/fr/statistiques/9094608</link>
+            <description>En octobre 2026, le climat des affaires s’assombrit de nouveau dans l’ensemble constitué du commerce de détail et du commerce et de la réparation d’automobiles. À 93, l’indicateur synthétique perd trois points et s’éloigne davantage de sa moyenne de longue période (100). Ce recul s’explique principalement par la forte baisse du solde d’opinion relatif aux perspectives générales d’activité.</description>
+            <pubDate>Thu, 22 Oct 2026 06:45:00 GMT</pubDate>
+        </item>
+        </channel>
+</rss>

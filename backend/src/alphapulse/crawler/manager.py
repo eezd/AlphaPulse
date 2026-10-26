@@ -56,7 +56,7 @@ class Manager:
 
     async def run(self) -> None:
         async with SessionLocal() as session:
-            codes = (await session.scalars(select(Source.code).order_by(Source.code))).all()
+            codes = (await session.scalars(select(Source.code).where(Source.collector == "news").order_by(Source.code))).all()
         self.workers = {code: Worker(code) for code in codes}
 
         loop = asyncio.get_running_loop()
@@ -112,7 +112,7 @@ class Manager:
             async with SessionLocal() as session:
                 await session.execute(
                     update(CrawlRun)
-                    .where(CrawlRun.source_code == w.code, CrawlRun.status == "running")
+                    .where(CrawlRun.source_code == w.code, CrawlRun.status == "running", CrawlRun.trigger != "backfill")
                     .values(status="interrupted", finished_at=datetime.now(UTC), error="子进程退出时本轮未完成")
                 )
                 await session.commit()
@@ -140,7 +140,7 @@ class Manager:
 
     async def schedule_once(self, unknown: set[str]) -> None:
         async with SessionLocal() as session:
-            sources = (await session.scalars(select(Source))).all()
+            sources = (await session.scalars(select(Source).where(Source.collector == "news"))).all()
         now = datetime.now(UTC)
         for s in sources:
             w = self.workers.get(s.code)

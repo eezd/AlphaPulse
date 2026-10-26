@@ -1,0 +1,59 @@
+<ns0:feed xmlns:ns0="http://www.w3.org/2005/Atom">
+  <ns0:link href="https://ec.europa.eu/eurostat/news/euro-indicators?p_p_id=estatsearchportlet_WAR_estatsearchportlet_INSTANCE_OaTpFrwlabNK&amp;p_p_lifecycle=2&amp;p_p_resource_id=atom&amp;_estatsearchportlet_WAR_estatsearchportlet_INSTANCE_OaTpFrwlabNK_pageSize=100&amp;_estatsearchportlet_WAR_estatsearchportlet_INSTANCE_OaTpFrwlabNK_collection=CAT_PREREL" rel="self" type="application/atom+xml" />
+  <ns0:title>Eurostat - Custom RSS Feed</ns0:title>
+  <ns0:link rel="alternate" href="https://ec.europa.eu/eurostat" />
+  <ns0:link rel="next" href="https://ec.europa.eu/eurostat/news/euro-indicators?p_p_id=estatsearchportlet_WAR_estatsearchportlet_INSTANCE_OaTpFrwlabNK&amp;p_p_lifecycle=2&amp;p_p_resource_id=atom&amp;_estatsearchportlet_WAR_estatsearchportlet_INSTANCE_OaTpFrwlabNK_pageSize=100&amp;_estatsearchportlet_WAR_estatsearchportlet_INSTANCE_OaTpFrwlabNK_collection=CAT_PREREL&amp;pageNumber=2" />
+  <ns0:link rel="last" href="https://ec.europa.eu/eurostat/news/euro-indicators?p_p_id=estatsearchportlet_WAR_estatsearchportlet_INSTANCE_OaTpFrwlabNK&amp;p_p_lifecycle=2&amp;p_p_resource_id=atom&amp;_estatsearchportlet_WAR_estatsearchportlet_INSTANCE_OaTpFrwlabNK_pageSize=100&amp;_estatsearchportlet_WAR_estatsearchportlet_INSTANCE_OaTpFrwlabNK_collection=CAT_PREREL&amp;pageNumber=45" />
+  <ns0:link rel="related" href="https://ec.europa.eu/eurostat/web/rss/about-rss" />
+  <ns0:subtitle>This feed has been created based on your search query. For more information, please consult the related help page.</ns0:subtitle>
+  <ns0:id>https://ec.europa.eu/eurostat/news/euro-indicators?p_p_id=estatsearchportlet_WAR_estatsearchportlet_INSTANCE_OaTpFrwlabNK&amp;p_p_lifecycle=2&amp;p_p_resource_id=atom&amp;_estatsearchportlet_WAR_estatsearchportlet_INSTANCE_OaTpFrwlabNK_pageSize=100&amp;_estatsearchportlet_WAR_estatsearchportlet_INSTANCE_OaTpFrwlabNK_collection=CAT_PREREL</ns0:id>
+  <ns0:updated>2026-10-21T09:00:00Z</ns0:updated>
+  <ns0:entry>
+    <ns0:title>Seasonally adjusted government deficit at 3.3% of GDP in the euro area</ns0:title>
+    <ns0:link rel="alternate" href="https://ec.europa.eu/eurostat/product?code=2-21102026-cp" />
+    <ns0:author>
+      <ns0:name>Eurostat</ns0:name>
+      <ns0:uri>http://ec.europa.eu/eurostat</ns0:uri>
+    </ns0:author>
+    <ns0:id>https://ec.europa.eu/eurostat/product?code=2-21102026-cp</ns0:id>
+    <ns0:updated>2026-10-21T09:00:00Z</ns0:updated>
+    <ns0:published>2026-10-21T09:00:00Z</ns0:published>
+    <ns0:summary type="html">In the second quarter of 2026, the seasonally adjusted general government deficit to GDP ratio stood at 3.3% in the euro area (EA21) and at 3.5% in the EU. The euro area deficit to GDP ratio increased slightly compared to 3.2% in the first quarter of 2026, while the EU deficit to GDP ratio increa...</ns0:summary>
+  </ns0:entry>
+  <ns0:entry>
+    <ns0:title>Government debt at 88.8% of GDP in euro area</ns0:title>
+    <ns0:link rel="alternate" href="https://ec.europa.eu/eurostat/product?code=2-21102026-bp" />
+    <ns0:author>
+      <ns0:name>Eurostat</ns0:name>
+      <ns0:uri>http://ec.europa.eu/eurostat</ns0:uri>
+    </ns0:author>
+    <ns0:id>https://ec.europa.eu/eurostat/product?code=2-21102026-bp</ns0:id>
+    <ns0:updated>2026-10-21T09:00:00Z</ns0:updated>
+    <ns0:published>2026-10-21T09:00:00Z</ns0:published>
+    <ns0:summary type="html">At the end of the second quarter of 2026, the general government gross debt to GDP ratio in the euro area (EA21) stood at 88.8%, an increase compared with 88.4% at the end of the first quarter of 2026. In the EU, the ratio also increased from 82.5% to 82.9%.</ns0:summary>
+  </ns0:entry>
+  <ns0:entry>
+    <ns0:title>Euro area government deficit at 3.0% and EU at 3.1% of GDP</ns0:title>
+    <ns0:link rel="alternate" href="https://ec.europa.eu/eurostat/product?code=2-21102026-ap" />
+    <ns0:author>
+      <ns0:name>Eurostat</ns0:name>
+      <ns0:uri>http://ec.europa.eu/eurostat</ns0:uri>
+    </ns0:author>
+    <ns0:id>https://ec.europa.eu/eurostat/product?code=2-21102026-ap</ns0:id>
+    <ns0:updated>2026-10-21T09:00:00Z</ns0:updated>
+    <ns0:published>2026-10-21T09:00:00Z</ns0:published>
+    <ns0:summary type="html">In the euro area (EA20) the government deficit to GDP ratio remained unchanged at 3.0% in 2024 and 2025. In the EU, it also remained unchanged at 3.1%, the same level as in 2024. In the euro area the government debt to GDP ratio increased from 86.6% at the end of 2024 to 87.7% at the end of 2025,...</ns0:summary>
+  </ns0:entry>
+  <ns0:entry>
+    <ns0:title>Production in construction up by 1.8% in the euro area and by 2.0% in the EU</ns0:title>
+    <ns0:link rel="alternate" href="https://ec.europa.eu/eurostat/product?code=4-20102026-ap" />
+    <ns0:author>
+      <ns0:name>Eurostat</ns0:name>
+      <ns0:uri>http://ec.europa.eu/eurostat</ns0:uri>
+    </ns0:author>
+    <ns0:id>https://ec.europa.eu/eurostat/product?code=4-20102026-ap</ns0:id>
+    <ns0:updated>2026-10-20T09:00:00Z</ns0:updated>
+    <ns0:published>2026-10-20T09:00:00Z</ns0:published>
+    <ns0:summary type="html">In August 2026, compared with July 2026, seasonally adjusted production in construction increased by 1.8% in the euro area and by 2.0% in the EU, according to first estimates from Eurostat, the statistical office of the European Union. In July 2026, production in construction grew by 0.2% in the ...</ns0:summary>
+  </ns0:entry>
+  </ns0:feed>
