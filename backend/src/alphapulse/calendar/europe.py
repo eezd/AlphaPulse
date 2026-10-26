@@ -307,7 +307,7 @@ def parse_announcement(family: str, body: str) -> Announcement:
             if p is None:
                 raise ValueError("Eurostat GDP 公告缺少季度")
             period = period_of(p[1], quarter=True)
-            table = next((t for t in s.css("table") if "Growth rates of GDP in volume" in compact(t.xpath("string(.)").get())), None)
+            table = next((t for t in s.css("table") if "growth rates of gdp in volume" in compact(t.xpath("string(.)").get()).lower()), None)
             if table is None:
                 raise ValueError("Eurostat 缺少实际 GDP 增长表，不能使用就业增长表")
             row = eurostat_row(table, "Euro area")
@@ -316,7 +316,7 @@ def parse_announcement(family: str, body: str) -> Announcement:
                 raise ValueError("Eurostat GDP 表格列口径改变")
             values = {"gdp_qoq": value(row[count], row[count - 1]), "gdp_yoy": value(row[-1], row[-2])}
         else:
-            p = re.search(r"In ([A-Z][a-z]+ 20\d\d), the euro area seasonally adjusted unemployment rate was\s*(" + N + r")%", text)
+            p = re.search(r"In ([A-Z][a-z]+ 20\d\d), the euro area seasonally[- ]adjusted unemployment rate was\s*(" + N + r")%", text)
             if p is None:
                 raise ValueError("Eurostat 公告未识别到欧元区季调失业率")
             period = period_of(p[1])

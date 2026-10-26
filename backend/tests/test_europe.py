@@ -25,7 +25,9 @@ def fixture(name):
     ("ea_hicp", "ea_cpi", "2026-09", "final", {"hicp_yoy": "3.8", "hicp_mom": "0.6", "core_hicp_yoy": "2.5"}),
     ("ea_hicp", "ea_flash", "2026-09", "flash", {"hicp_yoy": "3.8", "hicp_mom": "0.6", "core_hicp_yoy": "2.5"}),
     ("ea_jobs", "ea_jobs", "2026-08", None, {"ilo_unemployment": "6.4"}),
+    ("ea_jobs", "ea_jobs_2025_01", "2024-11", None, {"ilo_unemployment": "6.3"}),
     ("ea_gdp", "ea_gdp", "2026-Q2", "preliminary", {"gdp_qoq": "0.4", "gdp_yoy": "1"}),
+    ("ea_gdp", "ea_gdp_2025_01", "2024-Q4", "preliminary", {"gdp_qoq": "0", "gdp_yoy": "0.9"}),
     ("ea_gdp", "ea_gdp_flash", "2026-Q2", "flash", {"gdp_qoq": "0.4", "gdp_yoy": "1"}),
     ("ea_gdp", "ea_gdp_final", "2026-Q2", "final", {"gdp_qoq": "0.6", "gdp_yoy": "1.2"}),
     ("de_cpi", "de_cpi", "2026-09", "final", {"eu_cpi_yoy": "3.3", "eu_cpi_mom": "0.6", "hicp_yoy": "3.3", "hicp_mom": "0.6"}),
@@ -59,6 +61,22 @@ def test_monthly_previous_is_previous_month_not_same_month_last_year():
     result = parse_announcement("uk_cpi", fixture("ons_cpi.html"))
     assert result.values["eu_cpi_mom"]["previous"] == "0.5"
     assert result.values["eu_core_cpi_yoy"]["previous"] == "2.6"
+
+
+def test_historical_eurostat_results_preserve_previous_values_and_real_publication_dates():
+    gdp = parse_announcement("ea_gdp", fixture("ea_gdp_2025_01.html"))
+    assert gdp.at == datetime(2025, 1, 30, 10, tzinfo=UTC)
+    assert gdp.values["gdp_qoq"]["previous"] == "0.4"
+    assert gdp.values["gdp_yoy"]["previous"] == "0.9"
+    jobs = parse_announcement("ea_jobs", fixture("ea_jobs_2025_01.html"))
+    assert jobs.at == datetime(2025, 1, 7, 10, tzinfo=UTC)
+    assert jobs.values["ilo_unemployment"]["previous"] == "6.3"
+
+
+def test_eurostat_gdp_does_not_take_an_employment_table_when_the_gdp_table_is_missing():
+    body = fixture("ea_gdp_2025_01.html").replace("growth rates of GDP in volume", "growth rates of employment")
+    with pytest.raises(ValueError, match="GDP 增长表"):
+        parse_announcement("ea_gdp", body)
 
 
 @pytest.mark.parametrize("period,expected", [("December 2024 to February 2025", "2025-02"),
