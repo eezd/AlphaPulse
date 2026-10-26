@@ -1,12 +1,57 @@
 import asyncio
 from datetime import UTC, date, datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from alphapulse.calendar.archives import parse_announcements, parse_bls_text
+from alphapulse.calendar.archives import parse_announcements, parse_bls_text, parse_umich_report
 from alphapulse.calendar.parsers import bls_periods, release_metadata
-from alphapulse.calendar.umich import current_result, monthly_series, parse_schedule
+from alphapulse.calendar.umich import current_result, monthly_series, parse_schedule, report_links
+
+
+@pytest.mark.parametrize("name,stage,at,actual,previous", [
+    ("2025-01-preliminary", "preliminary", datetime(2025, 1, 10, 15, tzinfo=UTC), "73.2", "74.0"),
+    ("2025-01-final", "final", datetime(2025, 1, 24, 15, tzinfo=UTC), "71.1", "74.0"),
+    ("2025-07-final", "final", datetime(2025, 8, 1, 14, tzinfo=UTC), "61.7", "60.7"),
+    ("2026-02-preliminary", "preliminary", datetime(2026, 2, 6, 15, tzinfo=UTC), "57.3", "56.4"),
+])
+def test_umich_report_preserves_original_vintage_stage_and_real_publication_date(name, stage, at, actual, previous):
+    body = (Path(__file__).parent / "fixtures/calendar" / f"umich-{name}.txt").read_text()
+    result = parse_umich_report(body)
+    assert (result.period, result.stage, result.at) == (name[:7], stage, at)
+    assert result.values["umich_sentiment"]["actual"] == actual
+    assert result.values["umich_sentiment"]["previous"] == previous
+
+
+@pytest.mark.parametrize("old,new", [
+    ("January 2025 survey results", "February 2025 survey results"),
+    ("2024 2024 2024 2025", "2024 2024 2024 Prelim"),
+    ("74.0 71.1", "74.0"),
+    ("January 24, 2025", "Date unavailable"),
+])
+def test_umich_report_rejects_inconsistent_header_missing_value_or_missing_date(old, new):
+    body = (Path(__file__).parent / "fixtures/calendar/umich-2025-01-final.txt").read_text()
+    assert old in body
+    with pytest.raises(ValueError):
+        parse_umich_report(body.replace(old, new))
+
+
+def test_umich_index_only_accepts_official_stage_reports_for_the_requested_year():
+    body = '''<div id="report_heading"><span class="title">2025 Reports</span></div>
+    <a href="fetchdoc.php?docid=1">January Preliminary Results</a>
+    <a href="fetchdoc.php?docid=2">January Final Results</a>
+    <a href="fetchdoc.php?docid=3">January Data Booklet</a>
+    <a href="fetchdoc.php?docid=4">Revisions to Estimates</a>'''
+    assert report_links(body, 2025) == {
+        ("2025-01", "preliminary"): "https://data.sca.isr.umich.edu/fetchdoc.php?docid=1",
+        ("2025-01", "final"): "https://data.sca.isr.umich.edu/fetchdoc.php?docid=2",
+    }
+    for invalid in (body.replace("2025 Reports", "2026 Reports"),
+                    body.replace("fetchdoc.php?docid=1", "https://example.com/foreign.pdf"),
+                    body + '<a href="fetchdoc.php?docid=9">January Final Results</a>'):
+        with pytest.raises(ValueError):
+            report_links(invalid, 2025)
 
 
 @pytest.mark.parametrize("title,period,stage", [

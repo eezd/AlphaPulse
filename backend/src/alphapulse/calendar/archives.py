@@ -1,7 +1,7 @@
 """官方当期公告解析；归档内容不被标为公布时就已采集的原始版本。"""
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from parsel import Selector
 
@@ -18,6 +18,37 @@ class Announcement:
     period: str | None
     stage: str | None
     values: dict
+
+
+def parse_umich_report(text: str) -> Announcement:
+    """取当期 PDF 最后一列；前十二列只是报告当时所列历史值。"""
+    text = compact(text)
+    # 2026-02 PDF 的首字母 P 是单独的文字块，提取后与 reliminary 之间有换行。
+    heading = re.search(r"(?:P\s*reliminary results from the (" + MONTH_PATTERN + r") (20\d\d) survey|(" +
+                        MONTH_PATTERN + r") (20\d\d) survey results)\s+(" + MONTH_PATTERN + r" \d{1,2}, 20\d\d)", text)
+    if heading is None:
+        raise ValueError("密歇根历史报告缺少统计期、发布阶段或正式日期")
+    month, year = (heading[1], heading[2]) if heading[1] else (heading[3], heading[4])
+    period = f"{year}-{MONTHS[month]:02d}"
+    stage = "preliminary" if heading[1] else "final"
+    at = datetime.strptime(heading[5], "%B %d, %Y").replace(hour=10, tzinfo=EASTERN).astimezone(UTC)
+    table = re.search(r"((?:[A-Z][a-z]{2}\s+){13})((?:(?:20\d\d|Prelim)\s+){13})"
+                      r"Index of Consumer Sentiment\s+((?:\d+(?:\.\d+)?\s+){13})Current Economic Conditions", text)
+    if table is None:
+        raise ValueError("密歇根历史报告缺少完整的消费者信心表头或数值行")
+    months, years, values = (group.split() for group in table.groups())
+    current = datetime(int(year), MONTHS[month], 1)
+    previous = (current - timedelta(days=1)).strftime("%Y-%m")
+    # 初值最后一列表头用 Prelim 代替年份；其他十二列必须与统计月份逐列一致。
+    for index in range(13):
+        expected_month = (current.month - 1 + index) % 12 + 1
+        expected_year = current.year - 1 + (current.month - 1 + index) // 12
+        expected_label = "Prelim" if index == 12 and stage == "preliminary" else str(expected_year)
+        if months[index] != datetime(2000, expected_month, 1).strftime("%b") or years[index] != expected_label:
+            raise ValueError("密歇根历史报告表头与统计期或发布阶段不符")
+    return Announcement(at, period, stage, {"umich_sentiment": {
+        "actual": number(values[-1]), "previous": number(values[-2]), "previous_basis": f"{previous} 官方上月终值",
+    }})
 
 
 def signed(match: re.Match) -> str:
