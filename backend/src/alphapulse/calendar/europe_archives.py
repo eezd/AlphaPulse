@@ -29,7 +29,11 @@ def ons_links(body: str) -> tuple[list[str], str | None]:
 
 
 def destatis_links(body: str, start: date, end: date) -> tuple[list[str], str | None]:
-    s = Selector(text=body)
+    sections = Selector(text=body).css(".s-press-search-results")
+    if not sections:
+        raise ValueError("Destatis 历史索引缺少筛选结果列表")
+    # 第二块是独立的最新新闻，日期不能参与筛选列表的翻页边界。
+    s = sections[0]
     links, days = [], []
     for node in s.css(".c-result"):
         date_text = compact(node.css(".c-result__date").xpath("string(.)").get() or "")
