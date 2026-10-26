@@ -28,7 +28,7 @@ from alphapulse.trading.snapshot import SnapshotError, read_snapshot, require_fr
 
 logger = logging.getLogger("alphapulse.trading.analyst")
 
-READ_TOOLS = ("search_news", "get_news", "search_symbols", "get_klines", "get_ticker", "get_derivatives")
+READ_TOOLS = ("search_news", "get_news", "get_economic_calendar", "search_symbols", "get_klines", "get_ticker", "get_derivatives")
 # 最后一轮只开放 submit_trade_plan，逼模型给出结论
 MAX_ROUNDS = 6
 RECENT_DECISIONS = 2
@@ -60,7 +60,8 @@ INSTRUCTIONS = f"""你是 AlphaPulse 的模拟盘交易分析器：为一个币�
   - main/README 第 9 节不适用：没有 CONTEXT.md，不要写。之前的结论见用户消息里的「最近决策」，要按实时数据复核，不直接沿用旧点位。
   - 数量、止损、止盈由程序计算，你只给方向、区间、挂单价、有效期和置信度。
 - 用户消息里已预先取好实盘行情（ticker、{' / '.join(KLINE_INTERVALS)} K 线、衍生品），不要用相同参数重复调用；需要其他周期或其他币时再调用。
-- 新闻没有预取，必须用 search_news 检索相关新闻，并查清有效期和持仓时限内的重大数据及公布时间。
+- 新闻没有预取，必须用 search_news 检索相关新闻，并查清有效期和持仓时限内的重大数据及公布时间。同一事件的转载、摘要不算多条独立证据；RSS 摘要不足时明确说明，未查到市场预期时不得声称超预期。
+- 用 get_economic_calendar 核对美国官方事件时间及采集状态，再按 Skills 的数据窗口规则判断。日历仅覆盖 CPI/PPI/就业/PCE/GDP/FOMC；采集离线、来源失败或过时不能解释成没有重大事件。日历判断不是额外下单指令。
 - 最后必须调用一次 submit_trade_plan。校验不通过会返回原因，按原因修正后重新提交。
 
 ## 程序如何执行

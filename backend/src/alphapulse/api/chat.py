@@ -14,10 +14,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from alphapulse.api.response import ApiResponse, success
 from alphapulse.ai import llm
 from alphapulse.ai.prompt import build_system_prompt, current_context, estimate_tokens
 from alphapulse.ai.tools import ToolOutcome, run_tool, tool_specs
-from alphapulse.core.auth import require_admin
+from alphapulse.core.auth import AuthSession, require_admin
+from alphapulse.core.streams import session_events
 from alphapulse.core.db import SessionLocal, get_session
 from alphapulse.models import AiProvider, ChatMessage, ChatSession, ContextVersion
 
@@ -108,23 +110,28 @@ async def save_shielded(*messages: ChatMessage) -> None:
 
 
 @router.get("/session")
-async def get_chat_session(session: Annotated[AsyncSession, Depends(get_session)]) -> SessionOut:
+async def get_chat_session(session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[SessionOut]:
     # 先取生成状态再读消息：反过来的话，读消息后生成恰好结束，会返回「未在生成」却缺最后一条
     is_generating = generating.locked()
     current = await active_session(session)
     messages = await session_messages(session, current.id)
     system = await build_system_prompt(session)
     history = json.dumps([neutral(m) for m in messages], ensure_ascii=False)
-    return SessionOut(
+    return success(SessionOut(
         id=current.id, created_at=current.created_at,
         messages=[MessageOut.model_validate(m, from_attributes=True) for m in messages],
         estimated_tokens=estimate_tokens(system) + estimate_tokens(history),
         generating=is_generating,
-    )
+    ))
 
 
 @router.post("/messages", response_class=EventSourceResponse)
-async def send_message(body: SendIn) -> AsyncIterator[ServerSentEvent]:
+async def send_message(body: SendIn, principal: Annotated[AuthSession, Depends(require_admin)]) -> AsyncIterator[ServerSentEvent]:
+    async for item in session_events(_message_events(body), principal):
+        yield item
+
+
+async def _message_events(body: SendIn) -> AsyncIterator[ServerSentEvent]:
     """事件：prompt、thinking、delta、tool_call、tool_result、skill_draft、context_updated、usage、error、done"""
     if generating.locked():
         yield event("error", {"message": "正在生成或重置会话，请等待完成"})
@@ -230,7 +237,7 @@ async def send_message(body: SendIn) -> AsyncIterator[ServerSentEvent]:
 
 
 @router.post("/reset")
-async def reset(body: ResetIn, session: Annotated[AsyncSession, Depends(get_session)]) -> None:
+async def reset(body: ResetIn, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[None]:
     """结束当前会话（消息保留在库里，不再展示），可选同时清空 CONTEXT.md（写入空版本，可找回）"""
     if generating.locked():
         raise HTTPException(status.HTTP_409_CONFLICT, "正在生成或重置会话，请稍后重试")
@@ -239,26 +246,27 @@ async def reset(body: ResetIn, session: Annotated[AsyncSession, Depends(get_sess
         if body.clear_context:
             session.add(ContextVersion(content="", source="reset"))
         await session.commit()
+    return success(None)
 
 
 @router.get("/context")
-async def get_context(session: Annotated[AsyncSession, Depends(get_session)]) -> ContextOut:
+async def get_context(session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[ContextOut]:
     current = await current_context(session)
     if current is None:
-        return ContextOut(id=None, content="", source=None, created_at=None)
-    return ContextOut.model_validate(current, from_attributes=True)
+        return success(ContextOut(id=None, content="", source=None, created_at=None))
+    return success(ContextOut.model_validate(current, from_attributes=True))
 
 
 @router.put("/context")
-async def put_context(body: ContextIn, session: Annotated[AsyncSession, Depends(get_session)]) -> ContextOut:
+async def put_context(body: ContextIn, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[ContextOut]:
     version = ContextVersion(content=body.content, source="user")
     session.add(version)
     await session.commit()
     await session.refresh(version)
-    return ContextOut.model_validate(version, from_attributes=True)
+    return success(ContextOut.model_validate(version, from_attributes=True))
 
 
 @router.get("/context/versions")
-async def context_versions(session: Annotated[AsyncSession, Depends(get_session)]) -> list[ContextOut]:
+async def context_versions(session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[list[ContextOut]]:
     rows = await session.scalars(select(ContextVersion).order_by(ContextVersion.id.desc()).limit(100))
-    return [ContextOut.model_validate(v, from_attributes=True) for v in rows]
+    return success([ContextOut.model_validate(v, from_attributes=True) for v in rows])

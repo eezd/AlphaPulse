@@ -150,7 +150,7 @@ def test_chat_completes_tool_results_on_disconnect_or_exception(trading, monkeyp
     monkeypatch.setattr(chat.llm, "stream", stream)
     monkeypatch.setattr(chat, "run_tool", tool)
     async def check():
-        generator = chat.send_message(chat.SendIn(text="test"))
+        generator = chat._message_events(chat.SendIn(text="test"))
         events = []
         async for event in generator:
             events.append(event.event)
@@ -201,7 +201,7 @@ def test_chat_reset_blocks_new_generation_until_commit(trading, monkeypatch):
             task = asyncio.create_task(chat.reset(chat.ResetIn(clear_context=True), Session()))
             try:
                 await entered.wait()
-                events = [event async for event in chat.send_message(chat.SendIn(text="重置期间的新消息"))]
+                events = [event async for event in chat._message_events(chat.SendIn(text="重置期间的新消息"))]
                 assert len(events) == 1 and events[0].event == "error"
                 assert not task.done()
             finally:

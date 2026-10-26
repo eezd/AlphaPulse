@@ -19,7 +19,7 @@ def test_forward_endpoint_excludes_labels_at_or_after_entry(trading):
     class Session:
         async def execute(self, statement):
             return SimpleNamespace(all=lambda: rows)
-    result = asyncio.run(list_news_signals(Session()))
+    result = asyncio.run(list_news_signals(Session())).data
     assert result.labeled == result.filled == 1
     assert [item.news_id for item in result.recent] == [1]
     assert all(s.n == 1 for s in result.stats)

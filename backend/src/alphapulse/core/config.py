@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     jwt_secret: str
     admin_username: str
     admin_password_hash: str = ""
+    login_captcha_enabled: bool = False
     jwt_expire_days: int = 7
     # Fernet 密钥，加密存库的第三方 API key
     secret_encryption_key: str

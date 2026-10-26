@@ -11,6 +11,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from alphapulse.api.response import ApiResponse, success
 from alphapulse.ai import llm
 from alphapulse.core.auth import require_admin
 from alphapulse.core.crypto import encrypt
@@ -96,13 +97,13 @@ async def commit_unique(session: AsyncSession) -> None:
 
 
 @router.get("/providers")
-async def list_providers(session: Annotated[AsyncSession, Depends(get_session)]) -> list[ProviderOut]:
+async def list_providers(session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[list[ProviderOut]]:
     rows = await session.scalars(select(AiProvider).order_by(AiProvider.id))
-    return [ProviderOut.model_validate(p, from_attributes=True) for p in rows]
+    return success([ProviderOut.model_validate(p, from_attributes=True) for p in rows])
 
 
 @router.post("/providers", status_code=status.HTTP_201_CREATED)
-async def create_provider(body: ProviderIn, session: Annotated[AsyncSession, Depends(get_session)]) -> ProviderOut:
+async def create_provider(body: ProviderIn, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[ProviderOut]:
     # 第一套配置自动成为默认
     is_default = body.is_default or await session.scalar(select(AiProvider.id).limit(1)) is None
     if is_default:
@@ -113,11 +114,11 @@ async def create_provider(body: ProviderIn, session: Annotated[AsyncSession, Dep
     )
     session.add(provider)
     await commit_unique(session)
-    return ProviderOut.model_validate(provider, from_attributes=True)
+    return success(ProviderOut.model_validate(provider, from_attributes=True))
 
 
 @router.patch("/providers/{provider_id}")
-async def patch_provider(provider_id: int, body: ProviderPatch, session: Annotated[AsyncSession, Depends(get_session)]) -> ProviderOut:
+async def patch_provider(provider_id: int, body: ProviderPatch, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[ProviderOut]:
     provider = await get_provider(session, provider_id)
     values = body.model_dump(exclude_unset=True, exclude={"api_key", "base_url", "is_default"})
     # reasoning_effort 显式传 null 表示清除，其他字段为 null 时忽略
@@ -134,11 +135,11 @@ async def patch_provider(provider_id: int, body: ProviderPatch, session: Annotat
         provider.is_default = True
     await commit_unique(session)
     await session.refresh(provider)
-    return ProviderOut.model_validate(provider, from_attributes=True)
+    return success(ProviderOut.model_validate(provider, from_attributes=True))
 
 
 @router.delete("/providers/{provider_id}")
-async def delete_provider(provider_id: int, session: Annotated[AsyncSession, Depends(get_session)]) -> None:
+async def delete_provider(provider_id: int, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[None]:
     provider = await get_provider(session, provider_id)
     await session.delete(provider)
     await session.flush()
@@ -148,10 +149,11 @@ async def delete_provider(provider_id: int, session: Annotated[AsyncSession, Dep
         if first:
             first.is_default = True
     await session.commit()
+    return success(None)
 
 
 @router.post("/providers/{provider_id}/test")
-async def test_provider(provider_id: int, session: Annotated[AsyncSession, Depends(get_session)]) -> TestResult:
+async def test_provider(provider_id: int, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[TestResult]:
     provider = await get_provider(session, provider_id)
     started = time.monotonic()
     try:
@@ -160,8 +162,8 @@ async def test_provider(provider_id: int, session: Annotated[AsyncSession, Depen
             if isinstance(event, llm.Completion):
                 completion = event
     except llm.LlmError as e:
-        return TestResult(ok=False, elapsed_ms=round((time.monotonic() - started) * 1000), error=str(e))
-    return TestResult(ok=True, elapsed_ms=round((time.monotonic() - started) * 1000), reply=completion.text[:200])
+        return success(TestResult(ok=False, elapsed_ms=round((time.monotonic() - started) * 1000), error=str(e)))
+    return success(TestResult(ok=True, elapsed_ms=round((time.monotonic() - started) * 1000), reply=completion.text[:200]))
 
 
 # ---------- 模拟盘 ----------
@@ -240,12 +242,12 @@ async def ensure_no_positions(session: AsyncSession, exchange: str) -> None:
 
 
 @router.get("/exchange")
-async def get_exchange(session: Annotated[AsyncSession, Depends(get_session)]) -> ExchangeOut:
-    return await exchange_out(session, await session.get(TradingAccount, 1))
+async def get_exchange(session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[ExchangeOut]:
+    return success(await exchange_out(session, await session.get(TradingAccount, 1)))
 
 
 @router.put("/exchange")
-async def put_exchange(body: ExchangeIn, session: Annotated[AsyncSession, Depends(get_session)]) -> ExchangeOut:
+async def put_exchange(body: ExchangeIn, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[ExchangeOut]:
     account = await editable_account(session)
     await ensure_no_positions(session, account.exchange)
     exchange = body.exchange or account.exchange
@@ -264,11 +266,11 @@ async def put_exchange(body: ExchangeIn, session: Annotated[AsyncSession, Depend
     if credential is not None:
         await session.refresh(credential)
     await redis.delete(STATUS_KEY)
-    return await exchange_out(session, account)
+    return success(await exchange_out(session, account))
 
 
 @router.delete("/exchange")
-async def delete_exchange(session: Annotated[AsyncSession, Depends(get_session)]) -> ExchangeOut:
+async def delete_exchange(session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[ExchangeOut]:
     account = await editable_account(session)
     await ensure_no_positions(session, account.exchange)
     credential = await session.get(TradingCredential, account.exchange)
@@ -278,11 +280,11 @@ async def delete_exchange(session: Annotated[AsyncSession, Depends(get_session)]
     if credential is not None:
         await session.refresh(credential)
     await redis.delete(STATUS_KEY)
-    return await exchange_out(session, account)
+    return success(await exchange_out(session, account))
 
 
 @router.post("/exchange/test")
-async def test_exchange(session: Annotated[AsyncSession, Depends(get_session)]) -> ExchangeTestResult:
+async def test_exchange(session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[ExchangeTestResult]:
     account = await session.get(TradingAccount, 1)
     credential = await session.get(TradingCredential, account.exchange) if account else None
     if credential is None or credential.api_key_encrypted is None:
@@ -294,8 +296,8 @@ async def test_exchange(session: Annotated[AsyncSession, Depends(get_session)]) 
             dual = await client.position_mode()
     except ExchangeError as e:
         hint = "（请在所选交易所的模拟交易账户创建 key，确认合约权限及 IP 白名单；Bybit Testnet 和实盘 key 均不可用）" if e.code in (-2015, 10003, 10005, 10010) else ""
-        return ExchangeTestResult(ok=False, elapsed_ms=round((time.monotonic() - started) * 1000), error=f"{e}{hint}")
-    return ExchangeTestResult(
+        return success(ExchangeTestResult(ok=False, elapsed_ms=round((time.monotonic() - started) * 1000), error=f"{e}{hint}"))
+    return success(ExchangeTestResult(
         ok=True, elapsed_ms=round((time.monotonic() - started) * 1000),
         available_usdt=info["availableBalance"], wallet_usdt=info["totalWalletBalance"], dual_side_position=dual,
-    )
+    ))

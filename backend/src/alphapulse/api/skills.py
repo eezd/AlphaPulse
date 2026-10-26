@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from alphapulse.api.response import ApiResponse, success
 from alphapulse.ai.skills import SkillError, add_version, create_node, load_tree
 from alphapulse.core.auth import require_admin
 from alphapulse.core.db import get_session
@@ -89,17 +90,17 @@ def bad_request(e: SkillError) -> HTTPException:
 
 
 @router.get("/tree")
-async def tree(session: Annotated[AsyncSession, Depends(get_session)]) -> list[NodeOut]:
+async def tree(session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[list[NodeOut]]:
     """扁平列表，前端按 parent_id 组装成树"""
-    return [
+    return success([
         NodeOut(**{**i.node.__dict__, "path": i.path, "published_version_no": i.published_version_no,
                    "latest_version_no": i.latest_version_no, "has_draft": i.has_draft})
         for i in await load_tree(session)
-    ]
+    ])
 
 
 @router.post("/nodes", status_code=status.HTTP_201_CREATED)
-async def create(body: NodeIn, session: Annotated[AsyncSession, Depends(get_session)]) -> NodeOut:
+async def create(body: NodeIn, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[NodeOut]:
     try:
         node = await create_node(session, body.parent_id, body.kind, body.name, body.priority)
         # 没有初始内容时不建空版本，第一次保存即 v1
@@ -108,11 +109,11 @@ async def create(body: NodeIn, session: Annotated[AsyncSession, Depends(get_sess
     except SkillError as e:
         raise bad_request(e) from None
     await session.commit()
-    return await node_out(session, node.id)
+    return success(await node_out(session, node.id))
 
 
 @router.patch("/nodes/{node_id}")
-async def patch(node_id: int, body: NodePatch, session: Annotated[AsyncSession, Depends(get_session)]) -> NodeOut:
+async def patch(node_id: int, body: NodePatch, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[NodeOut]:
     node = await get_node(session, node_id)
     if body.name is not None:
         name = body.name.strip()
@@ -129,11 +130,11 @@ async def patch(node_id: int, body: NodePatch, session: Annotated[AsyncSession, 
     if body.enabled is not None:
         node.enabled = body.enabled
     await session.commit()
-    return await node_out(session, node_id)
+    return success(await node_out(session, node_id))
 
 
 @router.post("/nodes/{node_id}/move")
-async def move(node_id: int, body: MoveIn, session: Annotated[AsyncSession, Depends(get_session)]) -> None:
+async def move(node_id: int, body: MoveIn, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[None]:
     node = await get_node(session, node_id)
     if body.parent_id is not None:
         parent = await get_node(session, body.parent_id)
@@ -160,10 +161,11 @@ async def move(node_id: int, body: MoveIn, session: Annotated[AsyncSession, Depe
     for i, sibling in enumerate(ordered):
         sibling.sort_order = i
     await session.commit()
+    return success(None)
 
 
 @router.delete("/nodes/{node_id}")
-async def delete(node_id: int, session: Annotated[AsyncSession, Depends(get_session)]) -> None:
+async def delete(node_id: int, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[None]:
     node = await get_node(session, node_id)
     if node.kind == "folder" and await session.scalar(select(func.count()).where(SkillNode.parent_id == node_id)):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "文件夹不为空，请先移走或删除其中的节点")
@@ -172,26 +174,27 @@ async def delete(node_id: int, session: Annotated[AsyncSession, Depends(get_sess
     await session.flush()
     await session.delete(node)
     await session.commit()
+    return success(None)
 
 
 @router.get("/{skill_id}/versions")
-async def versions(skill_id: int, session: Annotated[AsyncSession, Depends(get_session)]) -> list[VersionOut]:
+async def versions(skill_id: int, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[list[VersionOut]]:
     await get_node(session, skill_id, "skill")
     rows = await session.scalars(select(SkillVersion).where(SkillVersion.skill_id == skill_id).order_by(SkillVersion.version_no.desc()))
-    return [VersionOut.model_validate(v, from_attributes=True) for v in rows]
+    return success([VersionOut.model_validate(v, from_attributes=True) for v in rows])
 
 
 @router.post("/{skill_id}/versions", status_code=status.HTTP_201_CREATED)
-async def save_draft(skill_id: int, body: VersionIn, session: Annotated[AsyncSession, Depends(get_session)]) -> VersionOut:
+async def save_draft(skill_id: int, body: VersionIn, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[VersionOut]:
     skill = await get_node(session, skill_id, "skill")
     version = await add_version(session, skill, body.content, "user", body.note)
     await session.commit()
     await session.refresh(version)
-    return VersionOut.model_validate(version, from_attributes=True)
+    return success(VersionOut.model_validate(version, from_attributes=True))
 
 
 @router.post("/{skill_id}/publish")
-async def publish(skill_id: int, body: PublishIn, session: Annotated[AsyncSession, Depends(get_session)]) -> NodeOut:
+async def publish(skill_id: int, body: PublishIn, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[NodeOut]:
     """发布指定版本；发布旧版本即回退"""
     skill = await get_node(session, skill_id, "skill")
     version = await session.get(SkillVersion, body.version_id)
@@ -199,4 +202,4 @@ async def publish(skill_id: int, body: PublishIn, session: Annotated[AsyncSessio
         raise HTTPException(status.HTTP_404_NOT_FOUND, "版本不存在")
     skill.published_version_id = version.id
     await session.commit()
-    return await node_out(session, skill_id)
+    return success(await node_out(session, skill_id))

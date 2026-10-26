@@ -11,6 +11,7 @@ from sqlalchemy import BigInteger, cast, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from alphapulse.api.response import ApiResponse, success
 from alphapulse.ai import llm
 from alphapulse.api.crawler import LOCAL_TZ
 from alphapulse.api.market import call_binance, client as market_client
@@ -215,7 +216,7 @@ async def get_account(session: AsyncSession) -> TradingAccount:
 
 
 @router.get("/status")
-async def get_status(session: Annotated[AsyncSession, Depends(get_session)]) -> StatusOut:
+async def get_status(session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[StatusOut]:
     account = await get_account(session)
     today = datetime.now(LOCAL_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
     count, input_tokens, output_tokens = (await session.execute(
@@ -226,16 +227,16 @@ async def get_status(session: Annotated[AsyncSession, Depends(get_session)]) -> 
         ).where(TradingAnalysis.started_at >= today)
     )).one()
     credential = await session.get(TradingCredential, account.exchange)
-    return StatusOut(
+    return success(StatusOut(
         exchange=account.exchange, configured=bool(credential and credential.api_key_encrypted),
         provider_id=account.provider_id, reasoning_effort=account.reasoning_effort,
         snapshot=await read_snapshot(),
         today=TodayUsage(analyses=count, limit=account.daily_analysis_limit, input_tokens=input_tokens, output_tokens=output_tokens),
-    )
+    ))
 
 
 @router.patch("/config")
-async def patch_config(body: ConfigIn, session: Annotated[AsyncSession, Depends(get_session)]) -> StatusOut:
+async def patch_config(body: ConfigIn, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[StatusOut]:
     account = await get_account(session)
     fields = body.model_dump(exclude_unset=True)
     if fields.get("provider_id") is not None and await session.get(AiProvider, fields["provider_id"]) is None:
@@ -275,8 +276,8 @@ async def symbol_options(exchange: str) -> list[dict]:
 
 
 @router.get("/symbol-options")
-async def list_symbol_options(session: Annotated[AsyncSession, Depends(get_session)]) -> list[SymbolOption]:
-    return [SymbolOption.model_validate(o) for o in await symbol_options(await active_exchange(session))]
+async def list_symbol_options(session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[list[SymbolOption]]:
+    return success([SymbolOption.model_validate(o) for o in await symbol_options(await active_exchange(session))])
 
 
 async def current_equity() -> Decimal | None:
@@ -312,22 +313,24 @@ async def set_running(session: AsyncSession, s: TradingSymbol, running: bool) ->
 
 
 @router.post("/symbols/{symbol}/start")
-async def start(symbol: str, session: Annotated[AsyncSession, Depends(get_session)]) -> None:
+async def start(symbol: str, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[None]:
     await set_running(session, await get_symbol(session, symbol), True)
+    return success(None)
 
 
 @router.post("/symbols/{symbol}/stop")
-async def stop(symbol: str, session: Annotated[AsyncSession, Depends(get_session)]) -> None:
+async def stop(symbol: str, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[None]:
     await set_running(session, await get_symbol(session, symbol), False)
+    return success(None)
 
 
 @router.patch("/symbols/{symbol}")
-async def patch_symbol(symbol: str, body: SymbolConfigIn, session: Annotated[AsyncSession, Depends(get_session)]) -> None:
+async def patch_symbol(symbol: str, body: SymbolConfigIn, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[None]:
     """设置该币的交易资金：各币合计不超过账户权益（取不到权益时不校验）"""
     s = await get_symbol(session, symbol)
     capital = body.capital_usdt
     if capital == s.capital_usdt:
-        return
+        return success(None)
     if capital is None and s.running:
         raise HTTPException(status.HTTP_409_CONFLICT, "交易中不能清空交易资金")
     equity = await current_equity()
@@ -342,17 +345,18 @@ async def patch_symbol(symbol: str, body: SymbolConfigIn, session: Annotated[Asy
     session.add(TradingEvent(exchange=await active_exchange(session), symbol=symbol, kind="capital_changed",
                              message=f"交易资金设为 {capital} USDT" if capital is not None else "清空交易资金"))
     await session.commit()
+    return success(None)
 
 
 @router.get("/symbols")
-async def list_symbols(session: Annotated[AsyncSession, Depends(get_session)]) -> list[SymbolOut]:
+async def list_symbols(session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[list[SymbolOut]]:
     symbols = (await session.scalars(select(TradingSymbol).order_by(TradingSymbol.added_at))).all()
     equity = await current_equity()
     analyzing = set((await session.scalars(select(TradingAnalysis.symbol).where(TradingAnalysis.exchange == await active_exchange(session), TradingAnalysis.status == "running"))).all())
     plans = {p.symbol: p for p in await session.scalars(
         select(TradingAnalysis).where(TradingAnalysis.exchange == await active_exchange(session), TradingAnalysis.plan_status.in_(LIVE_PLAN_STATUSES)).order_by(TradingAnalysis.id)
     )}
-    return [
+    return success([
         SymbolOut(
             symbol=s.symbol, added_at=s.added_at, analysis_requested_at=s.analysis_requested_at,
             analyzing=s.symbol in analyzing, running=s.running, running_changed_at=s.running_changed_at, capital_usdt=s.capital_usdt,
@@ -362,11 +366,11 @@ async def list_symbols(session: Annotated[AsyncSession, Depends(get_session)]) -
             close_deadline=plans[s.symbol].close_deadline if s.symbol in plans else None,
         )
         for s in symbols
-    ]
+    ])
 
 
 @router.post("/symbols", status_code=status.HTTP_201_CREATED)
-async def add_symbol(body: SymbolIn, session: Annotated[AsyncSession, Depends(get_session)]) -> None:
+async def add_symbol(body: SymbolIn, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[None]:
     symbol = body.symbol.strip().upper()
     if not any(o["symbol"] == symbol for o in await symbol_options(await active_exchange(session))):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{symbol} 不是模拟盘和实盘都在交易的加密货币 USDT 永续合约")
@@ -376,6 +380,7 @@ async def add_symbol(body: SymbolIn, session: Annotated[AsyncSession, Depends(ge
         await session.commit()
     except IntegrityError:
         raise HTTPException(status.HTTP_409_CONFLICT, f"{symbol} 已在交易列表中") from None
+    return success(None)
 
 
 async def fresh_snapshot(symbol: str, action: str) -> dict:
@@ -405,16 +410,17 @@ async def ensure_idle(session: AsyncSession, symbol: str, action: str) -> Tradin
 
 
 @router.delete("/symbols/{symbol}")
-async def delete_symbol(symbol: str, session: Annotated[AsyncSession, Depends(get_session)]) -> None:
+async def delete_symbol(symbol: str, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[None]:
     """只移出列表；分析、订单流水和时间线保留"""
     s = await ensure_idle(session, symbol, "删除")
     await session.delete(s)
     session.add(TradingEvent(exchange=await active_exchange(session), symbol=symbol, kind="symbol_removed", message="移出交易列表"))
     await session.commit()
+    return success(None)
 
 
 @router.post("/symbols/{symbol}/manual/{action}", status_code=status.HTTP_202_ACCEPTED)
-async def manual_action(symbol: str, action: Literal["close", "cancel"], session: Annotated[AsyncSession, Depends(get_session)]) -> None:
+async def manual_action(symbol: str, action: Literal["close", "cancel"], session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[None]:
     """一键平仓（同时停止该币的行情交易）、清除挂单：交给执行器执行，结果写入时间线"""
     label = "平仓" if action == "close" else "清除挂单"
     s = await get_symbol(session, symbol)
@@ -425,6 +431,7 @@ async def manual_action(symbol: str, action: Literal["close", "cancel"], session
     session.add(TradingEvent(exchange=await active_exchange(session), symbol=symbol, kind="manual_requested", level="warn",
                              message=f"已请求{label}，等待交易所确认", data={"action": action}))
     await session.commit()
+    return success(None)
 
 
 @router.get("/events")
@@ -433,14 +440,14 @@ async def list_events(
     symbol: str | None = None,
     before: int | None = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
-) -> list[EventOut]:
+) -> ApiResponse[list[EventOut]]:
     """按 id 倒序分页；指定 symbol 时同时返回账户级事件（启停等）"""
     query = select(TradingEvent).where(TradingEvent.exchange == await active_exchange(session)).order_by(TradingEvent.id.desc()).limit(limit)
     if symbol:
         query = query.where(or_(TradingEvent.symbol == symbol, TradingEvent.symbol.is_(None)))
     if before:
         query = query.where(TradingEvent.id < before)
-    return [EventOut.model_validate(e, from_attributes=True) for e in await session.scalars(query)]
+    return success([EventOut.model_validate(e, from_attributes=True) for e in await session.scalars(query)])
 
 
 @router.get("/positions/history")
@@ -453,7 +460,7 @@ async def list_position_history(
     source: Literal["program", "manual"] | None = None,
     page: Annotated[int, Query(ge=1)] = 1,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
-) -> PositionHistoryPage:
+) -> ApiResponse[PositionHistoryPage]:
     """由当前交易所成交记录还原的已平仓仓位，按平仓时间倒序；start/end 按平仓时间筛选。
     个人账户成交量小，每次全量还原后在内存里筛选、统计、分页"""
     exchange = await active_exchange(session)
@@ -488,17 +495,17 @@ async def list_position_history(
         count=len(items), wins=sum(1 for i in items if i.net > 0),
         net=sum((i.net for i in items), Decimal(0)), commission=sum((i.commission for i in items), Decimal(0)),
     )
-    return PositionHistoryPage(summary=summary, total=len(items), items=items[(page - 1) * limit:page * limit])
+    return success(PositionHistoryPage(summary=summary, total=len(items), items=items[(page - 1) * limit:page * limit]))
 
 
 @router.get("/positions/history/symbols")
-async def list_position_history_symbols(session: Annotated[AsyncSession, Depends(get_session)]) -> list[str]:
+async def list_position_history_symbols(session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[list[str]]:
     """有过成交的币，供历史仓位筛选"""
-    return list(await session.scalars(select(TradingFill.symbol).where(TradingFill.exchange == await active_exchange(session)).distinct().order_by(TradingFill.symbol)))
+    return success(list(await session.scalars(select(TradingFill.symbol).where(TradingFill.exchange == await active_exchange(session)).distinct().order_by(TradingFill.symbol))))
 
 
 @router.get("/news-signals")
-async def list_news_signals(session: Annotated[AsyncSession, Depends(get_session)]) -> NewsSignalsOut:
+async def list_news_signals(session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[NewsSignalsOut]:
     """新闻信号前向记录：按标注方向交易的累计统计和最近 50 条"""
     rows = (await session.execute(
         select(NewsSignal, NewsItem.published_at, NewsItem.source_code, news_text())
@@ -514,7 +521,7 @@ async def list_news_signals(session: Annotated[AsyncSession, Depends(get_session
             return None
         return {sym: {h: (float(p[h]) / float(p["entry"]) - 1) * 1e4 for h in horizons} for sym, p in prices.items()}
 
-    return NewsSignalsOut(
+    return success(NewsSignalsOut(
         start=FORWARD_START, labeled=len(rows), filled=len(filled),
         stats=[NewsSignalStat(**r) for r in summarize(filled, SIGNAL_SYMBOLS, horizons)],
         recent=[
@@ -522,11 +529,11 @@ async def list_news_signals(session: Annotated[AsyncSession, Depends(get_session
                            category=s.category, direction=s.direction, returns=returns(s.prices))
             for s, published_at, source, title in reversed(rows[-50:])
         ],
-    )
+    ))
 
 
 @router.post("/symbols/{symbol}/analyze", status_code=status.HTTP_202_ACCEPTED)
-async def request_analysis(symbol: str, session: Annotated[AsyncSession, Depends(get_session)]) -> None:
+async def request_analysis(symbol: str, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[None]:
     """排队一次手动分析：该币停止交易时为试运行，计划只记录、不下单"""
     s = await get_symbol(session, symbol)
     if s.capital_usdt is None:
@@ -537,6 +544,7 @@ async def request_analysis(symbol: str, session: Annotated[AsyncSession, Depends
     s.analysis_requested_at = datetime.now(LOCAL_TZ)
     s.analysis_reasons = ["手动分析"]
     await session.commit()
+    return success(None)
 
 
 @router.get("/analyses")
@@ -544,31 +552,31 @@ async def list_analyses(
     session: Annotated[AsyncSession, Depends(get_session)],
     symbol: str | None = None,
     limit: Annotated[int, Query(ge=1, le=50)] = 10,
-) -> list[AnalysisOut]:
+) -> ApiResponse[list[AnalysisOut]]:
     query = select(TradingAnalysis).where(TradingAnalysis.exchange == await active_exchange(session)).order_by(TradingAnalysis.id.desc()).limit(limit)
     if symbol:
         query = query.where(TradingAnalysis.symbol == symbol)
-    return [AnalysisOut.model_validate(a, from_attributes=True) for a in await session.scalars(query)]
+    return success([AnalysisOut.model_validate(a, from_attributes=True) for a in await session.scalars(query)])
 
 
 @router.get("/analyses/{analysis_id}")
-async def get_analysis(analysis_id: int, session: Annotated[AsyncSession, Depends(get_session)]) -> AnalysisDetail:
+async def get_analysis(analysis_id: int, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[AnalysisDetail]:
     analysis = await session.get(TradingAnalysis, analysis_id)
     if analysis is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "分析不存在")
-    return AnalysisDetail.model_validate(analysis, from_attributes=True)
+    return success(AnalysisDetail.model_validate(analysis, from_attributes=True))
 
 
 @router.get("/symbols/{symbol}/plan")
-async def get_symbol_plan(symbol: str, session: Annotated[AsyncSession, Depends(get_session)]) -> SymbolPlanOut:
+async def get_symbol_plan(symbol: str, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[SymbolPlanOut]:
     plan = await session.scalar(
         select(TradingAnalysis).where(TradingAnalysis.exchange == await active_exchange(session), TradingAnalysis.symbol == symbol, TradingAnalysis.plan_status.in_(("proposed", *LIVE_PLAN_STATUSES)))
         .order_by(TradingAnalysis.id.desc()).limit(1)
     )
     if plan is None:
-        return SymbolPlanOut(plan=None, orders=[])
+        return success(SymbolPlanOut(plan=None, orders=[]))
     orders = await session.scalars(select(TradingOrder).where(TradingOrder.analysis_id == plan.id).order_by(TradingOrder.id))
-    return SymbolPlanOut(
+    return success(SymbolPlanOut(
         plan=AnalysisOut.model_validate(plan, from_attributes=True),
         orders=[OrderOut.model_validate(o, from_attributes=True) for o in orders],
-    )
+    ))

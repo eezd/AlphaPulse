@@ -14,7 +14,8 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from alphapulse.core.auth import require_admin, websocket_admin
+from alphapulse.api.response import ApiResponse, success
+from alphapulse.core.auth import WS_PROTOCOL, check_session, require_admin, websocket_admin
 from alphapulse.core.db import get_session
 from alphapulse.core.redis import KEY_PREFIX, redis
 from alphapulse.market.binance import BinanceClient, RateLimited
@@ -110,7 +111,7 @@ async def tradable_symbols(market: str) -> list[dict]:
 
 
 @router.get("/symbols")
-async def list_symbols(session: Annotated[AsyncSession, Depends(get_session)]) -> list[SymbolOut]:
+async def list_symbols(session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[list[SymbolOut]]:
     symbols = (await session.scalars(select(MarketSymbol).order_by(MarketSymbol.is_default.desc(), MarketSymbol.added_at))).all()
     states = {(s.market, s.symbol, s.interval): s for s in await session.scalars(select(KlineSyncState))}
     now = int(time.time() * 1000)
@@ -124,14 +125,14 @@ async def list_symbols(session: Annotated[AsyncSession, Depends(get_session)]) -
         span = max(now - state.earliest_open_time, 1)
         return IntervalProgress(done=False, percent=round((state.latest_open_time - state.earliest_open_time) / span * 100, 1))
 
-    return [
+    return success([
         SymbolOut.model_validate({**s.__dict__, "progress": {i: progress(s, i) for i in INTERVALS}})
         for s in symbols
-    ]
+    ])
 
 
 @router.post("/symbols", status_code=status.HTTP_201_CREATED)
-async def add_symbol(body: SymbolIn, session: Annotated[AsyncSession, Depends(get_session)]) -> None:
+async def add_symbol(body: SymbolIn, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[None]:
     symbol = body.symbol.strip().upper()
     match = next((s for s in await tradable_symbols(body.market) if s["symbol"] == symbol), None)
     if match is None:
@@ -141,10 +142,11 @@ async def add_symbol(body: SymbolIn, session: Annotated[AsyncSession, Depends(ge
         await session.commit()
     except IntegrityError:
         raise HTTPException(status.HTTP_409_CONFLICT, f"{symbol} 已存在") from None
+    return success(None)
 
 
 @router.delete("/symbols/{symbol_id}")
-async def delete_symbol(symbol_id: int, session: Annotated[AsyncSession, Depends(get_session)]) -> None:
+async def delete_symbol(symbol_id: int, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[None]:
     """删除交易对及其 K 线（K 线可随时从币安重新补齐）"""
     s = await session.get(MarketSymbol, symbol_id)
     if s is None:
@@ -153,11 +155,12 @@ async def delete_symbol(symbol_id: int, session: Annotated[AsyncSession, Depends
     await session.execute(delete(KlineSyncState).where(KlineSyncState.market == s.market, KlineSyncState.symbol == s.symbol))
     await session.delete(s)
     await session.commit()
+    return success(None)
 
 
 @router.get("/exchange-info")
-async def exchange_info(market: Market) -> list[TradableSymbol]:
-    return [TradableSymbol.model_validate(s) for s in await tradable_symbols(market)]
+async def exchange_info(market: Market) -> ApiResponse[list[TradableSymbol]]:
+    return success([TradableSymbol.model_validate(s) for s in await tradable_symbols(market)])
 
 
 @router.get("/klines")
@@ -168,7 +171,7 @@ async def klines(
     interval: str,
     end: int | None = None,
     limit: Annotated[int, Query(ge=1, le=MAX_KLINES)] = 500,
-) -> list[list[float]]:
+) -> ApiResponse[list[list[float]]]:
     """返回 open_time < end 的最近 limit 根，按时间正序：[open_time, open, high, low, close, volume, quote_volume]"""
     if interval == "1s":
         # 1s 不落库，直接取币安最近数据
@@ -177,7 +180,7 @@ async def klines(
         await ensure_symbol(session, market, symbol)
         params = {"symbol": symbol, "interval": "1s", "limit": limit, **({"endTime": end - 1} if end else {})}
         rows = await call_binance(client.get("spot", "klines", params))
-        return [[r[0], float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[5]), float(r[7])] for r in rows]
+        return success([[r[0], float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[5]), float(r[7])] for r in rows])
     if interval not in INTERVALS:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"不支持的周期：{interval}")
     stmt = (
@@ -189,22 +192,20 @@ async def klines(
     if end:
         stmt = stmt.where(Kline.open_time < end)
     rows = (await session.execute(stmt)).all()
-    return [[r[0], *(float(v) for v in r[1:])] for r in reversed(rows)]
+    return success([[r[0], *(float(v) for v in r[1:])] for r in reversed(rows)])
 
 
 @router.get("/ticker")
-async def ticker(session: Annotated[AsyncSession, Depends(get_session)], market: Market, symbol: str) -> dict:
+async def ticker(session: Annotated[AsyncSession, Depends(get_session)], market: Market, symbol: str) -> ApiResponse[dict]:
     await ensure_symbol(session, market, symbol)
-    return await call_binance(client.ticker(market, symbol))
+    return success(await call_binance(client.ticker(market, symbol)))
 
 
 @ws_router.websocket("/ws")
 async def market_ws(websocket: WebSocket) -> None:
     """客户端发送 {"market","symbol","interval"} 切换订阅；服务端推送 {"type":"kline"|"ticker", market, symbol, interval?, data}"""
-    if websocket_admin(websocket) is None:
-        await websocket.close(code=4401)
-        return
-    await websocket.accept()
+    principal = await websocket_admin(websocket)
+    await websocket.accept(subprotocol=WS_PROTOCOL)
     pubsub = redis.pubsub()
     subscribed = asyncio.Event()
 
@@ -237,9 +238,18 @@ async def market_ws(websocket: WebSocket) -> None:
                 "data": json.loads(message["data"]),
             }))
 
+    async def watch_session() -> None:
+        while True:
+            await asyncio.sleep(1)
+            try:
+                await check_session(principal)
+            except HTTPException as error:
+                await websocket.close(code=4401 if error.status_code == 401 else 1011)
+                return
+
     # 收、发任一方向结束（客户端断开或出错）就整体收尾；非正常断开时主动关闭，让前端重连，
     # 避免转发任务已死而连接看起来仍正常
-    tasks = [asyncio.create_task(receive()), asyncio.create_task(forward())]
+    tasks = [asyncio.create_task(receive()), asyncio.create_task(forward()), asyncio.create_task(watch_session())]
     try:
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for task in done:
@@ -249,6 +259,7 @@ async def market_ws(websocket: WebSocket) -> None:
     finally:
         for task in tasks:
             task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         await pubsub.aclose()
         if websocket.application_state == WebSocketState.CONNECTED and websocket.client_state == WebSocketState.CONNECTED:
             await websocket.close(code=1011)
