@@ -81,13 +81,38 @@ def order(trading, purpose, **values):
 RULES = SymbolRules(Decimal("0.1"), Decimal("0.01"), Decimal(5))
 
 
+@pytest.mark.parametrize("has_setup", [False, True])
+@pytest.mark.parametrize("status", ["open", "closed"])
+def test_recent_trade_brief_preserves_acceptance_fills_without_setup(trading, has_setup, status):
+    from alphapulse.trading.analyst import trade_brief
+
+    filled_at = datetime(2026, 10, 20, 8, 58, tzinfo=UTC)
+    sizing = {"direction": "long", "entry": {"price": "2380.78"}}
+    decision = {"action": "plan", "reevaluate": [], "valid_hours": "0.1667"}
+    if has_setup:
+        setup = {"zone_low": "2375", "zone_high": "2385"}
+        sizing["setup"] = setup
+        decision.update(direction="long", setup={**setup, "entry_price": "2380.78", "basis": "支撑区"})
+    row = trading.TradingAnalysis(
+        id=239, decision=decision, sizing=sizing, plan_status=status,
+        first_fill_at=filled_at, closed_at=filled_at + timedelta(seconds=24),
+        close_reason="manual", result={"net": "-0.00336383"},
+    )
+
+    text = trade_brief(row)
+
+    zone = "区间 2375–2385" if has_setup else "区间未记录"
+    assert text.startswith(f"#239 做多，{zone}，挂单 2380.78，2026-10-20 16:58 成交")
+    assert text.endswith("净 -0.00 USDT" if status == "closed" else "持仓中")
+
+
 def test_stop_replacement_waits_for_exchange_confirmation(trading):
     async def check():
         engine, client, session = trading.Executor(), Client(), Session()
         try:
             p, old = plan(trading), order(trading, "stop")
             p.plan_status = "open"
-            position = trading.Position("long", Decimal(1), Decimal(100), Decimal(100), Decimal(101))
+            position = trading.Position("long", Decimal(1), Decimal(100), Decimal(101))
             assert not await engine.sync_orders(session, client, p, [old], position, False, RULES, False)
             assert client.canceled == []
             [replacement] = [r for r in session.added if isinstance(r, trading.TradingOrder)]
@@ -95,6 +120,92 @@ def test_stop_replacement_waits_for_exchange_confirmation(trading):
             replacement.status = "new"
             assert await engine.sync_orders(session, client, p, [old, replacement], position, False, RULES, False)
             assert client.canceled == ["ap3"]
+        finally:
+            await engine.market.http.aclose()
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("exchange,direction,average,stop,quantity,tp_qty,expected", [
+    ("bybit", "long", "2394.5", "2390.3", "0.81", "0.48", "2396.30"),
+    ("bybit", "short", "2403.1", "2410.68", "0.52", "0.41", "2401.29"),
+    ("binance", "long", "2394.5", "2390.3", "0.81", "0.48", "2395.94"),
+    ("binance", "short", "2403.1", "2410.68", "0.52", "0.41", "2401.65"),
+])
+def test_tp1_protects_remaining_cost_and_keeps_confirmed_tighter_stop(trading, exchange, direction, average, stop, quantity, tp_qty, expected):
+    async def check():
+        engine, client = trading.Executor(), Client()
+        client.exchange = engine.exchange = exchange
+        p, entry, old = plan(trading), order(trading, "entry"), order(trading, "stop")
+        p.plan_status = "open"
+        p.sizing = {"direction": direction, "entry": {"quantity": quantity, "price": average, "stop": stop}}
+        entry.exchange_id, entry.filled_qty, entry.avg_price, entry.status = "entry-id", Decimal(quantity), Decimal(average), "filled"
+        old.trigger_price, old.quantity = Decimal(stop), Decimal(quantity)
+        old.side = "SELL" if direction == "long" else "BUY"
+        tp = trading.TradingOrder(purpose="tp", leg=0, filled_qty=Decimal(tp_qty), status="filled")
+        fill = SimpleNamespace(order_id="entry-id", qty=entry.filled_qty, commission_asset="USDT",
+                               commission=entry.filled_qty * entry.avg_price * Decimal("0.0002"))
+        session = Session(groups=[[fill], [fill], [fill]])
+        position = trading.Position(direction, Decimal(quantity) - Decimal(tp_qty), Decimal(average), Decimal(average))
+        rules = SymbolRules(Decimal("0.01"), Decimal("0.01"), Decimal(5))
+        try:
+            await engine.sync_orders(session, client, p, [entry, old, tp], position, True, rules, False)
+            replacement = next(r for r in session.added if isinstance(r, trading.TradingOrder) and r.purpose == "stop")
+            assert replacement.trigger_price == Decimal(expected)
+            # Bybit ACK 尚未确认，原止损继续保护；币安条件单同步确认后即可撤旧单。
+            assert client.canceled == ([] if exchange == "bybit" else ["ap3"])
+            replacement.status = "new"
+            client.canceled.clear()
+            await engine.sync_orders(session, client, p, [entry, old, tp, replacement], position, True, rules, False)
+            assert client.canceled == ["ap3"]
+            # 已存在更紧的保护时不放宽，也不因余仓变少而用止盈利润抵扣成本。
+            replacement.trigger_price += Decimal(1) if direction == "long" else Decimal(-1)
+            client.created.clear()
+            await engine.sync_orders(session, client, p, [entry, tp, replacement], position, True, rules, False)
+            assert all(spec.purpose not in ("stop", "entry") for spec in client.created)
+        finally:
+            await engine.market.http.aclose()
+    asyncio.run(check())
+
+
+def test_missing_entry_fees_leave_existing_protection_untouched(trading, monkeypatch):
+    async def check():
+        engine, client = trading.Executor(), Client()
+        p, entry, old = plan(trading), order(trading, "entry"), order(trading, "stop")
+        entry.exchange_id, entry.filled_qty, entry.avg_price = "entry-id", Decimal(1), Decimal(100)
+        entry.created_at = datetime.now(UTC)
+        tp = trading.TradingOrder(purpose="tp", leg=0, filled_qty=Decimal("0.6"), status="filled")
+        monkeypatch.setattr(client, "trades", AsyncMock(return_value=[]), raising=False)
+        monkeypatch.setattr(trading, "save_fills", AsyncMock())
+        try:
+            with pytest.raises(ExchangeError, match="手续费尚未完整同步"):
+                await engine.sync_orders(Session(groups=[[], []]), client, p, [entry, old, tp],
+                                         trading.Position("long", Decimal("0.4"), Decimal(100), Decimal(101)), True, RULES, False)
+            assert client.created == client.canceled == []
+            assert client.trades.await_count == 1
+        finally:
+            await engine.market.http.aclose()
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("asset", ["USDT", "BNB"])
+def test_entry_fees_recover_complete_partial_fills_without_using_realized_profit(trading, monkeypatch, asset):
+    async def check():
+        engine, client = trading.Executor(), Client()
+        entry = order(trading, "entry")
+        entry.exchange_id, entry.filled_qty = "entry-id", Decimal(1)
+        entry.created_at = datetime.now(UTC)
+        fills = [SimpleNamespace(order_id="entry-id", qty=Decimal("0.4"), commission_asset=asset, commission=Decimal("0.008")),
+                 SimpleNamespace(order_id="entry-id", qty=Decimal("0.6"), commission_asset=asset, commission=Decimal("0.033"))]
+        session = Session(groups=[fills[:1], fills])
+        monkeypatch.setattr(client, "trades", AsyncMock(return_value=[]), raising=False)
+        monkeypatch.setattr(trading, "save_fills", AsyncMock())
+        try:
+            if asset == "USDT":
+                assert await engine.entry_fee_per_unit(session, client, "BTCUSDT", [entry]) == Decimal("0.041")
+            else:
+                with pytest.raises(ExchangeError, match="手续费不是 USDT"):
+                    await engine.entry_fee_per_unit(session, client, "BTCUSDT", [entry])
+            assert client.trades.await_count == 1
         finally:
             await engine.market.http.aclose()
     asyncio.run(check())
@@ -109,7 +220,7 @@ def test_rejected_replacement_does_not_cancel_existing_stop(trading, monkeypatch
         p = plan(trading)
         try:
             protected = await engine.sync_orders(session, client, p, [order(trading, "stop")],
-                                                  trading.Position("long", Decimal(1), Decimal(100), Decimal(100), Decimal(101)), False, RULES, False)
+                                                  trading.Position("long", Decimal(1), Decimal(100), Decimal(101)), False, RULES, False)
             assert not protected and client.canceled == []
             assert p.plan_status == "closing" and p.close_reason == "stop_failed"
         finally:
@@ -162,7 +273,7 @@ def test_unmanaged_requires_full_reduce_only_stop(trading, kind, quantity, reduc
     async def check():
         engine, session, client = trading.Executor(), Session(0), Client()
         try:
-            await engine.unmanaged(session, client, "BTCUSDT", trading.Position("long", Decimal(1), Decimal(100), Decimal(100), Decimal(101)),
+            await engine.unmanaged(session, client, "BTCUSDT", trading.Position("long", Decimal(1), Decimal(100), Decimal(101)),
                                    {"external": {"side": "SELL", "orderType": kind, "quantity": quantity, "reduceOnly": reduce_only, "closePosition": False}})
             assert [spec.type for spec in client.created] == ["MARKET"]
         finally:

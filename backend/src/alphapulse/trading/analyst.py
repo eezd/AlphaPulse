@@ -64,9 +64,9 @@ INSTRUCTIONS = f"""你是 AlphaPulse 的模拟盘交易分析器：为一个币�
 - 最后必须调用一次 submit_trade_plan。校验不通过会返回原因，按原因修正后重新提交。
 
 ## 程序如何执行
-- 计划（action=plan）被采纳后，程序立即在 entry_price 挂限价单（maker 手续费），同时在交易所挂只减仓止损（按标记价触发）。到 valid_hours 仍未成交则撤单，并重新请你分析。
+- 计划（action=plan）被采纳后，程序立即在 entry_price 挂限价单（不保证 maker，手续费以实际成交为准），同时在交易所挂只减仓止损（按标记价触发）。到 valid_hours 仍未成交则撤单，并重新请你分析。
 - 止损：区间远端外 {rules.STOP_ATR_FACTOR}×ATR14(5m)，做多放在 zone_low 下方，做空放在 zone_high 上方；且距挂单价至少 {rules.MIN_STOP_ATR}×ATR14(5m)，挂单价贴近远端时按这条算。
-- 止盈：按成交均价，做多 {_ladder("long")}；做空 {_ladder("short")}。止盈 1 成交后撤销未成交的入场部分，止损移到保本价。
+- 止盈：按成交均价，做多 {_ladder("long")}；做空 {_ladder("short")}。止盈 1 成交后撤销未成交的入场部分，止损移到余仓成本保本价（按实际入场手续费分摊与预计平仓费计算，不用已止盈利润抵扣；资金费和滑点另计）。
 - 首次成交后最长持仓 {rules.MAX_HOLD_HOURS} 小时，到时市价平仓。平仓后程序会请你重新分析。
 - 仓位：单笔风险为该币交易资金的 {_pct(rules.RISK_PCT)}，置信度低时减半；名义仓位不超过 {rules.MAX_LEVERAGE} 倍该币交易资金。
 - reevaluate：任一条件满足时程序重新请你分析（最多 {rules.MAX_REEVALUATE} 个），用来表达另一侧方向、需要重新划区的位置。
@@ -113,8 +113,10 @@ def plan_brief(decision: dict, sizing: dict | None) -> dict:
 
 
 def trade_brief(a: TradingAnalysis) -> str:
-    setup = a.decision["setup"]
-    head = (f"#{a.id} {DIRECTION_LABELS[a.decision['direction']]}，区间 {setup['zone_low']}–{setup['zone_high']}，"
+    # 技术验收成交只有执行参数，没有模型划区，摘要须如实标注缺失的区间。
+    setup = a.sizing.get("setup")
+    zone = f"区间 {setup['zone_low']}–{setup['zone_high']}" if setup is not None else "区间未记录"
+    head = (f"#{a.id} {DIRECTION_LABELS[a.sizing['direction']]}，{zone}，"
             f"挂单 {a.sizing['entry']['price']}，{local(a.first_fill_at)} 成交")
     if a.plan_status != "closed":
         return f"{head}，{'持仓中' if a.plan_status == 'open' else '平仓中'}"

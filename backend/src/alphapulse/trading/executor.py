@@ -12,7 +12,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
+from decimal import Decimal
 
 from sqlalchemy import BigInteger, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,7 +24,8 @@ from alphapulse.models import TradingAccount, TradingAnalysis, TradingCredential
 from alphapulse.trading.client import OWN_CLIENT_ID, DemoClient, ExchangeError, create_client, credential_key, mark_price, symbol_rules
 from alphapulse.trading.fills import save_fills, sync_fills
 from alphapulse.trading.plan import (
-    MAX_HOLD_HOURS, TAKE_PROFIT_STEPS, OrderSpec, SymbolRules, condition_met, desired_orders, diff_orders, round_to_step,
+    ESTIMATED_CLOSE_FEE_RATES, MAX_HOLD_HOURS, TAKE_PROFIT_STEPS, OrderSpec, SymbolRules, condition_met, desired_orders,
+    diff_orders, remaining_break_even,
 )
 from alphapulse.trading.positions import build_positions
 from alphapulse.trading.schedule import request_analysis
@@ -57,7 +58,6 @@ class Position:
     side: str  # long / short
     qty: Decimal
     entry: Decimal
-    break_even: Decimal
     mark: Decimal
 
 
@@ -357,7 +357,7 @@ class Executor:
             if p["symbol"] == name and Decimal(p["positionAmt"]) != 0:
                 amount = Decimal(p["positionAmt"])
                 position = Position("long" if amount > 0 else "short", abs(amount), Decimal(p["entryPrice"]),
-                                    Decimal(p["breakEvenPrice"]), Decimal(p["markPrice"]))
+                                    Decimal(p["markPrice"]))
 
         # 交易所上本程序的单，但流水里不是活动状态：孤儿单，撤掉（用户手动下的单不动）
         active_ids = {f"ap{r.id}" for r in rows if r.status in ACTIVE_ORDER_STATUSES}
@@ -528,6 +528,25 @@ class Executor:
                                  message=f"{symbol} 有持仓 {fmt(position.qty)} 但没有计划也没有止损，市价平仓"))
         await self.place(session, client, symbol, None, "close", OrderSpec("close", None, close_side, "MARKET", None, None, position.qty))
 
+    async def entry_fee_per_unit(self, session: AsyncSession, client: DemoClient, symbol: str, entries: list[TradingOrder]) -> Decimal:
+        """只分摊本计划入场手续费；成交未同步时补取一次，仍不完整则保留现有保护并等待下轮。"""
+        if not entries or any(r.exchange_id is None for r in entries):
+            raise RuntimeError("计算余仓保本价缺少已成交入场单或交易所订单 ID")
+        query = select(TradingFill).where(
+            TradingFill.exchange == client.exchange, TradingFill.symbol == symbol,
+            TradingFill.order_id.in_([r.exchange_id for r in entries]),
+        )
+        for attempt in range(2):
+            fills = list(await session.scalars(query))
+            if all(sum((f.qty for f in fills if f.order_id == r.exchange_id), Decimal(0)) == r.filled_qty for r in entries):
+                if any(f.commission_asset != "USDT" for f in fills):
+                    raise ExchangeError(None, None, "入场手续费不是 USDT，无法计算余仓保本价")
+                return sum((f.commission for f in fills), Decimal(0)) / sum(r.filled_qty for r in entries)
+            if attempt == 0:
+                since = min(r.created_at for r in entries) - timedelta(seconds=1)
+                await save_fills(session, client.exchange, await client.trades(symbol, int(since.timestamp() * 1000)))
+        raise ExchangeError(None, None, "入场成交手续费尚未完整同步，暂不能调整余仓保本价")
+
     async def sync_orders(self, session: AsyncSession, client: DemoClient, plan: TradingAnalysis, plan_rows: list[TradingOrder],
                           position: Position | None, running: bool, rules: SymbolRules, block_entries: bool) -> bool:
         if client.exchange == "bybit" and plan.plan_status != "closing" and any(r.purpose == "stop" and r.status in ("rejected", "failed") for r in plan_rows):
@@ -555,9 +574,12 @@ class Executor:
                      for j in range(len(TAKE_PROFIT_STEPS[sizing["direction"]]))]
         stop = Decimal(sizing["entry"]["stop"])
         if tp_filled[0] > 0 and position is not None:
-            # 止盈 1 后止损移到保本价：做多向上取整、做空向下取整，保证不亏；只收紧不放宽
-            break_even = round_to_step(position.break_even, rules.tick_size, ROUND_CEILING if long else ROUND_FLOOR)
-            stop = max(stop, break_even) if long else min(stop, break_even)
+            fee_per_unit = await self.entry_fee_per_unit(session, client, plan.symbol, entry_rows)
+            break_even = remaining_break_even(sizing["direction"], average, fee_per_unit,
+                                              ESTIMATED_CLOSE_FEE_RATES[client.exchange], rules.tick_size)
+            # 已确认的保护只收紧；交易所的整体保本价会被部分止盈利润拉低，不能用于余仓。
+            protections = [stop, break_even, *(r.trigger_price for r in active if r.purpose == "stop" and r.status == "new")]
+            stop = max(protections) if long else min(protections)
 
         # 止盈 1 成交后不再加仓
         entries_open = running and utcnow() < plan.valid_until and tp_filled[0] == 0
@@ -621,7 +643,7 @@ class Executor:
                 if amount != 0:
                     positions[p["symbol"]] = Position(
                         side="long" if amount > 0 else "short", qty=abs(amount), entry=Decimal(p["entryPrice"]),
-                        break_even=Decimal(p["breakEvenPrice"]), mark=Decimal(p["markPrice"]),
+                        mark=Decimal(p["markPrice"]),
                     )
             # 交易列表为空时也要同步：手动成交同样计入历史仓位。
             # 用独立会话：失败回滚会让会话里的对象全部过期，不能影响下面的对账

@@ -35,6 +35,8 @@ TAKE_PROFIT_STEPS: dict[str, tuple[tuple[Decimal, Decimal], ...]] = {
 MAX_REEVALUATE = 4
 # 风险按吃单手续费保守估算（C1 实测 taker 0.04%；限价入场实际是 maker 0.02%）
 TAKER_FEE_RATE = Decimal("0.0004")
+# 余仓保本的预计平仓费率：当前模拟盘基础吃单费率；实际成交费以流水为准。
+ESTIMATED_CLOSE_FEE_RATES = {"binance": Decimal("0.0004"), "bybit": Decimal("0.00055")}
 # 例行分析周期：跟 1h 收盘
 ROUTINE_HOURS = 1
 # 同一个币两次自动分析的最短间隔
@@ -184,6 +186,14 @@ def size_entry(direction: Direction, price: Decimal, stop: Decimal, *, capital: 
     }
 
 
+def remaining_break_even(direction: Direction, average: Decimal, entry_fee_per_unit: Decimal,
+                         close_fee_rate: Decimal, tick: Decimal) -> Decimal:
+    """余仓独立覆盖入场分摊费用及预计平仓费用，不用已止盈利润抵扣。资金费和滑点不在本估算内。"""
+    if direction == "long":
+        return round_to_step((average + entry_fee_per_unit) / (1 - close_fee_rate), tick, ROUND_CEILING)
+    return round_to_step((average - entry_fee_per_unit) / (1 + close_fee_rate), tick, ROUND_FLOOR)
+
+
 def take_profit_targets(direction: Direction, average: Decimal, quantity: Decimal, rules: SymbolRules) -> list[tuple[Decimal, Decimal]]:
     """止盈阶梯（价格，数量）：价格 = 成交均价 ×（1 ± 涨跌幅），向靠近均价的方向取整；数量按比例拆分"""
     steps = TAKE_PROFIT_STEPS[direction]
@@ -245,7 +255,7 @@ def check_setup(plan: TradePlan, ctx: PlanContext) -> dict:
     except PlanError as e:
         raise PlanError([f"止损 {stop}（区间{'下沿' if long else '上沿'}外 {STOP_ATR_FACTOR}×ATR(5m)，且距挂单价至少 "
                          f"{MIN_STOP_ATR}×ATR(5m)，ATR={ctx.atr.quantize(rules.tick_size)}）：{e}。"
-                         "区间太宽或挂单价离区间远端太远，请收窄区间或调整挂单价"]) from e
+                         "请在真实结构区间内调整挂单价，或选择其他有依据的区间；不得为通过校验裁剪区间"]) from e
     return {
         "direction": direction,
         "setup": {"zone_low": str(setup.zone_low), "zone_high": str(setup.zone_high)},
