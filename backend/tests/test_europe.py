@@ -26,12 +26,22 @@ def fixture(name):
     ("ea_hicp", "ea_flash", "2026-09", "flash", {"hicp_yoy": "3.8", "hicp_mom": "0.6", "core_hicp_yoy": "2.5"}),
     ("ea_jobs", "ea_jobs", "2026-08", None, {"ilo_unemployment": "6.4"}),
     ("ea_jobs", "ea_jobs_2025_01", "2024-11", None, {"ilo_unemployment": "6.3"}),
+    ("ea_gdp", "ea_gdp_2026_06", "2026-Q1", "final", {"gdp_qoq": "-0.2", "gdp_yoy": "0.3"}),
     ("ea_gdp", "ea_gdp", "2026-Q2", "preliminary", {"gdp_qoq": "0.4", "gdp_yoy": "1"}),
     ("ea_gdp", "ea_gdp_2025_01", "2024-Q4", "preliminary", {"gdp_qoq": "0", "gdp_yoy": "0.9"}),
     ("ea_gdp", "ea_gdp_flash", "2026-Q2", "flash", {"gdp_qoq": "0.4", "gdp_yoy": "1"}),
     ("ea_gdp", "ea_gdp_final", "2026-Q2", "final", {"gdp_qoq": "0.6", "gdp_yoy": "1.2"}),
+    ("de_cpi", "de_cpi_2026_04_corrected", "2026-04", "final", {"eu_cpi_yoy": "2.9", "eu_cpi_mom": "0.6", "hicp_yoy": "2.9", "hicp_mom": "0.5"}),
+    ("de_cpi", "de_cpi_2024_12_final", "2024-12", "final", {"eu_cpi_yoy": "2.6", "eu_cpi_mom": "0.5", "hicp_yoy": "2.8", "hicp_mom": "0.7"}),
+    ("de_cpi", "de_cpi_2025_02_final", "2025-02", "final", {"eu_cpi_yoy": "2.3", "eu_cpi_mom": "0.4", "hicp_yoy": "2.6", "hicp_mom": "0.5"}),
+    ("de_cpi", "de_cpi_2026_08_preliminary", "2026-08", "preliminary", {"eu_cpi_yoy": "2.9", "eu_cpi_mom": "0.2", "hicp_yoy": "2.9", "hicp_mom": "0.2"}),
+    ("de_cpi", "de_cpi_2026_06_final", "2026-06", "final", {"eu_cpi_yoy": "2.3", "eu_cpi_mom": "-0.3", "hicp_yoy": "2.4", "hicp_mom": "-0.2"}),
+    ("ea_jobs", "ea_jobs_2026_03", "2026-01", None, {"ilo_unemployment": "6.1"}),
     ("de_cpi", "de_cpi", "2026-09", "final", {"eu_cpi_yoy": "3.3", "eu_cpi_mom": "0.6", "hicp_yoy": "3.3", "hicp_mom": "0.6"}),
     ("de_gdp", "de_gdp", "2026-Q2", "initial", {"gdp_qoq": "0.2", "gdp_yoy": "0.9"}),
+    ("de_jobs", "de_jobs_2025_12", "2025-12", None, {"ilo_unemployment": "3.8"}),
+    ("de_jobs", "de_jobs_2025_08", "2025-08", None, {"ilo_unemployment": "3.7"}),
+    ("de_jobs", "de_jobs_2025_09", "2025-09", None, {"ilo_unemployment": "3.9"}),
     ("de_jobs", "de_jobs", "2026-08", None, {"ilo_unemployment": "4"}),
     ("fr_cpi", "fr_cpi", "2026-09", "final", {"eu_cpi_yoy": "3.1", "eu_cpi_mom": "-0.3", "hicp_yoy": "3.4", "hicp_mom": "-0.3"}),
     ("fr_cpi", "fr_cpiflash", "2026-09", "preliminary", {"eu_cpi_yoy": "3", "eu_cpi_mom": "-0.3", "hicp_yoy": "3.4", "hicp_mom": "-0.4"}),
@@ -71,6 +81,14 @@ def test_historical_eurostat_results_preserve_previous_values_and_real_publicati
     jobs = parse_announcement("ea_jobs", fixture("ea_jobs_2025_01.html"))
     assert jobs.at == datetime(2025, 1, 7, 10, tzinfo=UTC)
     assert jobs.values["ilo_unemployment"]["previous"] == "6.3"
+
+
+def test_eurostat_unemployment_uses_current_composition_and_rejects_mismatched_totals():
+    body = fixture("ea_jobs_2026_03.html")
+    result = parse_announcement("ea_jobs", body)
+    assert result.values["ilo_unemployment"] == {"actual": "6.1", "previous": "6.2"}
+    with pytest.raises(ValueError, match="口径不一致"):
+        parse_announcement("ea_jobs", body.replace("Euro area 21", "Other composition").replace("Euro area 20", "Euro area"))
 
 
 def test_eurostat_gdp_does_not_take_an_employment_table_when_the_gdp_table_is_missing():
@@ -141,6 +159,14 @@ def test_source_filters_exclude_wrong_statistical_contracts():
     assert official_url("ecb", "https://www.ecb.europa.eu//press/key/date/a.en.html") == "https://www.ecb.europa.eu/press/key/date/a.en.html"
     with pytest.raises(ValueError, match="官方 HTTPS"):
         official_url("ons", "https://example.com/private")
+
+
+@pytest.mark.parametrize("title", ["UK Labour Market January 2025", "UK Labour Market: October 2026"])
+def test_ons_jobs_archive_titles_with_and_without_colon_are_supported(title):
+    assert family_for("ons", title) == ("uk_jobs", None)
+    assert relevant_news("ons", title, "")
+    assert family_for("ons", title + " time series") is None
+    assert not relevant_news("ons", title + " time series", "")
 
 
 def test_missing_values_fail_without_zero_fallback():

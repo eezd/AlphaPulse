@@ -92,7 +92,7 @@ def relevant_news(source: str, title: str, url: str) -> bool:
     if source == "eurostat":
         return "inflation" in title or "unemployment" in title or bool(re.search(r"\bgdp\b.*(?:up|down|stable|growth|increased|decreased)|(?:growth|increase|decrease).*\bgdp\b", title))
     if source == "ons":
-        return "time series" not in title and not url.endswith("timeseries") and bool(re.match(r"(?:consumer price inflation, uk:|labour market overview, uk:|uk labour market:|gdp first quarterly estimate, uk:|gdp quarterly national accounts, uk:)", title))
+        return "time series" not in title and not url.endswith("timeseries") and bool(re.match(r"(?:consumer price inflation, uk:|labour market overview, uk:|uk labour market(?::|\s)|gdp first quarterly estimate, uk:|gdp quarterly national accounts, uk:)", title))
     if source == "destatis":
         return any(t in title for t in ("verbraucherpreis", "inflationsrate", "bruttoinlandsprodukt", "erwerbstätig", "erwerbslos"))
     if source == "insee":

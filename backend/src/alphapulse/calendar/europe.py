@@ -93,7 +93,7 @@ def family_for(source: str, title: str) -> tuple[str, str | None] | None:
             return None
         if t.startswith("consumer price inflation, uk:"):
             return "uk_cpi", None
-        if t.startswith(("labour market overview, uk:", "uk labour market:")):
+        if t.startswith("labour market overview, uk:") or re.match(r"uk labour market(?::|\s)", t):
             return "uk_jobs", None
         if t.startswith("gdp first quarterly estimate, uk:"):
             return "uk_gdp", "initial"
@@ -105,7 +105,7 @@ def family_for(source: str, title: str) -> tuple[str, str | None] | None:
             return "de_cpi", "preliminary" if "preliminary" in t or "expected" in t else "final"
         if "gross domestic product" in t:
             return "de_gdp", "initial" if "first release" in t else "final"
-        if "monthly labour market" in t or t.startswith("employment in "):
+        if "monthly labour market" in t or re.search(r"\bemployment\b.*\b(?:" + "|".join(m.lower() for m in MONTHS) + r") 20\d\d\b", t):
             return "de_jobs", None
     if source == "insee":
         if "prix à la consommation" in t:
@@ -230,8 +230,12 @@ def row_named(rows: list[list[str]], label: str) -> list[str]:
 
 
 def eurostat_row(s: Selector, label: str) -> list[str]:
+    # 2026 年部分公告同时列 EA21/EA20；正文采用 EA21，旧版仍直接写 Euro area。
+    rows = table_rows(s)
+    if label == "Euro area" and any(row and row[0] == "Euro area 21" for row in rows):
+        label = "Euro area 21"
     # Eurostat 的数据标志 e/p 紧贴数值书写；仅在这一来源的表格边界剥离。
-    return [re.sub(r"^(" + N + r")\s*[ep]$", r"\1", cell) for cell in row_named(table_rows(s), label)]
+    return [re.sub(r"^(" + N + r")\s*[ep]$", r"\1", cell) for cell in row_named(rows, label)]
 
 
 def publication(source: str, s: Selector, text: str, family: str, stage: str | None) -> datetime:
@@ -325,6 +329,8 @@ def parse_announcement(family: str, body: str) -> Announcement:
                 raise ValueError("Eurostat 缺少全体失业率表，不能使用青年或分性别失业率")
             row = eurostat_row(table, "Euro area")
             count = (len(row) - 1) // 2
+            if len(row) != 1 + count * 2 or count < 2 or numeric(row[count]) != numeric(p[2]):
+                raise ValueError("Eurostat 全体失业率表格与正文口径不一致")
             values["ilo_unemployment"] = value(row[count], row[count - 1])
     elif source == "ons":
         stage = "initial" if "first quarterly estimate" in title.lower() else "final" if family == "uk_gdp" else None
@@ -381,13 +387,15 @@ def parse_announcement(family: str, body: str) -> Announcement:
     elif source == "destatis":
         if family == "de_cpi":
             stage = "preliminary" if "expected" in title.lower() else "final"
-            p = re.search(r"Consumer price index,\s*([A-Z][a-z]+ 20\d\d)", text)
+            # 按段落读正文，保留年份中内联更正标签两侧的连续文本。
+            cpi_text = compact(" ".join(s.css("p").xpath("string(.)").getall()))
+            p = re.search(r"Consumer price index,\s*([A-Z][a-z]+)(?: and year)? (20\d\d)", cpi_text)
             if p is None:
                 raise ValueError("Destatis CPI 缺少统计期")
-            period = period_of(p[1])
+            period = period_of(f"{p[1]} {p[2]}")
             for label, prefix in (("Consumer price index", "eu_cpi"), ("Harmonised index of consumer prices", "hicp")):
-                pattern = label + r",[^:]+:\s*(" + N + r")% on the same month a year earlier[^%]*?\s(" + N + r")% on the previous month"
-                m = re.search(pattern, text)
+                pattern = label + r",\s*" + p[1] + r"(?: and year)? " + p[2] + r":?\s*(" + N + r")% on the same month a year earlier(?:\s*\([^)]*\))?\s*(" + N + r")% on the previous month"
+                m = re.search(pattern, cpi_text)
                 if m is None:
                     raise ValueError(f"Destatis 公告缺少 {label} 年率/月率")
                 values[prefix + "_yoy"], values[prefix + "_mom"] = value(m[1]), value(m[2])
@@ -400,7 +408,7 @@ def parse_announcement(family: str, body: str) -> Announcement:
             values["gdp_qoq"] = match_value(r"(" + N + r")% on the previous quarter \(price, seasonally and calendar adjusted\)", text)
             values["gdp_yoy"] = match_value(r"(" + N + r")% on the same quarter a year earlier \(price and calendar adjusted\)", text)
         else:
-            m = re.search(r"Adjusted unemployment rate at (" + N + r")% in ([A-Z][a-z]+ 20\d\d)", text)
+            m = re.search(r"Adjusted unemployment rate (?:at|remains at|rises to) (" + N + r")% in ([A-Z][a-z]+ 20\d\d)", text)
             if m is None:
                 raise ValueError("Destatis 公告缺少经季调 ILO 失业率")
             period = period_of(m[2])
