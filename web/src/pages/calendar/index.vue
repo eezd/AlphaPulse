@@ -13,6 +13,7 @@ const zone = "Asia/Shanghai"
 const today = () => dayjs().tz(zone).format("YYYY-MM-DD")
 const selected = ref(today())
 const days = ref(7)
+const rangeEnd = computed(() => dayjs(selected.value).add(days.value - 1, "day").format("YYYY-MM-DD"))
 const data = ref<CalendarData | null>(null)
 const loading = ref(false)
 const failed = ref(false)
@@ -123,7 +124,7 @@ onUnmounted(() => {
     <el-card shadow="never" class="calendar-card">
       <div class="calendar-toolbar">
         <el-button :icon="ArrowLeft" circle aria-label="上一段日期" @click="move(-1)" />
-        <el-date-picker v-model="selected" type="date" value-format="YYYY-MM-DD" :clearable="false" />
+        <el-date-picker v-model="selected" type="date" value-format="YYYY-MM-DD" :clearable="false" aria-label="查询起始日期" />
         <el-button :icon="ArrowRight" circle aria-label="下一段日期" @click="move(1)" />
         <el-button @click="selected = today()">
           今天
@@ -144,6 +145,9 @@ onUnmounted(() => {
           刷新
         </el-button>
       </div>
+      <p class="calendar-range" aria-live="polite">
+        查询范围：{{ selected }} 至 {{ rangeEnd }}（北京时间，含首尾日期）
+      </p>
       <p class="calendar-note">
         三星标红，四星及以上为主要事件。影响针对 BTC/ETH：优先比较预期，无预期时按前值及利率通道给参考倾向，依据不足显示待判断。
       </p>
@@ -264,6 +268,12 @@ h1 {
 }
 .calendar-toolbar {
   padding-bottom: 12px;
+}
+.calendar-range {
+  margin: 0;
+  color: #172b4d;
+  font-size: 14px;
+  font-weight: 600;
 }
 .country-select {
   width: 135px;
