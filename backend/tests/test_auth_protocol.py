@@ -238,7 +238,14 @@ def test_protocol_status_validation_redaction_openapi(auth_app, monkeypatch):
     monkeypatch.setattr(market, "tradable_symbols", AsyncMock(return_value=[{"symbol": "BTCUSDT", "base": "BTC", "quote": "USDT", "price_precision": 2, "volume_precision": 5}]))
     async def check():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://test") as client:
-            assert (await client.get("/api/health")).json() == {"code": 0, "data": {"status": "ok"}, "message": ""}
+            assert (await client.get("/api/health")).json() == {
+                "code": 0, "data": {"status": "ok", "version": "source", "commit": "unknown"}, "message": "",
+            }
+            monkeypatch.setenv("APP_VERSION", "20261029-aaaaaaaa")
+            monkeypatch.setenv("APP_COMMIT", "a" * 40)
+            assert (await client.get("/api/health")).json()["data"] == {
+                "status": "ok", "version": "20261029-aaaaaaaa", "commit": "a" * 40,
+            }
             invalid = await client.post("/api/auth/login", json={"password": {"sensitive": "do-not-echo"}})
             assert invalid.status_code == 422 and invalid.json()["code"] == 422
             assert "do-not-echo" not in invalid.text and "input" not in invalid.text

@@ -1,3 +1,5 @@
+import os
+
 from fastapi import Depends, FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import RedirectResponse
@@ -31,7 +33,8 @@ app.include_router(calendar.router)
 
 @app.get("/api/health", include_in_schema=False)
 async def health() -> ApiResponse[dict[str, str]]:
-    return success({"status": "ok"})
+    return success({"status": "ok", "version": os.environ.get("APP_VERSION", "source"),
+                    "commit": os.environ.get("APP_COMMIT", "unknown")})
 
 
 @app.get("/api/openapi.json", include_in_schema=False, dependencies=[Depends(require_admin)])

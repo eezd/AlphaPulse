@@ -1,0 +1,44 @@
+name: Main CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: alphapulse-main
+  cancel-in-progress: false
+jobs:
+  check-and-build:
+    if: gitea.event_name != 'pull_request' || gitea.event.pull_request.head.repo.full_name == gitea.repository
+    runs-on: docker
+    timeout-minutes: 55
+    env:
+      GITEA_SHA: ${{ gitea.sha }}
+      GITEA_REF: ${{ gitea.ref }}
+      GITEA_EVENT_NAME: ${{ gitea.event_name }}
+      CI_RESOURCE_ID: main-${{ gitea.run_id }}-${{ gitea.run_attempt }}
+      DOCKER_CONFIG: /tmp/alphapulse-docker-auth
+    steps:
+      - name: Install container tools
+        run: apk add --no-cache python3 nodejs git docker-cli-buildx docker-cli-compose
+      - uses: https://github.com/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Test CI control behavior
+        run: python3 -m unittest discover -s scripts/tests -v
+      - name: Check, build and verify isolated services
+        run: python3 scripts/ci.py check
+      - uses: https://github.com/actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: build-receipt
+          path: build.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Clean this attempt only
+        if: always()
+        run: |
+          python3 scripts/ci.py cleanup
+          rm -rf "$DOCKER_CONFIG"

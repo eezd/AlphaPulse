@@ -1,0 +1,83 @@
+name: Development CI
+on:
+  push:
+    branches: [dev]
+permissions:
+  contents: read
+concurrency:
+  group: alphapulse-dev
+  cancel-in-progress: false
+jobs:
+  check-and-build:
+    if: gitea.event_name != 'pull_request' || gitea.event.pull_request.head.repo.full_name == gitea.repository
+    runs-on: docker
+    timeout-minutes: 55
+    container:
+      image: docker:29-cli
+      volumes:
+        - /docker/gitea/mirrors/AlphaPulse:/docker/gitea/mirrors/AlphaPulse
+    outputs:
+      backend: ${{ steps.publish.outputs.backend }}
+      web: ${{ steps.publish.outputs.web }}
+      version: ${{ steps.publish.outputs.version }}
+      commit: ${{ steps.publish.outputs.commit }}
+    env:
+      GITEA_SHA: ${{ gitea.sha }}
+      GITEA_REF: ${{ gitea.ref }}
+      GITEA_EVENT_NAME: ${{ gitea.event_name }}
+      CI_RESOURCE_ID: dev-${{ gitea.run_id }}-${{ gitea.run_attempt }}
+      DOCKER_CONFIG: /tmp/alphapulse-docker-auth
+    steps:
+      - name: Install container tools
+        run: apk add --no-cache python3 nodejs git docker-cli-buildx docker-cli-compose
+      - uses: https://github.com/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Test CI control behavior
+        run: python3 -m unittest discover -s scripts/tests -v
+      - name: Check, build and verify isolated services
+        run: python3 scripts/ci.py check
+      - name: Publish verified development images
+        id: publish
+        if: gitea.event_name == 'push' && gitea.ref == 'refs/heads/dev'
+        env:
+          ALPHAPULSE_GITEA_TOKEN: ${{ secrets.ALPHAPULSE_GITEA_TOKEN }}
+        run: |
+          mkdir -p "$DOCKER_CONFIG"
+          chmod 700 "$DOCKER_CONFIG"
+          printf '%s' "$ALPHAPULSE_GITEA_TOKEN" | docker login git.134333.xyz --username eezd --password-stdin
+          python3 scripts/ci.py publish
+      - uses: https://github.com/actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: build-receipt
+          path: build.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Clean this attempt only
+        if: always()
+        run: |
+          python3 scripts/ci.py cleanup
+          rm -rf "$DOCKER_CONFIG"
+
+  deploy-development:
+    needs: check-and-build
+    if: gitea.event_name == 'push' && gitea.ref == 'refs/heads/dev'
+    runs-on: docker
+    timeout-minutes: 15
+    container:
+      image: docker:29-cli
+      volumes:
+        - /docker/gitea/dev/AlphaPulse:/docker/gitea/dev/AlphaPulse
+    steps:
+      - name: Install container tools
+        run: apk add --no-cache python3 nodejs git docker-cli-compose
+      - uses: https://github.com/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: https://github.com/actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: build-receipt
+          path: .
+      - name: Deploy the current accepted dev commit
+        run: python3 scripts/deploy.py update

@@ -87,3 +87,5 @@
 - 后端验证：`cd backend && uv run pytest`、`uvx ruff check --select F,E9,B src tests`。前端验证：`cd web && pnpm lint:check && pnpm typecheck && pnpm test && pnpm build`；测试使用现有 pytest、Node 内置测试及 TS/Vue 编译器，不另加测试框架。
 - Redis DB 14 与其他应用共用，只操作 `ap:*`，禁止 FLUSHDB/FLUSHALL。测试隔离数据库、Redis、模型和交易 I/O，不读取生产凭据，不 Reset 用户 Chat 或改真实 Skills；不自动启动采集或交易。
 - 生产部署、重启、数据迁移执行、提交和推送均需本任务单独授权；不新增项目定时备份。本文件是唯一规范来源，目前没有其他工具规则入口；以后新增入口应链接本文件。
+
+- CI/CD：Gitea 为唯一源，GitHub 单向镜像全部业务分支/TAG/历史；dev push 通过隔离检查后自动部署唯一实例，main 仅独立检查，不部署或正式发版。DEV 按用户决定复用现有业务数据与配置，域名为 `alpha.134333.xyz`，实例目录 `/docker/gitea/dev/AlphaPulse`；测试仍必须隔离。部署、恢复和回退统一使用 `scripts/deploy.py` 与实例 `.deploy.lock`，不直接绕过锁更新容器；数据库迁移继续独立授权。操作说明见 `deploy/README.md`。

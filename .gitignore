@@ -4,3 +4,4 @@ backups/
 .venv/
 __pycache__/
 /docs/
+/build.json

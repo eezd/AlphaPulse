@@ -1,43 +1,56 @@
-name: alphapulse
+# Run through scripts/deploy.py so every deployment shares the instance lock.
+name: alphapulse-dev
 
 x-backend: &backend
-  build:
-    context: ../backend
-    dockerfile: ../deploy/Dockerfile.backend
-  image: alphapulse-backend
-  env_file: ../.env
+  image: ${ALPHAPULSE_BACKEND_IMAGE:?Set a verified backend digest}
+  env_file: .env
   restart: unless-stopped
+  stop_grace_period: 60s
   networks: [dev_default]
 
 services:
   api:
     <<: *backend
+    container_name: AlphaPulse-dev-api
     command: [uvicorn, alphapulse.api.main:app, --host, 0.0.0.0, --port, "8000", --proxy-headers, --forwarded-allow-ips, "172.18.0.0/16"]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
 
   crawler:
     <<: *backend
+    container_name: AlphaPulse-dev-crawler
     command: [python, -m, alphapulse.crawler.manager]
-    # 留时间给 scrapy 子进程优雅退出并刷完日志
-    stop_grace_period: 30s
 
   market:
     <<: *backend
+    container_name: AlphaPulse-dev-market
     command: [python, -m, alphapulse.market.worker]
 
   trader:
     <<: *backend
+    container_name: AlphaPulse-dev-trader
     command: [python, -m, alphapulse.trading.engine]
 
   calendar:
     <<: *backend
+    container_name: AlphaPulse-dev-calendar
     command: [python, -m, alphapulse.calendar.worker]
 
   web:
-    build:
-      context: ../web
-      dockerfile: ../deploy/Dockerfile.web
+    image: ${ALPHAPULSE_WEB_IMAGE:?Set a verified web digest}
+    container_name: AlphaPulse-dev
     restart: unless-stopped
-    depends_on: [api]
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, "http://127.0.0.1/api/health"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
     ports:
       - 127.0.0.1:21005:80
     networks: [dev_default]
