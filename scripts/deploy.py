@@ -89,7 +89,8 @@ def health(command, build):
     containers = inspect_services(command)
     require({c['Config']['Labels']['com.docker.compose.service'] for c in containers} == set(SERVICES), 'Missing services')
     for container in containers:
-        require(container['State']['Running'] and container['RestartCount'] == 0, 'Service exited or restarted')
+        require(container['State']['Running'] and not container['State']['Paused'] and container['RestartCount'] == 0,
+                'Service exited, paused or restarted')
         part = 'web' if container['Name'] == '/AlphaPulse-dev' else 'backend'
         expected = json.loads(run('docker', 'image', 'inspect', build['images'][part]['digest']))[0]['Id']
         require(container['Image'] == expected, 'Running image differs from the accepted digest')
@@ -119,7 +120,9 @@ def deploy(build, directory=INSTANCE):
         previous_running = []
         if previous:
             old_command = compose(directory, previous)
-            previous_running = [c['Config']['Labels']['com.docker.compose.service'] for c in inspect_services(old_command) if c['State']['Running']]
+            containers = inspect_services(old_command)
+            require(not any(c['State'].get('Paused') for c in containers), 'Recover paused services before deploying')
+            previous_running = [c['Config']['Labels']['com.docker.compose.service'] for c in containers if c['State']['Running']]
             for _ in range(60):
                 idle = json.loads(run('docker', 'exec', '-i', 'AlphaPulse-dev-api', 'python', '-', input=IDLE))
                 if not idle['busy']:
@@ -131,18 +134,17 @@ def deploy(build, directory=INSTANCE):
         if branch_head() != build['commit']:
             print('Skipped: dev advanced while preparing deployment')
             return
-        if previous and 'trader' in previous_running:
-            run('docker', 'pause', 'AlphaPulse-dev-trader')
-            try:
-                idle = json.loads(run('docker', 'exec', '-i', 'AlphaPulse-dev-api', 'python', '-', input=IDLE))
-                require(not idle['busy'], 'Analysis became active during preparation; retry after it completes')
-            except BaseException:
-                run('docker', 'unpause', 'AlphaPulse-dev-trader')
-                raise
         pending = {'build': build, 'previous': previous, 'previous_compose': old_compose,
-                   'previous_running': previous_running, 'started_at': time.time()}
+                   'previous_running': previous_running, 'started_at': time.time(), 'phase': 'preparing'}
         save(directory / 'deployment.pending.json', pending)
         try:
+            if previous and 'trader' in previous_running:
+                run('docker', 'pause', 'AlphaPulse-dev-trader')
+                idle = json.loads(run('docker', 'exec', '-i', 'AlphaPulse-dev-api', 'python', '-', input=IDLE))
+                require(not idle['busy'], 'Analysis became active during preparation; retry after it completes')
+            # Persist the transition before stopping any existing service.
+            save(directory / 'deployment.pending.json', {**pending, 'phase': 'updating'})
+            pending['phase'] = 'updating'
             if previous:
                 # Docker unpauses a paused container before delivering the stop signal.
                 run(*old_command, 'stop', 'trader')
@@ -160,6 +162,9 @@ def deploy(build, directory=INSTANCE):
             save(previous_file, build)
             (directory / 'deployment.pending.json').unlink()
         except BaseException:
+            if pending['phase'] == 'preparing':
+                restore(directory, pending)
+                raise
             # Never roll back or reset business data. A pending marker blocks subsequent jobs.
             subprocess.run(['docker', 'compose', '--project-name', 'alphapulse-dev', '--env-file', str(directory / 'images.env'),
                             '-f', str(directory / 'compose.yml'), 'stop'], capture_output=True)
@@ -172,6 +177,16 @@ def deploy(build, directory=INSTANCE):
 def restore(directory, pending):
     previous = pending['previous']
     require(previous is not None, 'No previous deployment exists; inspect the pending first-start failure')
+    trader = run('docker', 'ps', '-aq', '--filter', 'name=^/AlphaPulse-dev-trader$')
+    if trader:
+        state = json.loads(run('docker', 'inspect', trader))[0]['State']
+        if state['Paused']:
+            run('docker', 'unpause', trader)
+    if pending.get('phase') == 'preparing':
+        # No service has been stopped or replaced during preparation.
+        (directory / 'deployment.pending.json').unlink()
+        print('Restored preparation state; existing services were retained', flush=True)
+        return
     validate_images(previous)
     (directory / 'compose.yml').write_text(pending['previous_compose'])
     command = compose(directory, previous)

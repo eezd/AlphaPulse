@@ -81,6 +81,85 @@ class BuildTests(unittest.TestCase):
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
+class RecoveryTests(unittest.TestCase):
+    def test_pending_write_failure_never_pauses_trader(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            previous = {'images': {part: {'digest': 'synthetic'} for part in ci.IMAGES}}
+            ci.save(directory / 'deployment.json', previous)
+            (directory / 'compose.yml').write_text('synthetic')
+            running = [{'Config': {'Labels': {'com.docker.compose.service': 'trader'}}, 'State': {'Running': True}}]
+            with patch.object(deploy, 'INSTANCE', directory), patch.object(deploy, 'branch_head', return_value='a' * 40), \
+                    patch.object(deploy, 'validate_images'), patch.object(deploy, 'inspect_services', return_value=running), \
+                    patch.object(deploy, 'run', return_value='{"busy":0}') as run, \
+                    patch.object(deploy, 'save', side_effect=OSError('disk failure')):
+                with self.assertRaises(OSError):
+                    deploy.deploy({**previous, 'commit': 'a' * 40}, directory)
+                self.assertFalse(any(call.args[:2] == ('docker', 'pause') for call in run.call_args_list))
+
+    def test_busy_recheck_recovers_without_stopping_services(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            previous = {'images': {part: {'digest': 'synthetic'} for part in ci.IMAGES}}
+            ci.save(directory / 'deployment.json', previous)
+            (directory / 'compose.yml').write_text('synthetic')
+            running = [{'Config': {'Labels': {'com.docker.compose.service': 'trader'}}, 'State': {'Running': True}}]
+            idle = iter(['{"busy":0}', '{"busy":1}'])
+            def command(*args, **kwargs):
+                if kwargs.get('input') == deploy.IDLE:
+                    return next(idle)
+                if args[:2] == ('docker', 'inspect'):
+                    return '[{"State":{"Paused":true}}]'
+                if args[:2] == ('docker', 'ps'):
+                    return 'trader-id'
+                return '{}'
+            with patch.object(deploy, 'INSTANCE', directory), patch.object(deploy, 'branch_head', return_value='a' * 40), \
+                    patch.object(deploy, 'validate_images'), patch.object(deploy, 'inspect_services', return_value=running), \
+                    patch.object(deploy, 'run', side_effect=command) as run:
+                with self.assertRaisesRegex(RuntimeError, 'Analysis became active'):
+                    deploy.deploy({**previous, 'commit': 'a' * 40}, directory)
+                self.assertFalse(any('stop' in call.args for call in run.call_args_list))
+                self.assertTrue(any(call.args[:2] == ('docker', 'unpause') for call in run.call_args_list))
+            self.assertFalse((directory / 'deployment.pending.json').exists())
+
+    def test_preparation_recovery_unpauses_without_replacing_services(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            ci.save(directory / 'deployment.pending.json', {})
+            with patch.object(deploy, 'run', side_effect=['trader-id', '[{"State":{"Paused":true}}]', '']) as run, \
+                    patch.object(deploy, 'validate_images') as validate:
+                deploy.restore(directory, {'previous': {}, 'phase': 'preparing'})
+                run.assert_called_with('docker', 'unpause', 'trader-id')
+                validate.assert_not_called()
+            self.assertFalse((directory / 'deployment.pending.json').exists())
+
+    def test_failed_unpause_preserves_pending(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            ci.save(directory / 'deployment.pending.json', {})
+            with patch.object(deploy, 'run', side_effect=['trader-id', '[{"State":{"Paused":true}}]', RuntimeError('unpause failed')]):
+                with self.assertRaisesRegex(RuntimeError, 'unpause failed'):
+                    deploy.restore(directory, {'previous': {}, 'phase': 'preparing'})
+            self.assertTrue((directory / 'deployment.pending.json').exists())
+
+    def test_missing_or_wrong_github_identity_never_synchronizes(self):
+        for token, identity in [('', None), ('synthetic', {'login': 'other'})]:
+            with self.subTest(token=bool(token)), patch.dict(os.environ, {'ALL_GITHUB_TOKEN': token}), \
+                    patch.object(sys, 'argv', ['mirror.py']), patch.object(mirror, 'request_json', return_value=identity), \
+                    patch.object(mirror, 'synchronize') as sync:
+                with self.assertRaises(RuntimeError):
+                    mirror.main()
+                sync.assert_not_called()
+
+    def test_github_read_only_token_never_synchronizes(self):
+        with patch.dict(os.environ, {'ALL_GITHUB_TOKEN': 'synthetic'}), patch.object(sys, 'argv', ['mirror.py']), \
+                patch.object(mirror, 'request_json', side_effect=[{'login': 'eezd'}, {'permissions': {'push': False}}]), \
+                patch.object(mirror, 'synchronize') as sync:
+            with self.assertRaisesRegex(RuntimeError, 'write permission'):
+                mirror.main()
+            sync.assert_not_called()
+
+
 class MirrorTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()

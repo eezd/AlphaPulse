@@ -25,7 +25,7 @@ Automatic and manual updates use the same command and persistent lock:
 python3 scripts/deploy.py update --build /path/to/accepted/build.json
 ```
 
-The command checks image identities, current dev SHA and database migration compatibility before updating. It waits for active Chat/trading analysis, records pending state, then starts API/web before the workers. An outdated dev build is skipped. A pending deployment blocks updates. Do not invoke `docker compose up` directly to bypass the lock.
+The command checks image identities, current dev SHA and database migration compatibility before updating. It waits for active Chat/trading analysis, records pending state, then starts API/web before the workers. An outdated dev build is skipped. A pending deployment blocks updates. Preparation is recorded before pausing the trader; recovery resumes a paused trader without restarting other services if updates have not begun. Do not invoke `docker compose up` directly to bypass the lock.
 
 A failed update with a previous deployment restores the prior images/configuration while retaining data. With no previous deployment, the pending marker remains for diagnosis. Recovery and rollback are explicit operator commands:
 
@@ -38,7 +38,7 @@ Neither command restores database contents or resets trading orders. Schema migr
 
 ## Credentials and mirroring
 
-Gitea secrets are `ALPHAPULSE_GITEA_TOKEN` (image publication) and `ALPHAPULSE_GITHUB_SSH_KEY` (a write-enabled deploy key restricted to the GitHub mirror). Ordinary checks and the deployment job do not receive publication secrets. Credentials are removed from job-local files on exit.
+Gitea secrets are `ALPHAPULSE_GITEA_TOKEN` (image publication) and `ALL_GITHUB_TOKEN` (the account-level GitHub PAT classic with repository write permission; no repository-level override). Ordinary checks and the deployment job do not receive publication secrets. The GitHub token is read from the task environment, never stored in Git URLs or credential files. The trusted mirror task verifies the GitHub identity and repository write permission before synchronization.
 
 Git mirroring is independent of build results. Push/create/delete events, hourly reconciliation and manual dispatch use the same `.mirror.lock` in `/docker/gitea/mirrors/AlphaPulse`. Only business heads/tags are managed; internal PR references are excluded. Missing or incomplete source reads fail rather than imply deletion. GitHub is not an independent development source. GitHub Actions is disabled on the mirror.
 

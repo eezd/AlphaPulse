@@ -4,13 +4,12 @@
 import argparse
 import os
 from pathlib import Path
-import shlex
 import tempfile
 import time
 
 from ci import SOURCE, locked, request_json, require, run, save
 
-TARGET = 'git@github.com:eezd/AlphaPulse.git'
+TARGET = 'https://github.com/eezd/AlphaPulse.git'
 DIRECTORY = Path('/docker/gitea/mirrors/AlphaPulse')
 
 
@@ -47,16 +46,22 @@ def synchronize(directory, source, target, env=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.parse_args()
-    # A write-enabled deploy key limits GitHub access to this repository.
+    token = os.environ.get('ALL_GITHUB_TOKEN')
+    require(token, 'Missing account-level ALL_GITHUB_TOKEN')
+    identity = request_json('https://api.github.com/user', token=token)
+    require(identity['login'] == 'eezd', 'GitHub token belongs to an unexpected account')
+    repository = request_json('https://api.github.com/repos/eezd/AlphaPulse', token=token)
+    require(repository.get('permissions', {}).get('push'), 'GitHub repository write permission is required')
+    # The helper contains no credentials; Git reads the token from the task environment.
     with tempfile.TemporaryDirectory(prefix='ap-mirror-auth-') as temporary:
-        key = Path(temporary) / 'key'
-        key.write_text(os.environ['ALPHAPULSE_GITHUB_SSH_KEY'])
-        key.chmod(0o600)
-        hosts = Path(temporary) / 'known_hosts'
-        hosts.write_text(''.join('github.com ' + entry + '\n' for entry in request_json('https://api.github.com/meta')['ssh_keys']))
-        command = ['ssh', '-i', str(key), '-o', 'IdentitiesOnly=yes', '-o', 'StrictHostKeyChecking=yes',
-                   '-o', 'UserKnownHostsFile=' + str(hosts)]
-        env = {**os.environ, 'GIT_SSH_COMMAND': shlex.join(command), 'GIT_TERMINAL_PROMPT': '0'}
+        helper = Path(temporary) / 'askpass'
+        helper.write_text('#!/bin/sh\ncase "$1" in\n'
+                          '  *github.com*) case "$1" in *Username*) printf "%s" "x-access-token" ;; '
+                          '*) printf "%s" "$ALL_GITHUB_TOKEN" ;; esac ;;\n'
+                          '  *) exit 1 ;;\nesac\n')
+        helper.chmod(0o700)
+        env = {**os.environ, 'GIT_ASKPASS': str(helper), 'GIT_TERMINAL_PROMPT': '0',
+               'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'credential.helper', 'GIT_CONFIG_VALUE_0': ''}
         synchronize(DIRECTORY, SOURCE, TARGET, env)
     print('GitHub business references and history verified')
 
