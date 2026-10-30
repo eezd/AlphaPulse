@@ -19,6 +19,7 @@ function environment(respond: (config: any) => any) {
   const routes = [
     { path: "/login", name: "login" },
     { path: "/news", name: "news", meta: { admin: true } },
+    { path: "/home", name: "home", meta: { admin: true } },
     { path: "/calendar", name: "calendar", meta: { admin: true } },
     { path: "/403", name: "forbidden" },
     { path: "/connection-error", name: "connection-error", meta: { public: true } }
@@ -119,7 +120,7 @@ test("匿名深链、登录回跳与已登录刷新使用真实身份", async ()
   await env.router.push("/news")
   assert.equal(count, 1)
   for (const target of ["//evil.test", "https://evil.test", "/\\evil.test", "/login?redirect=/login"])
-    assert.equal(env.guards.safeRedirect(target), "/news")
+    assert.equal(env.guards.safeRedirect(target), "/home")
 })
 
 test("身份恢复 401 保留深链回跳；403 不清身份，网络错误允许重试", async () => {

@@ -338,3 +338,132 @@ test("交易确认绑定发起币种；交易所或会话切换后拒绝旧操�
   await assert.rejects(third, /会话已切换/)
   assert.equal(writes.length, 1)
 })
+
+test("风险首页丢弃旧窗口与旧会话结果，详情关闭后不写回", async () => {
+  const requests: ReturnType<typeof Promise.withResolvers>[] = []
+  const details = Promise.withResolvers()
+  const user = { sessionVersion: 1 }
+  const load = moduleLoader({
+    "@/common/apis/risk": {
+      getRiskOverviewApi: () => {
+        const request = Promise.withResolvers()
+        requests.push(request)
+        return request.promise
+      },
+      listRiskEventsApi: async () => ({ items: [], total: 0 }),
+      getRiskEventApi: () => details.promise
+    },
+    "@/common/apis/settings": {},
+    "@/pinia/stores/user": { useUserStore: () => user }
+  }, globals)
+  const page = load("@/pages/home/index.vue").default.setup({}, { expose() {} })
+  const old = page.load()
+  const current = page.load()
+  requests[1].resolve({ as_of: "current" })
+  await current
+  requests[0].resolve({ as_of: "old" })
+  await old
+  assert.equal(page.overview.value.as_of, "current")
+  const previous = page.load()
+  user.sessionVersion++
+  requests[2].resolve({ as_of: "other-session" })
+  await previous
+  assert.equal(page.overview.value.as_of, "current")
+  const opening = page.openEvent(1)
+  await vue.nextTick()
+  page.showDetail.value = false
+  await vue.nextTick()
+  details.resolve({ event: { id: 1 }, history: [] })
+  await opening
+  assert.equal(page.detail.value, null)
+})
+
+test("新闻 AI 详情绑定新闻修订版本，旧分析响应不能覆盖当前版本", async () => {
+  const requests: { params: unknown, response: ReturnType<typeof Promise.withResolvers> }[] = []
+  const props = vue.reactive({ newsId: 1, revision: 1 })
+  const user = { sessionVersion: 1 }
+  const load = moduleLoader({
+    "@/common/apis/risk": { listRiskAnalysesApi: (params: unknown) => {
+      const response = Promise.withResolvers()
+      requests.push({ params, response })
+      return response.promise
+    } },
+    "@/pinia/stores/user": { useUserStore: () => user }
+  }, globals)
+  const page = load("@/pages/news/components/NewsRisk.vue").default.setup(props, { expose() {} })
+  props.revision = 2
+  await vue.nextTick()
+  assert.deepEqual(JSON.parse(JSON.stringify(requests[1].params)), { news_id: 1, revision_no: 2 })
+  requests[1].response.resolve([{ id: 2 }])
+  await setImmediate()
+  requests[0].response.resolve([{ id: 1 }])
+  await setImmediate()
+  assert.equal(page.analysis.value.id, 2)
+  props.newsId = 3
+  await vue.nextTick()
+  user.sessionVersion++
+  requests[2].response.resolve([{ id: 3 }])
+  await setImmediate()
+  assert.equal(page.analysis.value, null)
+})
+
+test("新闻 AI 详情等待期间自动刷新，完成后停止；隐藏、旧会话和卸载不继续请求", async () => {
+  let tick = () => {}
+  let unmount = () => {}
+  let cleared = false
+  let state = "pending"
+  let requests = 0
+  const document = { hidden: false }
+  const user = { sessionVersion: 1 }
+  const load = moduleLoader({
+    "@/common/apis/risk": { listRiskAnalysesApi: async () => {
+      requests++
+      return [{ state }]
+    } },
+    "@/pinia/stores/user": { useUserStore: () => user }
+  }, {
+    ...globals,
+    document,
+    onMounted(callback: () => void) {
+      callback()
+    },
+    onBeforeUnmount(callback: () => void) {
+      unmount = callback
+    },
+    setInterval(callback: () => void) {
+      tick = callback
+      return 1
+    },
+    clearInterval() {
+      cleared = true
+    }
+  })
+  const props = vue.reactive({ newsId: 1, revision: 1 })
+  const page = load("@/pages/news/components/NewsRisk.vue").default.setup(props, { expose() {} })
+  await setImmediate()
+  assert.equal(page.analysis.value.state, "pending")
+  document.hidden = true
+  tick()
+  assert.equal(requests, 1)
+  document.hidden = false
+  state = "done"
+  tick()
+  tick()
+  await setImmediate()
+  assert.equal(page.analysis.value.state, "done")
+  assert.equal(requests, 2)
+  tick()
+  assert.equal(requests, 2)
+  state = "pending"
+  props.revision++
+  await vue.nextTick()
+  await setImmediate()
+  user.sessionVersion++
+  tick()
+  assert.equal(requests, 3)
+  user.sessionVersion--
+  unmount()
+  tick()
+  assert.equal(requests, 3)
+  assert.equal(cleared, true)
+})

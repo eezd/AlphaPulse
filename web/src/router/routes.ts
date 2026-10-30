@@ -1,4 +1,5 @@
 export const menuRoutes = [
+  { path: "/home", name: "home", component: () => import("@/pages/home/index.vue"), meta: { admin: true, title: "首页" } },
   { path: "/news", name: "news", component: () => import("@/pages/news/index.vue"), meta: { admin: true, title: "新闻流" } },
   { path: "/calendar", name: "calendar", component: () => import("@/pages/calendar/index.vue"), meta: { admin: true, title: "日历" } },
   { path: "/crawler", name: "crawler", component: () => import("@/pages/crawler/index.vue"), meta: { admin: true, title: "采集控制台" } },

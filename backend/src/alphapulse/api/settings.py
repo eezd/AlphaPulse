@@ -18,6 +18,7 @@ from alphapulse.core.crypto import encrypt
 from alphapulse.core.db import get_session
 from alphapulse.core.redis import redis
 from alphapulse.models import AiProvider, TradingAccount, TradingAnalysis, TradingCredential, TradingSymbol
+from alphapulse.models.risk import RiskSettings
 from alphapulse.trading.client import ExchangeError, create_client
 from alphapulse.trading.snapshot import STATUS_KEY
 
@@ -144,6 +145,11 @@ async def patch_provider(provider_id: int, body: ProviderPatch, session: Annotat
 @router.delete("/providers/{provider_id}")
 async def delete_provider(provider_id: int, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[None]:
     provider = await get_provider(session, provider_id)
+    risk = await session.scalar(select(RiskSettings).where(RiskSettings.provider_id == provider_id).with_for_update())
+    if risk:
+        if risk.enabled:
+            raise HTTPException(status.HTTP_409_CONFLICT, "请先暂停新闻 AI 分析或切换其接入配置")
+        risk.provider_id = None
     await session.delete(provider)
     await session.flush()
     if provider.is_default:

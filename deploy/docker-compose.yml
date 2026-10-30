@@ -34,6 +34,11 @@ services:
     container_name: AlphaPulse-dev-trader
     command: [python, -m, alphapulse.trading.engine]
 
+  news-risk:
+    <<: *backend
+    container_name: AlphaPulse-dev-news-risk
+    command: [python, -m, alphapulse.news_risk.worker]
+
   calendar:
     <<: *backend
     container_name: AlphaPulse-dev-calendar

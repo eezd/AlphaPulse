@@ -15,6 +15,7 @@ from alphapulse.core.db import get_session
 from alphapulse.core.redis import redis
 from alphapulse.crawler.events import NEWS_CHANNEL
 from alphapulse.models import NewsItem, NewsRevision
+from alphapulse.models.risk import RiskAnalysis
 
 router = APIRouter(prefix="/api/news", tags=["news"], dependencies=[Depends(require_admin)])
 
@@ -33,6 +34,13 @@ NEWS_KEYWORDS = (
 )
 
 
+class NewsRiskBrief(BaseModel):
+    state: str
+    stars: int | None = None
+    summary: str | None = None
+    verification: str | None = None
+
+
 class NewsBrief(BaseModel):
     id: int
     source_code: str
@@ -46,6 +54,7 @@ class NewsBrief(BaseModel):
     published_at: datetime
     first_seen_at: datetime
     revision_no: int
+    risk: NewsRiskBrief | None = None
 
 
 class NewsPage(BaseModel):
@@ -108,14 +117,17 @@ async def list_news(
     conditions = news_filters(source, q, start, end)
     total = await session.scalar(select(func.count()).select_from(NewsItem).where(*conditions))
     rows = (await session.execute(
-        select(NewsItem, func.left(NewsItem.content_text, EXCERPT_LENGTH).label("excerpt"))
+        select(NewsItem, func.left(NewsItem.content_text, EXCERPT_LENGTH).label("excerpt"), RiskAnalysis)
+        .outerjoin(RiskAnalysis, (RiskAnalysis.news_id == NewsItem.id) & (RiskAnalysis.content_hash == NewsItem.content_hash))
         .where(*conditions)
         .order_by(NewsItem.published_at.desc(), NewsItem.id.desc())
         .offset((page - 1) * limit)
         .limit(limit)
     )).all()
 
-    items = [NewsBrief.model_validate({**news.__dict__, "excerpt": excerpt}) for news, excerpt in rows]
+    items = [NewsBrief.model_validate({**news.__dict__, "excerpt": excerpt,
+        "risk": {**(analysis.result or {}), "state": analysis.state} if analysis else None})
+        for news, excerpt, analysis in rows]
     return success(NewsPage(items=items, total=total))
 
 

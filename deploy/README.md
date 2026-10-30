@@ -15,7 +15,7 @@ The date comes from the commit's committer timestamp in UTC, and the suffix is t
 
 ## The single data-bearing instance
 
-`/docker/gitea/dev/AlphaPulse` contains the runtime Compose configuration, `.env`, digest selection, deployment receipts and `.deploy.lock`. The repository-root `.env` points to that sole private configuration. The Compose project is `alphapulse-dev`; `AlphaPulse-dev` is the web container, and the other five service names append `-api`, `-crawler`, `-market`, `-calendar` or `-trader`.
+`/docker/gitea/dev/AlphaPulse` contains the runtime Compose configuration, `.env`, digest selection, deployment receipts and `.deploy.lock`. The repository-root `.env` points to that sole private configuration. The Compose project is `alphapulse-dev`; `AlphaPulse-dev` is the web container, and the other application containers append their service name (`-api`, `-crawler`, `-market`, `-calendar`, `-trader`, or the new `-news-risk`).
 
 This project's DEV intentionally uses the existing database, Redis DB 14 (`ap:*` only), model credentials and Demo trading configuration. The user authorized restoring all six services. It is the only instance, served at `https://alpha.134333.xyz` through `127.0.0.1:21005`. CI never uses these data for testing. Do not start a second Compose project against this configuration.
 
@@ -43,3 +43,13 @@ Gitea secrets are `ALPHAPULSE_GITEA_TOKEN` (image publication) and `ALL_GITHUB_T
 Git mirroring is independent of build results. Push/create/delete events, hourly reconciliation and manual dispatch use the same `.mirror.lock` in `/docker/gitea/mirrors/AlphaPulse`. Only business heads/tags are managed; internal PR references are excluded. Missing or incomplete source reads fail rather than imply deletion. GitHub is not an independent development source. GitHub Actions is disabled on the mirror.
 
 Only resources labeled for the current CI attempt are cleaned; there is no global Docker prune. The existing runner registration, capacity and other projects' mount allowances are preserved.
+
+## News risk research
+
+The independent `news-risk` service uses the backend image and never invokes trading tools. Its persistent settings default to disabled. The homepage can reuse an existing provider's API endpoint/credentials with a separate model ID. Only “test and enable” starts real model calls and the backlog beginning at 2026-10-26 00:00 Asia/Shanghai. This does not modify Chat or trading providers.
+
+The additive `c4d7e9f021ab` migration must be reviewed and separately authorized before deployment; the schema guard intentionally rejects deployment until migration is complete. Do not apply it to the live database as part of tests. Updates add a seventh service; rollback to the previous six-service Compose removes the new worker under the deployment lock, without dropping risk tables or deleting analysis history.
+
+Risk grades are zero (no explicit risk found) through five stars. Pending, failed and insufficient information are distinct states. Article evidence, model identity and timestamps remain available in event history. The rolling dashboard windows use publication/progress timestamps; retrospective analysis is not a historical forecast. Model/market outages retain the prior outlook with an outdated marker. No event classification changes positions or order execution.
+
+Candidate retrieval retains the article's previous event and ranks other recent events by headline relevance and severity. Each dashboard window selects up to 100 events independently. Context packing includes source text and the tool schema; oversized articles fail individually while other articles stay queued. News details refresh pending analysis every 15 seconds while visible and stop after completion or leaving the page. Deleting an enabled news provider returns 409; pausing analysis allows deletion and clears the saved provider reference.

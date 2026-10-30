@@ -5,7 +5,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import RedirectResponse
 from starlette.exceptions import HTTPException
 
-from alphapulse.api import auth, calendar, chat, crawler, market, news, settings, skills, trading
+from alphapulse.api import auth, calendar, chat, crawler, market, news, settings, skills, trading, risk
 from alphapulse.api.response import (
     ApiResponse, ValidationErrors, http_error, internal_error, success, validation_error,
 )
@@ -29,6 +29,7 @@ app.include_router(skills.router)
 app.include_router(chat.router)
 app.include_router(trading.router)
 app.include_router(calendar.router)
+app.include_router(risk.router)
 
 
 @app.get("/api/health", include_in_schema=False)

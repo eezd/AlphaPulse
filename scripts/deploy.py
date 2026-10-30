@@ -11,7 +11,7 @@ import time
 from ci import IMAGES, ROOT, branch_head, locked, require, run, save
 
 INSTANCE = Path('/docker/gitea/dev/AlphaPulse')
-SERVICES = ('api', 'web', 'market', 'crawler', 'calendar', 'trader')
+SERVICES = ('api', 'web', 'market', 'crawler', 'calendar', 'trader', 'news-risk')
 
 SCHEMA = '''
 import asyncio, json
@@ -85,9 +85,9 @@ def inspect_services(command):
     return json.loads(run('docker', 'inspect', *identifiers)) if identifiers else []
 
 
-def health(command, build):
+def health(command, build, expected_services=SERVICES):
     containers = inspect_services(command)
-    require({c['Config']['Labels']['com.docker.compose.service'] for c in containers} == set(SERVICES), 'Missing services')
+    require({c['Config']['Labels']['com.docker.compose.service'] for c in containers} == set(expected_services), 'Missing services')
     for container in containers:
         require(container['State']['Running'] and not container['State']['Paused'] and container['RestartCount'] == 0,
                 'Service exited, paused or restarted')
@@ -148,12 +148,12 @@ def deploy(build, directory=INSTANCE):
             if previous:
                 # Docker unpauses a paused container before delivering the stop signal.
                 run(*old_command, 'stop', 'trader')
-                run(*old_command, 'stop', 'crawler', 'calendar', 'market', 'web', 'api')
+                run(*old_command, 'stop', *[service for service in previous_running if service != 'trader'])
             (directory / 'compose.yml').write_text((ROOT / 'deploy/docker-compose.yml').read_text())
             command = compose(directory, build)
             run(*command, 'config', '--quiet')
             run(*command, 'up', '-d', '--no-build', '--pull', 'never', '--wait', '--wait-timeout', '120', 'api', 'web')
-            run(*command, 'up', '-d', '--no-build', '--pull', 'never', 'market', 'crawler', 'calendar', 'trader')
+            run(*command, 'up', '-d', '--no-build', '--pull', 'never', 'market', 'crawler', 'calendar', 'trader', 'news-risk')
             time.sleep(5)
             health(command, build)
             if previous:
@@ -171,7 +171,7 @@ def deploy(build, directory=INSTANCE):
             if previous:
                 restore(directory, pending)
             raise
-        print('All six services now run the accepted development digests', flush=True)
+        print('All application services now run the accepted development digests', flush=True)
 
 
 def restore(directory, pending):
@@ -190,9 +190,10 @@ def restore(directory, pending):
     validate_images(previous)
     (directory / 'compose.yml').write_text(pending['previous_compose'])
     command = compose(directory, previous)
-    run(*command, 'up', '-d', '--no-build', '--pull', 'never', '--wait', '--wait-timeout', '120', *pending['previous_running'])
-    if set(pending['previous_running']) == set(SERVICES):
-        health(command, previous)
+    run(*command, 'up', '-d', '--no-build', '--pull', 'never', '--remove-orphans', '--wait', '--wait-timeout', '120', *pending['previous_running'])
+    previous_services = re.findall(r'^  ([a-z][a-z0-9-]*):$', pending['previous_compose'], re.M)
+    if set(pending['previous_running']) == set(previous_services):
+        health(command, previous, previous_services)
     save(directory / 'deployment.json', previous)
     (directory / 'deployment.pending.json').unlink()
     print('Restored previous images and configuration; business data was retained', flush=True)
@@ -213,7 +214,8 @@ def main():
                 require(not (INSTANCE / 'deployment.pending.json').exists(), 'Recover the pending deployment first')
                 previous = json.loads((INSTANCE / 'deployment.previous.json').read_text())
                 pending = {'previous': previous, 'previous_compose': (INSTANCE / 'compose.previous.yml').read_text(),
-                           'previous_running': list(SERVICES)}
+                           'previous_running': [name for name in re.findall(r'^  ([a-z][a-z0-9-]*):$',
+                               (INSTANCE / 'compose.previous.yml').read_text(), re.M) if name in SERVICES]}
                 save(INSTANCE / 'deployment.pending.json', pending)
                 run(*compose(INSTANCE, json.loads((INSTANCE / 'deployment.json').read_text())), 'stop')
                 restore(INSTANCE, pending)

@@ -179,6 +179,8 @@ def smoke(build, label):
         run('docker', 'run', '-d', '--name', names['web'], '--network-alias', 'web', *common, build['images']['web']['local'])
         wait_command('docker', 'exec', names['api'], 'python', '-c',
                      'import urllib.request; urllib.request.urlopen("http://localhost:8000/api/health", timeout=3)')
+        print(run('docker', 'exec', '-i', names['api'], 'python', '-',
+                  input=(ROOT / 'scripts/smoke_risk.py').read_text()), flush=True)
         output = run('docker', 'exec', '-i', '-e', 'SMOKE_WEB=' + names['web'], names['api'], 'python', '-',
                      input=(ROOT / 'scripts/smoke_app.py').read_text())
         print(output, flush=True)

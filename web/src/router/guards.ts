@@ -7,7 +7,7 @@ export function safeRedirect(value: unknown): string {
   return typeof value === "string" && value.startsWith("/") && !value.startsWith("//")
     && !value.includes("\\") && !/\s/.test(value) && !value.startsWith("/login")
     ? value
-    : "/news"
+    : "/home"
 }
 
 export function installGuards(router: Router) {

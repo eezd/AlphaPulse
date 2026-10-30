@@ -40,13 +40,14 @@ async def main():
         try:
             for path in ['/api/auth/me', '/api/news?q=CI', '/api/crawler/sources', '/api/market/symbols',
                          '/api/skills/tree', '/api/trading/status', '/api/chat/session',
+                         '/api/risk/settings', '/api/risk/overview', '/api/risk/events',
                          '/api/calendar?start=' + now.strftime('%Y-%m-%d')]:
                 response = await client.get(path)
                 response.raise_for_status()
                 assert response.json()['code'] == 0, path
             assert 'CI synthetic news' in (await client.get('/api/news?q=CI')).text
             assert 'CI CPI' in (await client.get('/api/calendar?start=' + now.strftime('%Y-%m-%d'))).text
-            for path in ['/', '/news', '/calendar', '/crawler', '/market', '/trading', '/chat', '/skills', '/settings']:
+            for path in ['/', '/home', '/news', '/calendar', '/crawler', '/market', '/trading', '/chat', '/skills', '/settings']:
                 response = await client.get(path)
                 assert response.status_code == 200 and '<html' in response.text.lower(), path
             assert (await client.get('/version.json')).json()['commit'] == os.environ['APP_COMMIT']

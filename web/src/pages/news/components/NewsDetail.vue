@@ -5,6 +5,8 @@ import { useSourceNames } from "@@/composables/useSourceNames"
 import { diffLines, formatTime, htmlToLines } from "@@/utils/text"
 import { Link } from "@element-plus/icons-vue"
 
+import NewsRisk from "./NewsRisk.vue"
+
 const props = defineProps<{ newsId: number | null }>()
 
 const sourceNames = useSourceNames()
@@ -73,6 +75,7 @@ const diffStats = computed(() => ({
   <el-card shadow="never" class="flex flex-col" body-class="min-h-0 flex-1 flex flex-col gap-3">
     <el-empty v-if="newsId == null" description="点击左侧新闻查看详情" class="m-auto" />
     <template v-else-if="detail">
+      <NewsRisk :news-id="detail.id" :revision="detail.revision_no" />
       <div class="flex flex-wrap items-center gap-2">
         <el-tag size="small">
           {{ sourceNames[detail.source_code] ?? detail.source_code }}

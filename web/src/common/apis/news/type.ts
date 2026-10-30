@@ -11,6 +11,7 @@ export interface NewsBrief {
   published_at: string
   first_seen_at: string
   revision_no: number
+  risk?: { state: string, stars: number | null, summary: string | null, verification: string | null } | null
 }
 
 export interface NewsQuery {

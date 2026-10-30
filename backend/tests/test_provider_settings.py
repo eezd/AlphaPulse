@@ -51,3 +51,25 @@ def test_patch_provider_default_contract(trading, monkeypatch, initial, requeste
         asyncio.run(check())
     finally:
         app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize('enabled', [True, False])
+def test_delete_provider_handles_news_risk_reference(trading, monkeypatch, enabled):
+    from fastapi import HTTPException
+    from alphapulse.api import settings
+    reference = SimpleNamespace(enabled=enabled, provider_id=1)
+    provider = SimpleNamespace(id=1, is_default=False)
+    session = SimpleNamespace(scalar=AsyncMock(return_value=reference), delete=AsyncMock(),
+        flush=AsyncMock(), commit=AsyncMock())
+    monkeypatch.setattr(settings, 'get_provider', AsyncMock(return_value=provider))
+    if enabled:
+        with pytest.raises(HTTPException) as error:
+            asyncio.run(settings.delete_provider(1, session))
+        assert error.value.status_code == 409
+        session.delete.assert_not_awaited()
+        assert reference.provider_id == 1
+    else:
+        asyncio.run(settings.delete_provider(1, session))
+        assert reference.provider_id is None
+        session.delete.assert_awaited_once_with(provider)
+        session.commit.assert_awaited_once()
