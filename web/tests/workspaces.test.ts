@@ -248,6 +248,7 @@ test("新闻搜索/页容量重置只有一次请求；失败区别于空数据�
     } },
     "@@/composables/useSourceNames": { useSourceNames: () => vue.ref({}) },
     "@@/utils/storage": { usePersisted: (_: string, value: unknown) => vue.ref(value) },
+    "@@/composables/useSessionScope": { useSessionScope: () => ({ isCurrent: () => true }) },
     "@/http/useEventSource": { useEventSource: () => ({ connected: vue.ref(false) }) }
   }, globals)
   const page = load("@/pages/news/composables/useNewsFeed").useNewsFeed()
@@ -466,4 +467,56 @@ test("新闻 AI 详情等待期间自动刷新，完成后停止；隐藏、旧�
   tick()
   assert.equal(requests, 3)
   assert.equal(cleared, true)
+})
+
+test("新闻列表只更新可见条目的匹配版本评级，保留滚动与新消息提示并丢弃旧页结果", async () => {
+  const queries: Record<string, unknown>[] = []
+  const pending: ReturnType<typeof Promise.withResolvers>[] = []
+  let active = true
+  let scrolls = 0
+  const load = moduleLoader({
+    "@@/apis/news": { listNewsApi: (query: Record<string, unknown>) => {
+      queries.push(query)
+      const response = Promise.withResolvers()
+      pending.push(response)
+      return response.promise
+    } },
+    "@@/composables/useSourceNames": { useSourceNames: () => vue.ref({}) },
+    "@@/composables/useSessionScope": { useSessionScope: () => ({ isCurrent: () => active }) },
+    "@@/utils/storage": { usePersisted: (_: string, value: unknown) => vue.ref(value) },
+    "@/http/useEventSource": { useEventSource: () => ({ connected: vue.ref(false) }) }
+  }, globals)
+  const page = load("@/pages/news/composables/useNewsFeed").useNewsFeed()
+  page.listBox.value = { scrollTo() {
+    scrolls++
+  } }
+  const initial = page.load()
+  pending[0].resolve({ items: [{ id: 1, revision_no: 1 }, { id: 2, revision_no: 1, risk: { state: "processing" } }], total: 120 })
+  await initial
+  page.pendingCount.value = 7
+  page.openedId.value = 1
+  const refreshing = page.refreshRisk()
+  assert.deepEqual(JSON.parse(JSON.stringify(queries[1])), { ids: [1, 2], limit: 100 })
+  pending[1].resolve({ items: [{ id: 1, revision_no: 1, risk: { state: "done", stars: 5 } }, { id: 2, revision_no: 2, risk: { state: "done", stars: 1 } }], total: 2 })
+  await refreshing
+  assert.equal(page.items.value[0].risk.stars, 5)
+  assert.equal(page.items.value[1].risk.state, "processing")
+  assert.equal(page.total.value, 120)
+  assert.equal(page.pendingCount.value, 7)
+  assert.equal(page.openedId.value, 1)
+  assert.equal(scrolls, 1)
+  const old = page.refreshRisk()
+  const current = page.load()
+  pending[3].resolve({ items: [{ id: 3, revision_no: 1 }], total: 1 })
+  await current
+  pending[2].resolve({ items: [{ id: 3, revision_no: 1, risk: { state: "done" } }], total: 1 })
+  await old
+  assert.equal(page.items.value[0].risk, undefined)
+  const previous = page.refreshRisk()
+  active = false
+  pending[4].resolve({ items: [{ id: 3, revision_no: 1, risk: { state: "done" } }], total: 1 })
+  await previous
+  assert.equal(page.items.value[0].risk, undefined)
+  await page.refreshRisk()
+  assert.equal(queries.length, 5)
 })

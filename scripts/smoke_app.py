@@ -46,6 +46,10 @@ async def main():
                 response.raise_for_status()
                 assert response.json()['code'] == 0, path
             assert 'CI synthetic news' in (await client.get('/api/news?q=CI')).text
+            item = (await client.get('/api/news?q=CI')).json()['data']['items'][0]
+            selected = await client.get('/api/news', params=[('ids', item['id']), ('ids', 2147483647)])
+            assert selected.status_code == 200 and [n['id'] for n in selected.json()['data']['items']] == [item['id']]
+            assert (await client.get('/api/news', params=[('ids', n) for n in range(101)])).status_code == 422
             assert 'CI CPI' in (await client.get('/api/calendar?start=' + now.strftime('%Y-%m-%d'))).text
             for path in ['/', '/home', '/news', '/calendar', '/crawler', '/market', '/trading', '/chat', '/skills', '/settings']:
                 response = await client.get(path)

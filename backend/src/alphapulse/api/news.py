@@ -113,8 +113,11 @@ async def list_news(
     end: datetime | None = None,
     page: Annotated[int, Query(ge=1)] = 1,
     limit: Annotated[int, Query(ge=1, le=100)] = 30,
+    ids: Annotated[list[int] | None, Query(min_length=1, max_length=100)] = None,
 ) -> ApiResponse[NewsPage]:
     conditions = news_filters(source, q, start, end)
+    if ids is not None:
+        conditions.append(NewsItem.id.in_(ids))
     total = await session.scalar(select(func.count()).select_from(NewsItem).where(*conditions))
     rows = (await session.execute(
         select(NewsItem, func.left(NewsItem.content_text, EXCERPT_LENGTH).label("excerpt"), RiskAnalysis)

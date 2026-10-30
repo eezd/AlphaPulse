@@ -4,7 +4,7 @@ import { Refresh, Search } from "@element-plus/icons-vue"
 import NewsDetail from "./components/NewsDetail.vue"
 import { useNewsFeed } from "./composables/useNewsFeed"
 
-const { sourceNames, filters, items, total, page, pageSize, loading, failed, pendingCount, openedId, listBox, connected, load, search } = useNewsFeed()
+const { sourceNames, filters, items, total, page, pageSize, loading, failed, riskFailed, pendingCount, openedId, listBox, connected, load, search } = useNewsFeed()
 const mobile = ref(false)
 let media: MediaQueryList
 const updateMobile = () => mobile.value = media.matches
@@ -23,6 +23,7 @@ onBeforeUnmount(() => media?.removeEventListener("change", updateMobile))
         ● {{ connected ? "实时推送已连接" : "实时推送断开" }}
       </el-tag>
       <div class="flex-1" />
+      <span v-if="riskFailed" class="text-xs text-amber-600">AI 状态刷新失败，将自动重试</span>
       <div
         v-if="pendingCount > 0"
         class="flex cursor-pointer items-center gap-1 border border-sky-200 rounded-full border-solid bg-sky-50 px-4 py-1 text-sm text-[var(--el-color-primary)] hover:bg-sky-100"

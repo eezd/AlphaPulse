@@ -3,11 +3,12 @@ import { request } from "@/http/axios"
 import { consumeStream } from "@/http/stream"
 
 /** 分页查询新闻 */
-export function listNewsApi(params: News.NewsQuery) {
+export function listNewsApi(params: News.NewsQuery, notify = true) {
   return request<News.ListNewsResponseData>({
     url: "/news",
     method: "get",
     params,
+    notify,
     paramsSerializer: { indexes: null }
   })
 }

@@ -1,10 +1,12 @@
 import type { NewsBrief, NewsEvent } from "@@/apis/news/type"
 import { listNewsApi, subscribeNewsApi } from "@@/apis/news"
+import { useSessionScope } from "@@/composables/useSessionScope"
 import { useSourceNames } from "@@/composables/useSourceNames"
 import { usePersisted } from "@@/utils/storage"
 import { useEventSource } from "@/http/useEventSource"
 
 export function useNewsFeed() {
+  const scope = useSessionScope()
   const sourceNames = useSourceNames()
   const filters = reactive({
     source: [] as string[],
@@ -17,6 +19,9 @@ export function useNewsFeed() {
   const pageSize = usePersisted("news-page-size", 30)
   const loading = ref(false)
   const failed = ref(false)
+  const riskFailed = ref(false)
+  let riskLoading = false
+  let timer: ReturnType<typeof setInterval> | undefined
   const pendingCount = ref(0)
   const openedId = ref<number | null>(null)
   const listBox = ref<HTMLElement>()
@@ -39,6 +44,7 @@ export function useNewsFeed() {
       if (seq !== requestSeq)
         return
       failed.value = false
+      riskFailed.value = false
       items.value = result.items
       total.value = result.total
       if (page.value === 1)
@@ -58,6 +64,26 @@ export function useNewsFeed() {
     else return load()
   }
 
+  async function refreshRisk() {
+    if (!scope.isCurrent() || loading.value || riskLoading || !items.value.length) return
+    const seq = requestSeq
+    riskLoading = true
+    try {
+      const result = await listNewsApi({ ids: items.value.map(item => item.id), limit: 100 }, false)
+      if (seq !== requestSeq || !scope.isCurrent()) return
+      const latest = new Map(result.items.map(item => [item.id, item]))
+      for (const item of items.value) {
+        const current = latest.get(item.id)
+        if (current?.revision_no === item.revision_no) item.risk = current.risk
+      }
+      riskFailed.value = false
+    } catch {
+      if (seq === requestSeq && scope.isCurrent()) riskFailed.value = true
+    } finally {
+      riskLoading = false
+    }
+  }
+
   watch([page, pageSize], ([, size], [, oldSize]) => {
     if (size !== oldSize && page.value !== 1) {
       page.value = 1
@@ -73,6 +99,15 @@ export function useNewsFeed() {
   })
 
   onMounted(load)
+  onMounted(() => {
+    timer = setInterval(() => {
+      if (!document.hidden && items.value.some(item => item.risk?.state !== "done")) void refreshRisk()
+    }, 15000)
+  })
+  onBeforeUnmount(() => {
+    requestSeq++
+    clearInterval(timer)
+  })
 
-  return { sourceNames, filters, items, total, page, pageSize, loading, failed, pendingCount, openedId, listBox, connected, load, search }
+  return { sourceNames, filters, items, total, page, pageSize, loading, failed, riskFailed, pendingCount, openedId, listBox, connected, load, search, refreshRisk }
 }

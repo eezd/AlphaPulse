@@ -15,6 +15,7 @@ export interface NewsBrief {
 }
 
 export interface NewsQuery {
+  ids?: number[]
   source?: string[]
   q?: string
   start?: string
