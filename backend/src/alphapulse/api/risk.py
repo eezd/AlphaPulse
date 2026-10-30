@@ -58,7 +58,10 @@ async def enable(body: SettingsIn, session: DB):
         provider = await provider_for(session, settings)
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
-    fixture = {'news': [{'id': 1, 'title': '测试消息：暂无新事件', 'summary': '', 'content': ''}], 'candidates': []}
+    fixture = {'news': [{'id': 1, 'title': '虚构测试新闻：示例交易平台发布维护通知',
+        'summary': '示例交易平台计划进行例行维护，期间暂停充提服务。',
+        'content': '本条为虚构测试样例，不代表真实市场事件。示例交易平台计划进行例行维护，'
+                   '期间暂停充提服务。通知未提及资产损失，恢复时间尚未公布。'}], 'candidates': []}
     from alphapulse.news_risk.service import validate_labels
     try:
         result, _ = await complete(provider, SYSTEM, fixture, Labels)

@@ -15,7 +15,10 @@ SYSTEM = '''你是加密市场新闻风险分析员，只使用输入证据。�
 重大传闻可以高星，但必须标为待核实；正文不足用 unknown，不能冒充无风险。
 分别记录方向、证实状态、依据和不确定性。不得声称已独立核实；转载数量不等于独立证实。
 official 仅限输入明确来自相关官方机构的公告，媒体转述不能当作官方原文。
-summary 用中文简要归纳；evidence 是输入原文的短引用；entities 使用统一名称。
+summary 用中文简要归纳；entities 使用统一名称。
+evidence 必须逐字复制对应新闻 title、summary 或 content 中一段非空、连续的原文（最多500字）。
+只返回引用文字本身，不加外层引号、说明、翻译或省略号，不拼接多处片段；不能引用其他新闻或候选事件。
+即使没有明显风险或信息不足，也必须从该条新闻复制原文作为 evidence；分析说明写入 reasoning。
 只有相同实体、事件类型、发生时段及具体事实一致才归并到候选 event_id，否则 null。
 事件 followup/refutation 使用候选 id；更正或辟谣可降低当前星级。不要仅因同名机构合并不同事件。
 所有输出都是研究判断，不下单、不修改任何交易设置。'''
@@ -34,7 +37,8 @@ class Label(BaseModel):
     confidence: Literal['low', 'medium', 'high']
     reasoning: str = Field(min_length=1, max_length=2000)
     uncertainty: str = Field(min_length=1, max_length=1000)
-    evidence: str = Field(min_length=1, max_length=500)
+    evidence: str = Field(min_length=1, max_length=500,
+        description='逐字复制本条新闻 title、summary 或 content 中一段连续原文；不加外层引号，不改写、翻译或拼接')
     event_id: int | None
     same_event_as: int | None = Field(default=None, description="同批较早输入的新闻 id，仅同一事件时填写")
 
@@ -100,8 +104,15 @@ def validate_labels(result, inputs, candidates):
                 or positions[item.same_event_as] >= positions[item.id]):
             raise ValueError("同批事件引用必须指向较早的输入，且不能同时指定已有事件")
         source = inputs[item.id]
-        if item.evidence not in '\n'.join(str(source.get(key, '')) for key in ('title', 'summary', 'content')):
-            raise ValueError('模型证据并非输入原文引用')
+        texts = [source.get(key) or '' for key in ('title', 'summary', 'content')]
+        evidence = item.evidence.strip()
+        # Accept presentation quotes only; the stored evidence must remain a literal source substring.
+        if not any(evidence in text for text in texts) and len(evidence) >= 2 and (evidence[0], evidence[-1]) in (
+                ('“', '”'), ('「', '」'), ('‘', '’'), ('"', '"'), ("'", "'")):
+            evidence = evidence[1:-1].strip()
+        if not evidence or not any(evidence in text for text in texts):
+            raise ValueError(f'模型证据并非输入原文引用（新闻 ID {item.id}）；请逐字复制该条新闻中的连续原文，不要改写或拼接')
+        item.evidence = evidence
         if item.event_id is not None and item.event_id not in candidates:
             raise ValueError('模型引用未知候选事件')
         if item.verification == 'insufficient' and item.direction != 'unknown':

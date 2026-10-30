@@ -27,6 +27,66 @@ def test_extreme_unverified_event_preserves_uncertainty(risk):
     assert item.stars == 5 and item.verification == 'unverified'
 
 
+@pytest.mark.parametrize('evidence', ['安全事件', ' 安全事件\n', '“安全事件”', '「安全事件」', '‘安全事件’', '"安全事件"', "'安全事件'"])
+def test_evidence_presentation_quotes_preserve_literal_source(risk, evidence):
+    item = label(risk).model_copy(update={'evidence': evidence})
+    risk.validate_labels(risk.Labels(items=[item]), {1: {'content': '媒体报道安全事件，规模待核实。'}}, set())
+    assert item.evidence == '安全事件'
+
+
+@pytest.mark.parametrize('evidence', ['“资产已被盗”', '安全…事件', 'security incident', '   ', '“”', '标题\n正文'])
+def test_evidence_must_be_nonempty_and_from_one_source_field(risk, evidence):
+    item = label(risk).model_copy(update={'evidence': evidence})
+    with pytest.raises(ValueError, match='模型证据并非输入原文引用'):
+        risk.validate_labels(risk.Labels(items=[item]), {1: {'title': '标题', 'summary': '正文', 'content': '安全事件'}}, set())
+
+
+def test_evidence_retains_quotes_present_in_source(risk):
+    item = label(risk).model_copy(update={'evidence': '“安全事件”'})
+    risk.validate_labels(risk.Labels(items=[item]), {1: {'content': '媒体称这是“安全事件”。'}}, set())
+    assert item.evidence == '“安全事件”'
+
+
+@pytest.mark.parametrize('valid', [True, False])
+def test_enable_validates_evidence_before_saving_settings(risk, monkeypatch, valid):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from fastapi import FastAPI
+    import httpx
+    from alphapulse.api import risk as api
+
+    session = SimpleNamespace(merge=AsyncMock(), commit=AsyncMock())
+    provider = SimpleNamespace(model='news-only')
+    monkeypatch.setattr(api, 'provider_for', AsyncMock(return_value=provider))
+
+    async def complete(actual_provider, system, payload, schema):
+        assert actual_provider is provider
+        news = payload['news'][0]
+        assert news['content'] and news['summary']
+        evidence = '“'+news['summary']+'”' if valid else '虚构的资产损失6%'
+        return risk.Labels(items=[label(risk).model_copy(update={'evidence': evidence})]), {}
+
+    monkeypatch.setattr(api, 'complete', complete)
+    app = FastAPI()
+    app.include_router(api.router)
+    app.dependency_overrides[api.require_admin] = lambda: None
+    app.dependency_overrides[api.get_session] = lambda: session
+
+    async def check():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test') as client:
+            response = await client.post('/api/risk/enable', json={'provider_id': 1, 'model': 'news-only'})
+            assert response.status_code == (200 if valid else 502), response.text
+            if valid:
+                saved = session.merge.call_args.args[0]
+                assert saved.enabled and saved.model == 'news-only'
+                session.commit.assert_awaited_once()
+            else:
+                assert '模型证据并非输入原文引用' in response.json()['detail']
+                session.merge.assert_not_awaited()
+                session.commit.assert_not_awaited()
+    asyncio.run(check())
+
+
 @pytest.mark.parametrize('kind', ['missing', 'duplicate', 'unknown', 'evidence', 'candidate', 'insufficient'])
 def test_invalid_results_are_rejected(risk, kind):
     item = label(risk)
