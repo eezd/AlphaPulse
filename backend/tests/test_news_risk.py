@@ -87,6 +87,66 @@ def test_enable_validates_evidence_before_saving_settings(risk, monkeypatch, val
     asyncio.run(check())
 
 
+@pytest.mark.parametrize('verification,direction,status', [
+    ('insufficient', 'unknown', 200), ('insufficient', 'neutral', 502), ('insufficient', 'bullish', 502),
+    ('insufficient', 'bearish', 502), ('insufficient', 'mixed', 502), ('reported', 'neutral', 200),
+])
+def test_enable_requires_consistent_uncertainty_without_changing_model_output(risk, monkeypatch, verification, direction, status):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from fastapi import FastAPI
+    import httpx
+    from alphapulse.api import risk as api
+
+    session = SimpleNamespace(merge=AsyncMock(), commit=AsyncMock())
+    monkeypatch.setattr(api, 'provider_for', AsyncMock(return_value=object()))
+    item = label(risk).model_copy(update={'verification': verification, 'direction': direction})
+
+    async def complete(provider, system, payload, schema):
+        item.evidence = payload['news'][0]['summary']
+        return risk.Labels(items=[item]), {}
+
+    monkeypatch.setattr(api, 'complete', complete)
+    app = FastAPI()
+    app.include_router(api.router)
+    app.dependency_overrides[api.require_admin] = lambda: None
+    app.dependency_overrides[api.get_session] = lambda: session
+
+    async def check():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test') as client:
+            response = await client.post('/api/risk/enable', json={'provider_id': 1, 'model': 'news-only'})
+            assert response.status_code == status, response.text
+            assert item.direction == direction
+            if status == 200:
+                session.merge.assert_awaited_once()
+                session.commit.assert_awaited_once()
+            else:
+                assert 'direction 必须为 unknown' in response.json()['detail']
+                assert direction in response.json()['detail']
+                session.merge.assert_not_awaited()
+                session.commit.assert_not_awaited()
+    asyncio.run(check())
+
+
+def test_uncertainty_contract_reaches_the_model_with_tool_schema(risk, monkeypatch):
+    from types import SimpleNamespace
+    item = label(risk).model_copy(update={'verification': 'insufficient', 'direction': 'unknown'})
+
+    async def stream(provider, system, messages, tools, effort):
+        assert 'verification="insufficient", direction="unknown"' in system
+        fields = tools[0].parameters['$defs']['Label']['properties']
+        assert 'insufficient' in fields['direction']['description']
+        assert 'unknown' in fields['verification']['description']
+        yield risk.llm.Completion(tool_calls=[{'name': 'submit', 'arguments': {'items': [item.model_dump()]}}])
+
+    monkeypatch.setattr(risk.llm, 'stream', stream)
+    payload = {'news': [{'id': 1, 'title': '安全事件'}], 'candidates': []}
+    provider = SimpleNamespace(max_tokens=256, context_window=200000, reasoning_effort=None)
+    result, _ = asyncio.run(risk.complete(provider, risk.SYSTEM, payload, risk.Labels))
+    risk.validate_labels(result, {1: payload['news'][0]}, set())
+    assert result.items[0].direction == 'unknown'
+
+
 @pytest.mark.parametrize('kind', ['missing', 'duplicate', 'unknown', 'evidence', 'candidate', 'insufficient'])
 def test_invalid_results_are_rejected(risk, kind):
     item = label(risk)
