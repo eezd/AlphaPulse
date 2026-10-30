@@ -19,6 +19,7 @@ dependencies = [
     "pydantic-settings>=2.15.0",
     "pyjwt>=2.15.1",
     "pypdf>=6.21.2",
+    "qrcode[pil]>=8.2,<9",
     "redis>=8.1.0",
     "scrapy>=2.19.0",
     "scrapy-redis>=0.9.1",
