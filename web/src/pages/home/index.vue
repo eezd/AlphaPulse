@@ -3,7 +3,7 @@ import type * as Risk from "@/common/apis/risk/type"
 import type { Provider } from "@/common/apis/settings/type"
 import { formatTime } from "@@/utils/text"
 import * as api from "@/common/apis/risk"
-import { listProvidersApi } from "@/common/apis/settings"
+import { listProviderModelsApi, listProvidersApi } from "@/common/apis/settings"
 import { useUserStore } from "@/pinia/stores/user"
 
 const user = useUserStore()
@@ -19,6 +19,10 @@ const events = ref<Risk.RiskEvent[]>([])
 const settings = ref<Risk.Settings | null>(null)
 const providers = ref<Provider[]>([])
 const showSettings = ref(false)
+const models = ref<string[]>([])
+const modelsLoading = ref(false)
+const modelsLoaded = ref(false)
+const modelsError = ref("")
 const detail = ref<Awaited<ReturnType<typeof api.getRiskEventApi>> | null>(null)
 const showDetail = ref(false)
 const failures = ref<Risk.Analysis[]>([])
@@ -28,6 +32,7 @@ const failed = ref(false)
 const saving = ref(false)
 let sequence = 0
 let detailSequence = 0
+let modelsSequence = 0
 let timer: ReturnType<typeof setInterval> | undefined
 const labels: Record<string, string> = { bullish: "偏多", bearish: "偏空", mixed: "震荡／分歧", neutral: "中性", unknown: "无法判断", official: "官方公告", reported: "媒体报道", unverified: "待核实", refuted: "更正／辟谣", insufficient: "信息不足", low: "低", medium: "中", high: "高" }
 const starText = (value: number) => value ? "★".repeat(value) : "无明显风险"
@@ -57,13 +62,36 @@ async function openSettings() {
   providers.value = choices
   showSettings.value = true
 }
+async function loadModels() {
+  const seq = ++modelsSequence
+  const version = user.sessionVersion
+  const id = settings.value?.provider_id
+  models.value = []
+  modelsError.value = ""
+  modelsLoaded.value = false
+  modelsLoading.value = false
+  if (!showSettings.value || !id) return
+  modelsLoading.value = true
+  try {
+    const choices = await listProviderModelsApi(id)
+    if (seq !== modelsSequence || version !== user.sessionVersion) return
+    models.value = choices
+    modelsLoaded.value = true
+  } catch (error) {
+    if (seq === modelsSequence && version === user.sessionVersion)
+      modelsError.value = error instanceof Error ? error.message : "读取模型列表失败"
+  } finally {
+    if (seq === modelsSequence && version === user.sessionVersion) modelsLoading.value = false
+  }
+}
 async function save(enable: boolean) {
   if (!settings.value) return
   const version = user.sessionVersion
   saving.value = true
   try {
-    if (enable) await api.enableRiskApi(settings.value)
-    else await api.saveRiskSettingsApi({ ...settings.value, enabled: false })
+    const data = { ...settings.value, model: settings.value.model.trim() }
+    if (enable) await api.enableRiskApi(data)
+    else await api.saveRiskSettingsApi({ ...data, enabled: false })
     if (version !== user.sessionVersion) return
     showSettings.value = false
     await load()
@@ -97,6 +125,14 @@ function search() {
 }
 watch([hours, stars, archive, range], search)
 watch(page, () => void load())
+watch([showSettings, () => settings.value?.provider_id], () => void loadModels())
+watch(() => user.sessionVersion, () => {
+  modelsSequence++
+  showSettings.value = false
+  settings.value = null
+  models.value = []
+  modelsLoading.value = false
+})
 watch(showDetail, (visible) => {
   if (!visible) {
     detailSequence++
@@ -112,6 +148,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   sequence++
   detailSequence++
+  modelsSequence++
   clearInterval(timer)
 })
 </script>
@@ -224,7 +261,20 @@ onBeforeUnmount(() => {
           </el-select>
         </el-form-item>
         <el-form-item label="新闻模型名称">
-          <el-input v-model="settings.model" placeholder="填写接口实际支持的模型 ID，例如 LUNA 对应名称" />
+          <div class="w-full flex gap-2">
+            <el-select v-model="settings.model" class="min-w-0 flex-1" filterable allow-create default-first-option :loading="modelsLoading" :disabled="!settings.provider_id" placeholder="选择模型，或输入模型 ID 后回车">
+              <el-option v-for="model in models" :key="model" :value="model" :label="model" />
+            </el-select>
+            <el-button :loading="modelsLoading" :disabled="!settings.provider_id" @click="loadModels">
+              刷新列表
+            </el-button>
+          </div>
+          <p v-if="modelsError" class="mb-0 w-full text-sm text-amber-600">
+            {{ modelsError }}
+          </p>
+          <p v-else-if="modelsLoaded && !models.length" class="mb-0 text-sm text-slate-500">
+            接口未返回可选模型，可手动填写模型 ID。
+          </p>
         </el-form-item>
         <el-alert type="info" :closable="false" title="测试并启用会调用模型，随后分析起点之后的全部新闻；不会修改 Chat 或交易模型。" />
         <p>当前状态：{{ settings.enabled ? '已启用' : '已关闭' }}</p>

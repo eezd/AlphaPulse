@@ -379,6 +379,61 @@ test("风险首页丢弃旧窗口与旧会话结果，详情关闭后不写回",
   assert.equal(page.detail.value, null)
 })
 
+test("新闻模型列表随接入配置更新，保留手填值并丢弃旧配置、关闭及旧会话结果", async () => {
+  const requests: { id: number, response: ReturnType<typeof Promise.withResolvers> }[] = []
+  let unmount = () => {}
+  const user = vue.reactive({ sessionVersion: 1 })
+  const load = moduleLoader({
+    "@/common/apis/risk": { getRiskSettingsApi: async () => ({ provider_id: 1, model: "manual-model", enabled: false }) },
+    "@/common/apis/settings": {
+      listProvidersApi: async () => [],
+      listProviderModelsApi: (id: number) => {
+        const response = Promise.withResolvers()
+        requests.push({ id, response })
+        return response.promise
+      }
+    },
+    "@/pinia/stores/user": { useUserStore: () => user }
+  }, { ...globals, clearInterval, onBeforeUnmount: (callback: () => void) => unmount = callback })
+  const page = load("@/pages/home/index.vue").default.setup({}, { expose() {} })
+  await page.openSettings()
+  await vue.nextTick()
+  assert.equal(requests[0].id, 1)
+  page.settings.value.provider_id = 2
+  await vue.nextTick()
+  requests[1].response.resolve(["model-two"])
+  await setImmediate()
+  requests[0].response.resolve(["model-one"])
+  await setImmediate()
+  assert.deepEqual(Array.from(page.models.value), ["model-two"])
+  assert.equal(page.settings.value.model, "manual-model")
+  const failed = page.loadModels()
+  requests[2].response.reject(new Error("目录不可用"))
+  await failed
+  assert.equal(page.modelsError.value, "目录不可用")
+  assert.equal(page.settings.value.model, "manual-model")
+  const closed = page.loadModels()
+  page.showSettings.value = false
+  await vue.nextTick()
+  requests[3].response.resolve(["closed"])
+  await closed
+  assert.equal(page.models.value.length, 0)
+  await page.openSettings()
+  await vue.nextTick()
+  user.sessionVersion++
+  await vue.nextTick()
+  requests[4].response.resolve(["previous-session"])
+  await setImmediate()
+  assert.equal(page.showSettings.value, false)
+  assert.equal(page.models.value.length, 0)
+  await page.openSettings()
+  await vue.nextTick()
+  unmount()
+  requests[5].response.resolve(["unmounted"])
+  await setImmediate()
+  assert.equal(page.models.value.length, 0)
+})
+
 test("新闻 AI 详情绑定新闻修订版本，旧分析响应不能覆盖当前版本", async () => {
   const requests: { params: unknown, response: ReturnType<typeof Promise.withResolvers> }[] = []
   const props = vue.reactive({ newsId: 1, revision: 1 })

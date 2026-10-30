@@ -9,6 +9,16 @@ export function listProvidersApi() {
   })
 }
 
+/** Read the selected provider's catalog; the page owns failure presentation. */
+export function listProviderModelsApi(id: number) {
+  return request<Settings.ListProviderModelsResponseData>({
+    url: `/settings/providers/${id}/models`,
+    method: "get",
+    timeout: 35000,
+    notify: false
+  })
+}
+
 /** 新增模型配置 */
 export function createProviderApi(body: Settings.ProviderForm) {
   return request<Settings.CreateProviderResponseData>({

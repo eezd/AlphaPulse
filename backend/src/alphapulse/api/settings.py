@@ -119,6 +119,15 @@ async def create_provider(body: ProviderIn, session: Annotated[AsyncSession, Dep
     return success(ProviderOut.model_validate(provider, from_attributes=True))
 
 
+@router.get('/providers/{provider_id}/models')
+async def list_provider_models(provider_id: int, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[list[str]]:
+    provider = await get_provider(session, provider_id)
+    try:
+        return success(await llm.list_models(provider))
+    except llm.LlmError as error:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(error)) from error
+
+
 @router.patch("/providers/{provider_id}")
 async def patch_provider(provider_id: int, body: ProviderPatch, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[ProviderOut]:
     provider = await get_provider(session, provider_id)

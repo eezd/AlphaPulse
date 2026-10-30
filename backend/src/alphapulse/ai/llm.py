@@ -75,6 +75,31 @@ def api_root(base_url: str) -> str:
     return root.removesuffix("/v1")
 
 
+async def list_models(provider: AiProvider) -> list[str]:
+    """Read the provider's model catalog without generating a completion."""
+    options = {'api_key': decrypt(provider.api_key_encrypted), 'timeout': 10, 'max_retries': 0}
+    root = api_root(provider.base_url)
+    client = (openai.AsyncOpenAI(base_url=f'{root}/v1', **options) if provider.protocol == 'openai'
+              else anthropic.AsyncAnthropic(base_url=root, **options))
+    try:
+        async with asyncio.timeout(30), client:
+            models = await client.models.list()
+            identifiers = set()
+            async for model in models:
+                identifier = getattr(model, 'id', None)
+                if not isinstance(identifier, str) or not identifier.strip():
+                    raise LlmError('模型列表响应缺少有效的模型 ID；请手动填写模型名称')
+                identifiers.add(identifier)
+            return sorted(identifiers)
+    except (openai.APIStatusError, anthropic.APIStatusError) as error:
+        raise LlmError(f'模型列表接口返回 HTTP {error.status_code}；请检查接入权限，或手动填写模型名称') from error
+    except (TimeoutError, openai.APITimeoutError, anthropic.APITimeoutError,
+            httpx.TimeoutException, httpx2.TimeoutException) as error:
+        raise LlmError('读取模型列表超时；可重试或手动填写模型名称') from error
+    except (openai.APIError, anthropic.APIError, httpx.TransportError, httpx2.TransportError) as error:
+        raise LlmError('无法读取模型列表；请检查接入配置，或手动填写模型名称') from error
+
+
 async def stream(
     provider: AiProvider, system: str, messages: list[dict], tools: list[ToolSpec], effort: Effort | None = None,
 ) -> AsyncIterator[TextDelta | ThinkingStarted | Completion]:

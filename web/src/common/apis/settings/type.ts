@@ -18,6 +18,7 @@ export interface Provider {
 }
 
 export type ListProvidersResponseData = Provider[]
+export type ListProviderModelsResponseData = string[]
 
 export interface ProviderForm {
   name: string
