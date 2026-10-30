@@ -19,7 +19,7 @@ FEEDS = {
     "insee": ("https://www.insee.fr/fr/flux/3",),
 }
 REGIONS = {"wscn_news": "CN", "wscn_live": "CN", "cls_depth": "CN", "cls_telegraph": "CN", "coindesk": "GLOBAL",
-           "bls": "US", "bea": "US", "fed": "US", "umich": "US", "ecb": "EA", "eurostat": "EA", "boe": "GB", "ons": "GB", "destatis": "DE", "insee": "FR"}
+           "bls": "US", "bea": "US", "fed": "US", "umich": "US", "dol": "US", "eia": "US", "ecb": "EA", "eurostat": "EA", "boe": "GB", "ons": "GB", "destatis": "DE", "insee": "FR"}
 HOSTS = {"ecb": {"www.ecb.europa.eu"}, "eurostat": {"ec.europa.eu"}, "boe": {"www.bankofengland.co.uk"},
          "ons": {"www.ons.gov.uk"}, "destatis": {"www.destatis.de"}, "insee": {"www.insee.fr"}}
 LANGUAGES = {"destatis": "de", "insee": "fr"}

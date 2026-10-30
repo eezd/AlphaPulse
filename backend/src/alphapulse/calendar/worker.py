@@ -12,7 +12,7 @@ from parsel import Selector
 from sqlalchemy import select
 
 from alphapulse.calendar.catalog import SCHEDULE_URLS, UMICH_CSV, UMICH_HISTORY, UMICH_HOME, UMICH_INFO
-from alphapulse.calendar import europe
+from alphapulse.calendar import dol, eia, europe
 from alphapulse.calendar.parsers import EASTERN, MONTHS, bea_release_link, parse_fed_calendar, parse_ics, parse_values, release_date, bls_periods, release_metadata
 from alphapulse.calendar.service import apply_bls_periods, record_revision, next_poll, save_raw, save_result, save_schedule, save_series
 from alphapulse.calendar.umich import current_result, document_links, monthly_series, parse_schedule, pdf_text
@@ -57,12 +57,14 @@ class CalendarWorker:
         self.http = httpx.AsyncClient(timeout=8, follow_redirects=True, headers={"User-Agent": "AlphaPulse economic calendar"})
         self.bls = httpx.AsyncClient(timeout=8, follow_redirects=True, verify=ctx, headers={"User-Agent": "AlphaPulse economic calendar"})
         self.sources: dict[str, dict] = {}
+        self.eia_schedule_body: str | None = None
         self.fetch_slots = asyncio.Semaphore(2)
 
     async def fetch(self, source: str, url: str, *, query: dict | None = None) -> tuple[httpx.Response, int]:
         # 链接来自公开响应，限制到对应官方域名，避免外部内容扩大访问范围。
         allowed = {"bls": {"www.bls.gov"}, "bea": {"www.bea.gov", "apps.bea.gov"}, "fed": {"www.federalreserve.gov"},
-                   "umich": {"www.sca.isr.umich.edu", "data.sca.isr.umich.edu"}, **HOSTS}
+                   "umich": {"www.sca.isr.umich.edu", "data.sca.isr.umich.edu"}, "dol": {"www.dol.gov", "oui.doleta.gov"},
+                   "eia": {"www.eia.gov", "ir.eia.gov"}, **HOSTS}
         if urlparse(url).scheme != "https" or urlparse(url).hostname not in allowed[source]:
             raise ValueError("公告链接不是对应机构的官方 HTTPS 地址")
         async with self.fetch_slots:
@@ -84,6 +86,8 @@ class CalendarWorker:
         urls += [("bls", f"https://www.bls.gov/schedule/news_release/{code}.htm") for code in ("cpi", "ppi", "empsit")]
         urls += [("umich", UMICH_INFO), ("umich", UMICH_CSV)]
         urls += list(europe.SCHEDULES.items())
+        urls += [("dol", dol.SCHEDULE)]
+        urls += [("eia", eia.SCHEDULE)]
         # 启动时明确各来源尚未就绪；月份滚动后移除不再检查的旧月状态。
         self.sources = {url: self.sources.get(url, {"source": source, "checked_at": now.isoformat(), "error": "尚未同步"})
                         for source, url in urls}
@@ -95,7 +99,14 @@ class CalendarWorker:
                 fetch_url = europe.eurostat_calendar_url(now) if source == "eurostat" else url
                 response, raw_id = await self.fetch(source, fetch_url, query=europe.INSEE_QUERY if source == "insee" else None)
                 response.raise_for_status()
-                if source in europe.SCHEDULES:
+                if source in ("dol", "eia"):
+                    events = (dol if source == "dol" else eia).schedule(response.text, now)
+                    async with SessionLocal() as session:
+                        await save_schedule(session, source, url, events, raw_id, datetime.now(UTC), withdraw_missing=False)
+                        await session.commit()
+                    if source == "eia":
+                        self.eia_schedule_body = response.text
+                elif source in europe.SCHEDULES:
                     events = europe.parse_schedule(source, response.text)
                     async with SessionLocal() as session:
                         # 欧洲公开日程是滚动/分页窗口，缺失不等于撤回。
@@ -168,6 +179,30 @@ class CalendarWorker:
             await session.commit()
 
     async def result_page(self, row: EconomicRelease) -> tuple[httpx.Response, int] | None:
+        if row.source == "eia":
+            if self.eia_schedule_body is None:
+                schedule, _ = await self.fetch("eia", eia.SCHEDULE)
+                schedule.raise_for_status()
+                eia.exceptions(schedule.text)
+                self.eia_schedule_body = schedule.text
+            response, raw_id = await self.fetch("eia", row.release_url or eia.LATEST)
+            response.raise_for_status()
+            announcement = eia.report(response.text, self.eia_schedule_body)
+            if announcement.at < row.scheduled_at or (announcement.at > row.scheduled_at and row.first_received_at is not None):
+                return None
+            if announcement.at != row.scheduled_at or announcement.period != row.period:
+                raise ValueError("EIA 公告统计周或时间与所选日程不符，未填入其他期次的数据")
+            return response, raw_id
+        if row.source == "dol":
+            response, raw_id = await self.fetch("dol", row.release_url or dol.LATEST)
+            response.raise_for_status()
+            announcements = await asyncio.to_thread(dol.report, await asyncio.to_thread(pdf_text, response.content))
+            announcement = announcements[row.family]
+            if announcement.at < row.scheduled_at or (announcement.at > row.scheduled_at and row.first_received_at is not None):
+                return None
+            if announcement.at != row.scheduled_at:
+                raise ValueError("DOL 公告时间与所选日程不符，未填入其他期次的数据")
+            return response, raw_id
         if row.source in europe.SCHEDULES:
             return await self.european_result(row)
         date = row.scheduled_at.astimezone(EASTERN).date()
@@ -275,7 +310,13 @@ class CalendarWorker:
                 page = await self.result_page(row)
                 if page is not None:
                     response, raw_id = page
-                    if row.source in europe.SCHEDULES:
+                    if row.source == "eia":
+                        announcement = eia.report(response.text, self.eia_schedule_body)
+                        period, stage, values = announcement.period, announcement.stage, announcement.values
+                    elif row.source == "dol":
+                        announcement = (await asyncio.to_thread(dol.report, await asyncio.to_thread(pdf_text, response.content)))[row.family]
+                        period, stage, values = announcement.period, announcement.stage, announcement.values
+                    elif row.source in europe.SCHEDULES:
                         announcement = europe.parse_announcement(row.family, response.text)
                         period, stage, values = announcement.period, announcement.stage, announcement.values
                     elif row.family == "umich":

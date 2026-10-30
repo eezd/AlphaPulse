@@ -24,7 +24,7 @@ from parsel import Selector
 from sqlalchemy import select, text
 
 from alphapulse.calendar.archives import Announcement, parse_announcements, parse_umich_report
-from alphapulse.calendar import europe
+from alphapulse.calendar import dol, eia, europe
 from alphapulse.calendar.catalog import UMICH_CSV, UMICH_HISTORY, UMICH_HOME, UMICH_INFO, UMICH_REPORTS
 from alphapulse.calendar.parsers import Scheduled, bea_family, compact
 from alphapulse.calendar.service import record_revision, save_raw, save_result, save_schedule, save_series
@@ -37,6 +37,8 @@ LOCAL = ZoneInfo("Asia/Shanghai")
 HOSTS = {"bls": {"www.bls.gov", "www.dol.gov"}, "bea": {"www.bea.gov"},
          "fed": {"www.federalreserve.gov"}, "umich": {"www.sca.isr.umich.edu", "data.sca.isr.umich.edu"}}
 US_SOURCES = frozenset(HOSTS)
+HOSTS["dol"] = {"www.dol.gov", "oui.doleta.gov"}
+HOSTS["eia"] = {"www.eia.gov", "ir.eia.gov"}
 HOSTS.update(EUROPE_HOSTS)
 
 
@@ -77,6 +79,8 @@ def family_for(document: Document) -> str | None:
 
 def archive_links(source: str, body: str, base: str, start: date, end: date) -> tuple[list[str], str | None]:
     """只跟随官方索引的实际链接，不按月份合成公告地址。"""
+    if source == "dol":
+        return dol.archive_links(body, start, end), None
     sel = Selector(text=body, type="html")
     links = []
     for node in sel.css("a[href]"):
@@ -157,6 +161,7 @@ async def fetch_documents(start: date, end: date, known: set[str], errors: list[
         indexes = [("bls", f"https://www.bls.gov/bls/news-release/{name}.htm") for name in ("cpi", "ppi", "empsit")]
         indexes += [("bea", "https://www.bea.gov/news/archive?field_related_product_target_id=All&created_1=All&title="),
                     ("fed", "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm")]
+        indexes += [("dol", dol.SCHEDULE)]
         for source, initial in indexes:
             if source not in selected or source in stopped_sources:
                 continue
@@ -172,6 +177,12 @@ async def fetch_documents(start: date, end: date, known: set[str], errors: list[
                     links, following = archive_links(source, index.body.decode("utf-8"), url, start, end)
                     if not links and url == initial:
                         raise ValueError("官方归档未识别到目标公告，覆盖范围尚未核实")
+                    if source == "dol":
+                        years = {int(urlparse(link).path.split("/")[2]) for link in links}
+                        absent = set(range(start.year, end.year + 1)) - years
+                        if absent:
+                            errors.append({"source": source, "url": url,
+                                           "error": f"DOL 归档索引未列出年份 {sorted(absent)}，历史覆盖不完整"})
                     for link in links:
                         if link in known:
                             continue
@@ -186,6 +197,23 @@ async def fetch_documents(start: date, end: date, known: set[str], errors: list[
                 except (httpx.HTTPError, ValueError) as exc:
                     report_error(source, str(exc.request.url) if isinstance(exc, httpx.HTTPError) else url, exc)
                     break
+        if "dol" in selected and "dol" not in stopped_sources and dol.LATEST not in known:
+            try:
+                documents.append(await fetch("dol", dol.LATEST))
+            except (httpx.HTTPError, ValueError) as exc:
+                report_error("dol", dol.LATEST, exc)
+        if "eia" in selected:
+            try:
+                documents.append(await fetch("eia", eia.SCHEDULE))
+                index = await fetch("eia", eia.ARCHIVE)
+                for url in eia.archive_links(index.body.decode(), start, end):
+                    page = await fetch("eia", url)
+                    link = eia.csv_link(page.body.decode(), url)
+                    if link not in known:
+                        documents.append(await fetch("eia", link))
+                        known.add(link)
+            except (httpx.HTTPError, ValueError) as exc:
+                report_error("eia", str(exc.request.url) if isinstance(exc, httpx.HTTPError) else eia.ARCHIVE, exc)
         from alphapulse.calendar.europe_archives import collect
         for source in sorted(selected & EUROPE_HOSTS.keys()):
             try:
@@ -282,7 +310,7 @@ async def run(start: date, end: date, *, commit: bool = False, stored_only: bool
             RawResponse.source_code.in_(selected), RawResponse.status == 200,
             (RawResponse.url.contains("/news.release/") | RawResponse.url.contains("/newsroom/economicdata/") |
              RawResponse.url.contains("/news/202") | RawResponse.url.contains("/pressreleases/monetary") |
-             (RawResponse.source_code == "umich") | RawResponse.source_code.in_(EUROPE_HOSTS)),
+             RawResponse.source_code.in_(("umich", "dol", "eia")) | RawResponse.source_code.in_(EUROPE_HOSTS)),
         ).distinct(RawResponse.source_code, RawResponse.url, RawResponse.body_sha256)
             .order_by(RawResponse.source_code, RawResponse.url, RawResponse.body_sha256, RawResponse.id))).all()
         documents = [Document(r.source_code, r.url, gzip.decompress(body), r.fetched_at, r.id, r.headers) for r, body in rows]
@@ -292,6 +320,8 @@ async def run(start: date, end: date, *, commit: bool = False, stored_only: bool
         documents += await fetch_documents(start, end, {d.url for d in documents}, errors, **({"sources": sources} if sources is not None else {}))
     announcements = []
     series_points = []
+    eia_schedules = [doc for doc in documents if doc.source == "eia" and doc.url == eia.SCHEDULE]
+    eia_schedule = max(eia_schedules, key=lambda doc: doc.captured_at) if eia_schedules else None
     # 先处理历史表，再处理年度更正；重跑的稳定身份不依赖日程 PDF 的文件名。
     parsed_schedules = []
     reports = []
@@ -320,6 +350,25 @@ async def run(start: date, end: date, *, commit: bool = False, stored_only: bool
         announcements.append((document, "umich", announcement, schedules[identity][0].title))
     for document in sorted(documents, key=lambda d: d.captured_at):
         try:
+            if document.source == "eia":
+                if urlparse(document.url).path.endswith("/table1.csv"):
+                    if eia_schedule is None:
+                        raise ValueError("EIA 缺少已采集的公布规则和节假日例外表")
+                    announcement = eia.report(document.body.decode(), eia_schedule.body.decode())
+                    path = urlparse(document.url).path
+                    date_match = re.search(r"/archive/20\d\d/(\d{4}_\d{2}_\d{2})/", path)
+                    if date_match and datetime.strptime(date_match[1], "%Y_%m_%d").date() != announcement.at.astimezone(eia.EASTERN).date():
+                        raise ValueError("EIA 报告统计周与归档公布日期不符")
+                    if begin <= announcement.at < finish:
+                        announcements.append((document, "eia_stocks", announcement, "Weekly Petroleum Status Report"))
+                continue
+            if document.source == "dol":
+                if document.body.startswith(b"%PDF"):
+                    parsed = await asyncio.to_thread(dol.report, await asyncio.to_thread(pdf_text, document.body))
+                    for family, announcement in parsed.items():
+                        if begin <= announcement.at < finish:
+                            announcements.append((document, family, announcement, "Unemployment Insurance Weekly Claims"))
+                continue
             if document.source == "umich":
                 if document.url == UMICH_CSV:
                     series_points.append((document, [(p, v) for p, v in monthly_series(document.body.decode())
@@ -348,6 +397,10 @@ async def run(start: date, end: date, *, commit: bool = False, stored_only: bool
     changed = 0
     if commit:
         await ensure_quiet_window()
+        if eia_schedule is not None and eia_schedule.raw_id is None:
+            async with SessionLocal() as session:
+                await save_raw(session, "eia", eia_schedule.url, 200, eia_schedule.headers, eia_schedule.body, eia_schedule.captured_at)
+                await session.commit()
         batches = {}
         for event, document in schedules.values():
             _, batch = batches.setdefault((document.url, document.captured_at), (document, []))

@@ -187,7 +187,10 @@ def release_rows(row: EconomicRelease, now: datetime) -> list[dict]:
     country_name = COUNTRIES[family.country_code]
     period_name = ""
     if row.period is not None:
-        period_name = f"第{row.period[-1]}季度" if "-Q" in row.period else f"{int(row.period[5:7])}月"
+        if len(row.period) == 10:
+            period_name = f"截至{row.period}当周"
+        else:
+            period_name = f"第{row.period[-1]}季度" if "-Q" in row.period else f"{int(row.period[5:7])}月"
     for key in family.indicators:
         indicator = INDICATORS[key]
         value = row.values.get(key, {})
