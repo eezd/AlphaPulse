@@ -141,3 +141,30 @@ def test_context_budget_includes_unicode_and_tool_schema(risk):
     from types import SimpleNamespace
     provider = SimpleNamespace(max_tokens=256, context_window=4096)
     assert not risk.fits_context(provider, risk.SYSTEM, {'content': '风'*1000}, risk.Labels)
+
+
+@pytest.mark.parametrize('endpoint', ['overview', 'events'])
+@pytest.mark.parametrize('hours,status', [(None, 200), ('24', 200), ('48', 200), ('168', 200), ('25', 422), ('0', 422), ('abc', 422)])
+def test_window_query_parameters_over_http(risk, monkeypatch, endpoint, hours, status):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from fastapi import FastAPI
+    import httpx
+    from alphapulse.api import risk as api
+
+    session = SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(all=lambda: [])),
+        scalar=AsyncMock(return_value=None), scalars=AsyncMock(return_value=SimpleNamespace(all=lambda: [])))
+    app = FastAPI()
+    app.include_router(api.router)
+    app.dependency_overrides[api.require_admin] = lambda: None
+    app.dependency_overrides[api.get_session] = lambda: session
+    monkeypatch.setattr(api, 'coverage', AsyncMock(return_value={}))
+    monkeypatch.setattr(api.redis, 'get', AsyncMock(return_value=None))
+
+    async def check():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test') as client:
+            response = await client.get('/api/risk/'+endpoint, params={} if hours is None else {'hours': hours})
+            assert response.status_code == status, response.text
+            if status == 200:
+                assert response.json()['code'] == 0
+    asyncio.run(check())

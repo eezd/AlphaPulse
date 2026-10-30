@@ -1,6 +1,7 @@
 """Authenticated news risk research endpoints."""
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Literal
+from enum import IntEnum
+from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select, func
@@ -15,6 +16,12 @@ from alphapulse.news_risk.service import START, default_settings, provider_for, 
 
 router = APIRouter(prefix='/api/risk', tags=['risk'], dependencies=[Depends(require_admin)])
 DB = Annotated[AsyncSession, Depends(get_session)]
+
+
+class RiskWindow(IntEnum):
+    DAY = 24
+    TWO_DAYS = 48
+    WEEK = 168
 
 
 class SettingsIn(BaseModel):
@@ -72,7 +79,7 @@ async def coverage(session):
 
 
 @router.get('/overview')
-async def overview(session: DB, hours: Literal[24, 48, 168] = 24):
+async def overview(session: DB, hours: RiskWindow = RiskWindow.DAY):
     now = datetime.now(UTC); cutoff = now - timedelta(hours=hours)
     counts = dict((await session.execute(select(RiskEvent.stars, func.count()).where(
         RiskEvent.updated_at >= cutoff, RiskEvent.result["verification"].astext != "insufficient").group_by(RiskEvent.stars))).all())
@@ -86,7 +93,7 @@ async def overview(session: DB, hours: Literal[24, 48, 168] = 24):
 
 
 @router.get('/events')
-async def events(session: DB, hours: Literal[24, 48, 168] | None = None, stars: int = Query(1, ge=0, le=5),
+async def events(session: DB, hours: RiskWindow | None = None, stars: int = Query(1, ge=0, le=5),
                  q: str = '', start: datetime | None = None, end: datetime | None = None,
                  page: int = Query(1, ge=1), limit: int = Query(20, ge=1, le=100)):
     conditions = [RiskEvent.stars >= stars]
