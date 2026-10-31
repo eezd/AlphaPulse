@@ -10,7 +10,7 @@ from sqlalchemy import select
 from alphapulse.calendar.jin10 import KINDS, LOCAL, START, day_url, normalize
 from alphapulse.calendar.jin10_auth import Jin10Error
 from alphapulse.calendar.jin10_browser import Jin10Browser
-from alphapulse.calendar.jin10_store import mark_day, next_history_day, save_entry
+from alphapulse.calendar.jin10_store import mark_day, next_history_day, save_entry, withdraw_missing
 from alphapulse.calendar.service import save_raw
 from alphapulse.core.crypto import decrypt
 from alphapulse.core.db import SessionLocal
@@ -51,6 +51,7 @@ async def persist_day(day: date, responses: dict, encrypted: bytes, connected_at
         for kind in KINDS:
             for entry in entries[kind]:
                 await save_entry(session, entry, raw_ids[kind], now)
+            await withdraw_missing(session, day, kind, entries[kind], raw_ids[kind], now)
         counts = {kind: len(entries[kind]) for kind in KINDS}
         await mark_day(session, day, counts, now)
         await session.commit()
@@ -62,6 +63,7 @@ class Jin10Worker:
         self.browser = Jin10Browser()
         self.identity = None
         self.live_due: dict[date, float] = {}
+        self.retry_due: dict[date, float] = {}
         self.state = {"state": "disconnected", "error": None, "last_success_at": None}
 
     async def heartbeat(self) -> None:
@@ -77,6 +79,8 @@ class Jin10Worker:
         if identity is None:
             await self.browser.close()
             self.identity = None
+            self.live_due.clear()
+            self.retry_due.clear()
             self.state.update(state="disconnected", error=None, connected_at=None)
             await asyncio.sleep(5)
             return
@@ -84,8 +88,8 @@ class Jin10Worker:
             self.state = {"state": "connecting", "error": None, "connected_at": identity[1].isoformat(), "last_success_at": None}
             await self.browser.connect(decrypt(identity[0]))
             self.identity = identity
-            self.live_due.clear()
         today = datetime.now(LOCAL).date()
+        self.retry_due = {d: deadline for d, deadline in self.retry_due.items() if deadline > time.monotonic()}
         dates = [today + timedelta(days=i) for i in range(-1, 8)]
         self.live_due = {d: self.live_due.get(d, 0) for d in dates if d >= START}
         due = sorted((deadline, d) for d, deadline in self.live_due.items() if deadline <= time.monotonic())
@@ -95,15 +99,29 @@ class Jin10Worker:
             history = False
         else:
             async with SessionLocal() as session:
-                day = await next_history_day(session, START, today - timedelta(days=1))
+                day = await next_history_day(session, START, today - timedelta(days=1), excluded=set(self.retry_due))
             history = True
         if day is None:
             self.state.update(state="ready", history_next=None)
             await asyncio.sleep(2)
             return
         self.state.update(state="syncing", current_day=day.isoformat(), history=history, error=None)
-        responses = await self.browser.fetch_day(day)
-        counts = await persist_day(day, responses, *identity, datetime.now(UTC))
+        try:
+            responses = await self.browser.fetch_day(day)
+            counts = await persist_day(day, responses, *identity, datetime.now(UTC))
+        except (Jin10Error, ValueError, KeyError) as exc:
+            # A bad day must not reset progress or starve the remaining live/history dates.
+            self.retry_due[day] = time.monotonic() + 300
+            if not history:
+                self.live_due[day] = self.retry_due[day]
+            self.state.update(state="error", error=str(exc))
+            logger.warning("金十日历同步失败（%s）：%s", day, exc)
+            if isinstance(exc, Jin10Error):
+                self.identity = None
+                await self.browser.close()
+            await asyncio.sleep(5)
+            return
+        self.retry_due.pop(day, None)
         if not history:
             self.live_due[day] = time.monotonic() + (10 if day == today else 300)
         self.state.update(state="ready", last_success_at=datetime.now(UTC).isoformat(), counts=counts)

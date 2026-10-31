@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from alphapulse.calendar.jin10 import Entry, day_url
+from alphapulse.calendar.jin10 import LOCAL, Entry, day_url
 from alphapulse.calendar.service import record_revision
 from alphapulse.models import EconomicRelease
 from alphapulse.models.jin10 import Jin10SyncDay
@@ -43,7 +43,7 @@ async def save_entry(session: AsyncSession, entry: Entry, raw_id: int, now: date
         await session.flush()
         record_revision(session, row, raw_id)
         return
-    changed = row.values != values or row.scheduled_at != entry.at or row.title != entry.title
+    changed = row.values != values or row.scheduled_at != entry.at or row.title != entry.title or row.schedule_status != "scheduled"
     row.schedule_checked_at = row.last_checked_at = now
     row.error = None
     if row.first_received_at is None and received:
@@ -51,9 +51,27 @@ async def save_entry(session: AsyncSession, entry: Entry, raw_id: int, now: date
         changed = True
     if changed:
         row.title, row.scheduled_at, row.values = entry.title, entry.at, values
+        row.schedule_status = "scheduled"
         row.schedule_url = day_url(date.fromisoformat(meta["date"]))
         row.revision_no += 1
         record_revision(session, row, raw_id)
+
+
+async def withdraw_missing(session: AsyncSession, day: date, kind: str, entries: list[Entry], raw_id: int, now: datetime) -> None:
+    # Only a fully validated response may withdraw records from its own day/category.
+    seen = {entry.identity for entry in entries}
+    rows = await session.scalars(select(EconomicRelease).where(
+        EconomicRelease.source == "jin10",
+        EconomicRelease.values["_jin10"]["date"].as_string() == day.isoformat(),
+        EconomicRelease.values["_jin10"]["kind"].as_string() == kind,
+        EconomicRelease.schedule_status != "withdrawn",
+    ).with_for_update())
+    for row in rows:
+        if row.external_id not in seen:
+            row.schedule_status = "withdrawn"
+            row.schedule_checked_at = row.last_checked_at = now
+            row.revision_no += 1
+            record_revision(session, row, raw_id)
 
 
 async def mark_day(session: AsyncSession, day: date, counts: dict, now: datetime) -> None:
@@ -61,12 +79,14 @@ async def mark_day(session: AsyncSession, day: date, counts: dict, now: datetime
     await session.execute(stmt.on_conflict_do_update(index_elements=["day"], set_={"captured_at": now, "counts": counts}))
 
 
-async def next_history_day(session: AsyncSession, start: date, end: date) -> date | None:
+async def next_history_day(session: AsyncSession, start: date, end: date, *, excluded: set[date] | None = None) -> date | None:
     from datetime import timedelta
-    covered = set(await session.scalars(select(Jin10SyncDay.day).where(Jin10SyncDay.day.between(start, end))))
+    snapshots = await session.scalars(select(Jin10SyncDay).where(Jin10SyncDay.day.between(start, end)))
+    # A preview captured before the local day ended is not a completed historical snapshot.
+    covered = {row.day for row in snapshots if row.captured_at.astimezone(LOCAL).date() > row.day}
     day = start
     while day <= end:
-        if day not in covered:
+        if day not in covered and day not in (excluded or set()):
             return day
         day += timedelta(days=1)
     return None

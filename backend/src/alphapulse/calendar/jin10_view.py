@@ -115,7 +115,10 @@ def jin10_item(row: EconomicRelease, now: datetime) -> dict:
     revised = value.get("previous_revised")
     match = definition(meta)
     eligible = value.get("forecast_before_release", False)
-    if meta["kind"] != "data":
+    if row.schedule_status == "withdrawn":
+        status = "withdrawn"
+        direction, explanation = "uncertain", "金十已移除此日程；已保存值仅供追溯，不作为当前有效日程或方向判断。"
+    elif meta["kind"] != "data":
         status = "recorded"
         direction, explanation = "uncertain", "日程记录不代表事件已经发生；需结合实际消息判断 BTC/ETH 影响。"
     else:
@@ -170,6 +173,8 @@ def merge_items(official: list[tuple[EconomicRelease, dict]], third_party: list[
         item["field_sources"]["scheduled_at"] = provenance(row.source, row.schedule_checked_at, row.schedule_url)
         matches = []
         for extra in third_party:
+            if extra.schedule_status == "withdrawn":
+                continue
             meta = extra.values["_jin10"]
             match = definition(meta)
             if not match or match != (row.family, item["indicator"], row.stage):

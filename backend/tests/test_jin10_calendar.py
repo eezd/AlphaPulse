@@ -87,6 +87,7 @@ def test_periods_cross_year_without_inventing_unrecognized_periods():
 
 def stored(entry, id=11, now=None):
     return SimpleNamespace(id=id, source="jin10", family="jin10", title=entry.title, scheduled_at=entry.at,
+                           external_id=entry.identity, schedule_status="scheduled", period=None, stage=None,
                            schedule_url="https://rili.jin10.com/day/2026-11-04/", release_url=None,
                            values=deepcopy(entry.values), first_received_at=now, last_checked_at=now,
                            schedule_checked_at=now, error=None, revision_no=1)
@@ -205,3 +206,108 @@ def test_account_login_does_not_prove_calendar_access():
     response["data"] = {"date": "2025-01-08", "list": []}
     with pytest.raises(Jin10Error, match="读取权限"):
         validate_access(response)
+
+
+@pytest.mark.parametrize("captured_at,completed", [
+    ("2026-11-02T12:00:00+00:00", False),
+    ("2026-11-04T15:59:59+00:00", False),
+    ("2026-11-04T16:00:00+00:00", True),
+])
+def test_history_completion_requires_a_snapshot_after_the_shanghai_day(trading, captured_at, completed):
+    from alphapulse.calendar.jin10_store import next_history_day
+    day = date(2026, 11, 4)
+    snapshot = SimpleNamespace(day=day, captured_at=datetime.fromisoformat(captured_at))
+    session = SimpleNamespace(scalars=AsyncMock(return_value=[snapshot]))
+    assert asyncio.run(next_history_day(session, day, day)) == (None if completed else day)
+    assert asyncio.run(next_history_day(session, day, day, excluded={day})) is None
+
+
+def test_withdrawal_retains_values_and_records_evidence_and_restoration(trading):
+    from alphapulse.calendar.jin10_store import save_entry, withdraw_missing
+    from alphapulse.calendar.jin10_view import jin10_item
+    entry = entries("2026-11-04")[0]
+    now = datetime(2026, 11, 3, tzinfo=UTC)
+    row = stored(entry, now=now)
+    revisions = []
+    session = SimpleNamespace(scalars=AsyncMock(return_value=[row]), scalar=AsyncMock(return_value=row), add=revisions.append)
+    before = deepcopy(row.values)
+    asyncio.run(withdraw_missing(session, date(2026, 11, 4), "data", [], 42, now))
+    assert row.schedule_status == "withdrawn" and row.values == before
+    assert revisions[0].payload["schedule_status"] == "withdrawn" and revisions[0].raw_response_id == 42
+    item = jin10_item(row, now)
+    assert item["status"] == "withdrawn" and item["impact"] == "uncertain"
+    asyncio.run(save_entry(session, entry, 43, now + timedelta(minutes=1)))
+    assert row.schedule_status == "scheduled" and row.revision_no == 3
+    assert row.first_received_at == now
+    assert revisions[-1].payload["schedule_status"] == "scheduled" and revisions[-1].raw_response_id == 43
+
+
+def test_withdrawn_provider_cannot_supply_official_fallback(trading):
+    from alphapulse.calendar.jin10_view import merge_items
+    entry = next(e for e in entries("2026-10-29") if "jin10_79" in e.values)
+    extra = stored(entry)
+    extra.schedule_status = "withdrawn"
+    official = SimpleNamespace(source="dol", family="initial_claims", stage=None, period="2026-10-24", scheduled_at=entry.at,
+                               first_received_at=entry.at, schedule_checked_at=entry.at, release_url="https://www.dol.gov/claims.pdf",
+                               schedule_url="https://oui.doleta.gov/unemploy/archive.asp")
+    original = {"release_id": 1, "indicator": "initial_claims", "actual": "19.40", "previous": None, "forecast": None,
+                "status": "released", "scheduled_at": entry.at}
+    items = merge_items([(official, original)], [extra], entry.at)
+    result = next(item for item in items if item["release_id"] == 1)
+    assert result["previous"] is None and result["forecast"] is None and result["related_release_id"] is None
+    assert next(item for item in items if item["release_id"] == extra.id)["status"] == "withdrawn"
+
+
+@pytest.mark.parametrize("failure_kind", ["contract", "browser", "missing_key"])
+@pytest.mark.parametrize("failure_stage", ["fetch", "persist"])
+def test_failed_days_do_not_starve_live_or_history_and_retry_after_backoff(trading, monkeypatch, failure_kind, failure_stage):
+    from alphapulse.calendar import jin10_worker as worker
+    from alphapulse.calendar.jin10_auth import Jin10Error
+    now = datetime(2026, 11, 4, tzinfo=UTC)
+    today, yesterday = now.date(), now.date() - timedelta(days=1)
+    first_history = date(2025, 1, 1)
+    connection = SimpleNamespace(token_encrypted=b"synthetic", connected_at=now)
+    clock = [0]
+    successful, attempted = set(), []
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None): return now.astimezone(tz) if tz else now.replace(tzinfo=None)
+    class Session:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def get(self, model, key):
+            return connection if model is worker.Jin10Connection else SimpleNamespace(enabled=True)
+    async def history(session, start, end, *, excluded):
+        return next((first_history + timedelta(days=i) for i in range(3)
+                     if first_history + timedelta(days=i) not in successful | excluded), None)
+    def fail(day):
+        if day in (yesterday, first_history):
+            error = {"contract": ValueError, "browser": Jin10Error, "missing_key": KeyError}[failure_kind]
+            raise error("synthetic day failure")
+    async def fetch(day):
+        attempted.append(day)
+        if failure_stage == "fetch": fail(day)
+        return {}
+    async def persist(day, *args):
+        if failure_stage == "persist": fail(day)
+        successful.add(day)
+        return {}
+    async def sleep(seconds): clock[0] += seconds
+    monkeypatch.setattr(worker, "SessionLocal", Session)
+    monkeypatch.setattr(worker, "decrypt", lambda value: "synthetic")
+    monkeypatch.setattr(worker, "datetime", FrozenDatetime)
+    monkeypatch.setattr(worker.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(worker, "next_history_day", history)
+    monkeypatch.setattr(worker, "persist_day", persist)
+    monkeypatch.setattr(worker.asyncio, "sleep", sleep)
+    collector = worker.Jin10Worker()
+    collector.browser = SimpleNamespace(connect=AsyncMock(), close=AsyncMock(), fetch_day=fetch)
+    async def verify():
+        for _ in range(30): await collector.step()
+        assert {today + timedelta(days=i) for i in range(8)} <= successful
+        assert first_history + timedelta(days=1) in successful and first_history + timedelta(days=2) in successful
+        assert attempted.count(yesterday) == attempted.count(first_history) == 1
+        clock[0] += 301
+        for _ in range(30): await collector.step()
+        assert attempted.count(yesterday) == attempted.count(first_history) == 2
+    asyncio.run(verify())

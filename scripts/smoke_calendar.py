@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 from alphapulse.calendar.jin10 import normalize
 from alphapulse.calendar.jin10_history import calendar_history
 from alphapulse.calendar.jin10_store import next_history_day, save_entry
-from alphapulse.calendar.jin10_view import merge_items
+from alphapulse.calendar.jin10_view import jin10_item, merge_items
 from alphapulse.calendar.jin10_worker import ConnectionChanged, persist_day
 from alphapulse.calendar.parsers import Scheduled
 from alphapulse.calendar.service import release_rows, save_raw, save_result, save_schedule
@@ -67,6 +67,56 @@ async def verify():
         assert await session.scalar(select(func.count()).select_from(RawResponse)) == raw_before + 3
         assert (await session.get(Jin10SyncDay, day)).captured_at == coverage_before
 
+    # Existing preview checkpoints must be revisited after downtime, without a schema migration.
+    async with SessionLocal() as session:
+        checkpoint = await session.get(Jin10SyncDay, day)
+        checkpoint.captured_at = now - timedelta(days=2)
+        await session.commit()
+        assert await next_history_day(session, day, day) == day
+        assert await next_history_day(session, day, day, excluded={day}) is None
+    await persist_day(day, responses, encrypted, connected, now + timedelta(minutes=2))
+    async with SessionLocal() as session:
+        assert await next_history_day(session, day, day) is None
+        other_day_raw = await save_raw(session, "jin10", "https://rili.jin10.com/day/2026-11-03/", 200, {}, b"isolated-other-dates", now)
+        other_entries = [normalize(fixture["2025-01-08"], "data", date(2025, 1, 8))[0],
+                         *normalize(fixture["holiday:2026-11-03"], "holiday", date(2026, 11, 3))]
+        for entry in other_entries:
+            await save_entry(session, entry, other_day_raw, now)
+        await session.commit()
+        revision_count = await session.scalar(select(func.count()).select_from(EconomicRevision))
+
+    # Removing an economic release and event withdraws only those identities, once per change.
+    removed = deepcopy(responses)
+    adp_identity = adp.external_id
+    removed["data"]["list"] = [r for r in removed["data"]["list"] if f"data:{r['data_id']}" != adp_identity]
+    removed_event = removed["event"]["list"].pop(0)
+    removed_ids = {adp_identity, f"event:{removed_event['id']}"}
+    await persist_day(day, removed, encrypted, connected, now + timedelta(minutes=3))
+    async with SessionLocal() as session:
+        rows = list(await session.scalars(select(EconomicRelease).where(EconomicRelease.source == "jin10")))
+        withdrawn = [r for r in rows if r.external_id in removed_ids]
+        assert len(withdrawn) == 2 and all(r.schedule_status == "withdrawn" and r.revision_no == 2 for r in withdrawn)
+        assert all(jin10_item(r, now)["status"] == "withdrawn" for r in withdrawn)
+        assert all(r.schedule_status == "scheduled" and r.revision_no == 1 for r in rows if r.external_id not in removed_ids)
+        evidence = list((await session.execute(select(EconomicRevision, RawResponse).join(
+            RawResponse, RawResponse.id == EconomicRevision.raw_response_id,
+        ).where(EconomicRevision.release_id.in_([r.id for r in withdrawn]), EconomicRevision.revision_no == 2))).all())
+        assert len(evidence) == 2
+        assert all(revision.payload["schedule_status"] == "withdrawn" and raw.url.endswith("#" + owner.external_id.split(":")[0])
+                   for revision, raw in evidence for owner in withdrawn if owner.id == revision.release_id)
+        assert await session.scalar(select(func.count()).select_from(EconomicRevision)) == revision_count + 2
+    await persist_day(day, removed, encrypted, connected, now + timedelta(minutes=4))
+    async with SessionLocal() as session:
+        assert await session.scalar(select(func.count()).select_from(EconomicRevision)) == revision_count + 2
+    await persist_day(day, responses, encrypted, connected, now + timedelta(minutes=5))
+    async with SessionLocal() as session:
+        restored = list(await session.scalars(select(EconomicRelease).where(
+            EconomicRelease.source == "jin10", EconomicRelease.external_id.in_(removed_ids),
+        )))
+        assert all(r.schedule_status == "scheduled" and r.revision_no == 3 for r in restored)
+        assert next(r for r in restored if r.external_id == adp_identity).id == adp.id
+        assert await session.scalar(select(func.count()).select_from(EconomicRevision)) == revision_count + 4
+
     # Join an official weekly release to the exact provider series, including its revised previous value.
     claims_day = date(2026, 10, 29)
     entries = normalize(fixture[str(claims_day)], "data", claims_day)
@@ -92,7 +142,7 @@ async def verify():
         assert len(history) == 1 and history[0]["actual"] == "19.40" and history[0]["forecast"] == "19.9"
         assert history[0]["first_recorded_actual"] == "19.40"
         assert history[0]["first_received_at"] == now
-    print("Calendar acceptance passed: three categories, exact official joins, revisions, raw evidence, late forecasts, coverage and obsolete connection rejection")
+    print("Calendar acceptance passed: three categories, exact official joins, revisions, raw evidence, late forecasts, post-day coverage, scoped withdrawal/restoration and obsolete connection rejection")
 
 
 async def main():
