@@ -711,3 +711,31 @@ test("72小时阅读列表分页保留全部包，更新缩页后回到有效页
   assert.equal(page.readingPage.value, 1)
   assert.equal(page.readingRows.value[0].id, 0)
 })
+
+test("创建新闻 Skills 后刷新列表，旧会话响应不能覆盖新会话", async () => {
+  const user = vue.reactive({ sessionVersion: 1 })
+  const response = Promise.withResolvers<unknown[]>()
+  let notifications = 0
+  const load = moduleLoader({
+    "@/common/apis/risk": { createNewsSkillTemplatesApi: async () => ({ grouping_skill_id: 1 }) },
+    "@@/apis/skills": { listSkillTreeApi: () => response.promise },
+    "@/common/apis/settings": {},
+    "@/pinia/stores/user": { useUserStore: () => user }
+  }, {
+    ...globals,
+    ElMessage: { success() {
+      notifications++
+    } }
+  })
+  const page = load("@/pages/home/index.vue").default.setup({}, { expose() {} })
+  page.settings.value = { grouping_skill_id: null }
+  const pending = page.createTemplates()
+  await setImmediate()
+  user.sessionVersion++
+  await vue.nextTick()
+  page.newsSkills.value = [{ id: 2, scope: "news", kind: "skill", name: "Current" }]
+  response.resolve([{ id: 1, scope: "news", kind: "skill", name: "Old" }])
+  await pending
+  assert.equal(page.newsSkills.value[0].id, 2)
+  assert.equal(notifications, 0)
+})

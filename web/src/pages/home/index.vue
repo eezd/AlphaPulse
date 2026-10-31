@@ -144,7 +144,9 @@ async function createTemplates() {
   const value = await api.createNewsSkillTemplatesApi()
   if (version !== user.sessionVersion || !settings.value) return
   Object.assign(settings.value, value)
-  newsSkills.value = (await listSkillTreeApi()).filter(s => s.scope === "news" && s.kind === "skill")
+  const skills = await listSkillTreeApi()
+  if (version !== user.sessionVersion) return
+  newsSkills.value = skills.filter(s => s.scope === "news" && s.kind === "skill")
   ElMessage.success("已创建草稿，请前往 Skills 页面编辑并发布")
 }
 async function save(enable: boolean) {
