@@ -46,8 +46,8 @@ async def main():
                 response.raise_for_status()
                 assert response.json()['code'] == 0, path
             assert 'CI synthetic news' in (await client.get('/api/news?q=CI')).text
-            for endpoint in ('overview', 'events'):
-                for hours in (24, 48, 168):
+            for endpoint in ('overview', 'summaries'):
+                for hours in (24, 48, 72, 168):
                     response = await client.get('/api/risk/'+endpoint, params={'hours': hours})
                     response.raise_for_status()
                     assert response.json()['code'] == 0
