@@ -1,5 +1,6 @@
 """Administrator-only Jin10 connection; credentials never leave the backend."""
 from datetime import UTC, datetime, timedelta
+import json
 import secrets
 from typing import Annotated
 
@@ -12,6 +13,7 @@ from alphapulse.calendar import jin10_auth
 from alphapulse.core.auth import AuthSession, check_session, require_admin
 from alphapulse.core.crypto import decrypt, encrypt
 from alphapulse.core.db import get_session
+from alphapulse.core.redis import KEY_PREFIX, redis
 from alphapulse.models.jin10 import Jin10Connection
 
 router = APIRouter(prefix="/api/settings/jin10", tags=["settings"], dependencies=[Depends(require_admin)])
@@ -33,14 +35,21 @@ def clear_task(row: Jin10Connection) -> None:
     row.task_id = row.owner = row.qr_encrypted = row.expires_at = row.next_poll_at = None
 
 
-def public_status(row: Jin10Connection) -> dict:
+def public_status(row: Jin10Connection, sync: dict | None = None) -> dict:
+    current = bool(row.token_encrypted and row.connected_at and sync and sync.get("connected_at") == row.connected_at.isoformat()
+                   and datetime.now(UTC) - datetime.fromisoformat(sync["at"]) < timedelta(seconds=30))
     return {"connected": row.token_encrypted is not None, "connected_at": row.connected_at,
-            "error": row.error, "sync_state": "awaiting_validation" if row.token_encrypted else "disconnected"}
+            "error": row.error or (sync.get("error") if current else None),
+            "sync_state": sync["state"] if current else "awaiting_validation" if row.token_encrypted else "disconnected",
+            "last_success_at": sync.get("last_success_at") if current else None,
+            "history_next": sync.get("history_next") if current else None}
 
 
 @router.get("")
 async def status(session: Session) -> ApiResponse[dict]:
-    return success(public_status(await connection(session)))
+    row = await connection(session)
+    raw = await redis.get(f"{KEY_PREFIX}calendar:jin10")
+    return success(public_status(row, json.loads(raw) if raw else None))
 
 
 @router.post("/qr", status_code=201)

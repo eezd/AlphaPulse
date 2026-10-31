@@ -260,15 +260,15 @@ def test_calendar_api_requires_auth_validates_range_and_exposes_unavailable_work
             assert (await client.get("/api/calendar/999/revisions")).status_code == 404
             assert (await client.get("/api/calendar/999/history?indicator=cpi_mom")).status_code == 404
             assert (await client.get("/api/calendar/999/series?indicator=cpi_mom")).status_code == 404
-            session.get.return_value = SimpleNamespace(family="cpi")
+            session.get.return_value = SimpleNamespace(family="cpi", source="bls")
             assert (await client.get("/api/calendar/1/history?indicator=ppi_mom")).status_code == 400
             assert (await client.get("/api/calendar/1/history?indicator=cpi_mom&limit=121")).status_code == 422
             assert (await client.get("/api/calendar/1/series?indicator=ppi_mom")).status_code == 400
             assert (await client.get("/api/calendar/1/series?indicator=cpi_mom&limit=121")).status_code == 422
-            session.get.return_value = SimpleNamespace(family="cpi", period=None)
+            session.get.return_value = SimpleNamespace(family="cpi", source="bls", period=None)
             assert (await client.get("/api/calendar/1/series?indicator=cpi_mom")).json()["data"] == []
             handler = AsyncMock(return_value=[{"actual": "0.3", "first_recorded_actual": "0.4", "revised": True}])
-            monkeypatch.setattr(calendar, "indicator_history", handler)
+            monkeypatch.setattr(calendar, "calendar_history", handler)
             history = await client.get("/api/calendar/1/history?indicator=cpi_mom")
             assert history.status_code == 200 and history.json()["data"][0]["revised"] is True
             assert handler.await_args.args[2:] == ("cpi_mom", 36)

@@ -119,7 +119,6 @@ async def calendar_sources(session: AsyncSession) -> list[CalendarSourceOut]:
     now = datetime.now(UTC)
     raw = await redis.get(f"{KEY_PREFIX}calendar:status")
     heartbeat = json.loads(raw) if raw else None
-    alive = bool(heartbeat and now - datetime.fromisoformat(heartbeat["at"]) < timedelta(seconds=30))
     pending = EconomicRelease.first_received_at.is_(None) & (EconomicRelease.schedule_status == "scheduled")
     published = EconomicRelease.first_received_at.is_not(None)
     rows = (await session.execute(select(
@@ -138,18 +137,26 @@ async def calendar_sources(session: AsyncSession) -> list[CalendarSourceOut]:
         EconomicRelease.scheduled_at >= now - timedelta(days=45),
     ).order_by(EconomicRelease.last_checked_at.desc())):
         result_errors.setdefault(source, error)
-    codes = {family.source for family in FAMILIES.values()}
+    codes = {family.source for family in FAMILIES.values()} | {"jin10"}
+    raw_jin10 = await redis.get(f"{KEY_PREFIX}calendar:jin10")
+    jin10_heartbeat = json.loads(raw_jin10) if raw_jin10 else None
     sources = list(await session.scalars(select(Source).where(Source.code.in_(codes)).order_by(Source.code)))
     output = []
     for source in sources:
-        checks = [s for s in heartbeat["sources"].values() if s["source"] == source.code] if heartbeat else []
+        current_heartbeat = jin10_heartbeat if source.code == "jin10" else heartbeat
+        source_alive = bool(current_heartbeat and now - datetime.fromisoformat(current_heartbeat["at"]) < timedelta(seconds=30))
+        if source.code == "jin10":
+            checks = [{"source": "jin10", "checked_at": jin10_heartbeat["at"],
+                       "error": jin10_heartbeat.get("error") or (None if jin10_heartbeat.get("state") in ("ready", "syncing") else "金十同步尚未就绪")}] if jin10_heartbeat else []
+        else:
+            checks = [s for s in heartbeat["sources"].values() if s["source"] == source.code] if heartbeat else []
         errors = [s["error"] for s in checks if s["error"]]
         if source.code in result_errors:
             errors.append(result_errors[source.code])
         data = stats.get(source.code, {})
         output.append(CalendarSourceOut(
-            code=source.code, name=source.name, region_code=REGIONS[source.code], worker_alive=alive,
-            heartbeat_at=heartbeat["at"] if heartbeat else None,
+            code=source.code, name=source.name, region_code=REGIONS[source.code], worker_alive=source_alive,
+            heartbeat_at=current_heartbeat["at"] if current_heartbeat else None,
             schedule_checked_at=max((s["checked_at"] for s in checks), default=None),
             **{key: data.get(key) for key in ("schedule_success_at", "latest_result_at", "next_event_at", "history_start", "history_end")},
             overdue_count=data.get("overdue_count", 0), errors=list(dict.fromkeys(errors)),

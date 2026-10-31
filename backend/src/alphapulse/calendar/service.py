@@ -170,6 +170,9 @@ def impact(key: str, actual: str | None, previous: str | None, forecast: str | N
 
 
 def release_rows(row: EconomicRelease, now: datetime) -> list[dict]:
+    if row.source == "jin10":
+        from alphapulse.calendar.jin10_view import jin10_item
+        return [jin10_item(row, now)]
     if row.schedule_status == "withdrawn":
         state = "withdrawn"
     elif row.first_received_at is not None:
@@ -221,17 +224,30 @@ async def indicator_history(session: AsyncSession, row: EconomicRelease, key: st
                     .where(EconomicRevision.release_id == EconomicRelease.id,
                            EconomicRevision.payload["values"][key]["actual"].as_string().is_not(None))
                     .order_by(EconomicRevision.revision_no).limit(1).correlate(EconomicRelease).scalar_subquery())
+    filters = []
+    if row.source == "jin10":
+        meta = row.values["_jin10"]
+        filters = [EconomicRelease.values["_jin10"][field].as_string().is_not_distinct_from(meta[field])
+                   for field in ("country_code", "name", "unit")]
     rows = (await session.execute(select(EconomicRelease, first_actual).where(
         EconomicRelease.source == row.source, EconomicRelease.family == row.family,
         EconomicRelease.stage.is_not_distinct_from(row.stage),
         EconomicRelease.scheduled_at <= row.scheduled_at,
         EconomicRelease.schedule_status != "withdrawn", EconomicRelease.first_received_at.is_not(None),
         EconomicRelease.values[key]["actual"].as_string().is_not(None),
+        *filters,
     ).order_by(EconomicRelease.scheduled_at.desc(), EconomicRelease.id.desc()).limit(limit))).all()
-    return [{"release_id": item.id, "scheduled_at": item.scheduled_at, "title": item.title,
-             "period": item.period, "stage": item.stage,
-             "actual": item.values[key]["actual"], "previous": item.values[key].get("previous"),
-             "forecast": item.values[key].get("forecast"), "first_recorded_actual": initial,
-             "first_received_at": item.first_received_at, "release_url": item.release_url,
-             "revised": initial is not None and Decimal(initial) != Decimal(item.values[key]["actual"])}
-            for item, initial in rows]
+    output = []
+    for item, initial in rows:
+        value = item.values[key]
+        view = release_rows(item, datetime.now(item.scheduled_at.tzinfo))[0] if item.source == "jin10" else None
+        output.append({"release_id": item.id, "scheduled_at": item.scheduled_at, "title": item.title,
+                       "period": item.period, "stage": item.stage,
+                       "actual": value["actual"], "previous": view["previous"] if view else value.get("previous"),
+                       "forecast": value.get("forecast"), "first_recorded_actual": initial,
+                       "first_received_at": item.first_received_at, "release_url": item.schedule_url if view else item.release_url,
+                       "period_label": item.values["_jin10"]["period_label"] if view else None,
+                       "forecast_before_release": value.get("forecast_before_release", False),
+                       "forecast_observed_at": value.get("observed_at", {}).get("forecast"),
+                       "revised": initial is not None and (initial != value["actual"] if view else Decimal(initial) != Decimal(value["actual"]))})
+    return output

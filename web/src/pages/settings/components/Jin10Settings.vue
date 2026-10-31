@@ -14,6 +14,7 @@ const visible = ref(false)
 const busy = ref(false)
 const state = ref("idle")
 const failed = ref(false)
+const syncLabels = { awaiting_validation: "同步尚未就绪，账号连接不代表日历已完整收录", disconnected: "尚未连接", connecting: "正在验证日历连接", syncing: "正在同步日历", ready: "日历连接已验证，持续同步中", error: "日历同步失败，请查看下方原因" }
 let generation = 0
 let statusRequest = 0
 let timer: ReturnType<typeof setTimeout> | undefined
@@ -118,7 +119,13 @@ watch(visible, (value) => {
       </p>
       <p>全球宏观数据、重要事件和假期。官方同口径数据优先，金十补充缺项。</p>
       <p v-if="status.connected">
-        日历读取权限待核验；账号连接成功不代表日历同步已就绪。
+        {{ syncLabels[status.sync_state] }}
+      </p>
+      <p v-if="status.last_success_at">
+        最近成功：{{ status.last_success_at }}
+      </p>
+      <p v-if="status.history_next">
+        历史回补下一日期：{{ status.history_next }}（北京时间，2025-01-01 起）
       </p>
       <el-alert v-if="status.error" :title="status.error" type="warning" :closable="false" />
       <el-button type="primary" :loading="busy" @click="start">
@@ -126,6 +133,9 @@ watch(visible, (value) => {
       </el-button>
       <el-button v-if="status.connected" @click="disconnect">
         断开连接
+      </el-button>
+      <el-button @click="load">
+        刷新状态
       </el-button>
     </template>
     <el-button v-if="failed" @click="load">

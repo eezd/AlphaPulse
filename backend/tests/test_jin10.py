@@ -25,6 +25,7 @@ def qr_env(trading, monkeypatch):
     app.include_router(jin10.router)
     app.dependency_overrides[get_session] = lambda: session
     monkeypatch.setattr(jin10, "check_session", AsyncMock())
+    monkeypatch.setattr(jin10.redis, "get", AsyncMock(return_value=None))
     monkeypatch.setattr(jin10_auth, "generate_qr", AsyncMock(return_value="private-qr-token"))
     monkeypatch.setattr(jin10_auth, "poll_qr", AsyncMock(return_value=("pending", None)))
     def authorize():

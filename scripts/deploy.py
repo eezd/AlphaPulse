@@ -11,7 +11,7 @@ import time
 from ci import IMAGES, ROOT, branch_head, locked, require, run, save
 
 INSTANCE = Path('/docker/gitea/dev/AlphaPulse')
-SERVICES = ('api', 'web', 'market', 'crawler', 'calendar', 'trader', 'news-risk')
+SERVICES = ('api', 'web', 'market', 'crawler', 'calendar', 'trader', 'news-risk', 'jin10-calendar')
 
 SCHEMA = '''
 import asyncio, json
@@ -153,7 +153,7 @@ def deploy(build, directory=INSTANCE):
             command = compose(directory, build)
             run(*command, 'config', '--quiet')
             run(*command, 'up', '-d', '--no-build', '--pull', 'never', '--wait', '--wait-timeout', '120', 'api', 'web')
-            run(*command, 'up', '-d', '--no-build', '--pull', 'never', 'market', 'crawler', 'calendar', 'trader', 'news-risk')
+            run(*command, 'up', '-d', '--no-build', '--pull', 'never', 'market', 'crawler', 'calendar', 'trader', 'news-risk', 'jin10-calendar')
             time.sleep(5)
             health(command, build)
             if previous:

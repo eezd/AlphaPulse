@@ -44,6 +44,11 @@ services:
     container_name: AlphaPulse-dev-calendar
     command: [python, -m, alphapulse.calendar.worker]
 
+  jin10-calendar:
+    <<: *backend
+    container_name: AlphaPulse-dev-jin10-calendar
+    command: [python, -m, alphapulse.calendar.jin10_worker]
+
   web:
     image: ${ALPHAPULSE_WEB_IMAGE:?Set a verified web digest}
     container_name: AlphaPulse-dev

@@ -82,11 +82,11 @@ class BuildTests(unittest.TestCase):
 
 
 class RecoveryTests(unittest.TestCase):
-    def test_six_service_rollback_removes_new_worker_and_checks_previous_services(self):
+    def test_rollback_removes_new_calendar_worker_and_checks_previous_services(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             ci.save(directory / 'deployment.pending.json', {})
-            services = [name for name in deploy.SERVICES if name != 'news-risk']
+            services = [name for name in deploy.SERVICES if name != 'jin10-calendar']
             previous = {'images': {part: {'digest': 'synthetic'} for part in ci.IMAGES}}
             compose = 'services:\n' + ''.join(f'  {name}:\n    image: synthetic\n' for name in services)
             with patch.object(deploy, 'run', return_value='') as run, \
@@ -94,7 +94,7 @@ class RecoveryTests(unittest.TestCase):
                 deploy.restore(directory, {'previous': previous, 'previous_compose': compose, 'previous_running': services})
                 update = next(call.args for call in run.call_args_list if 'up' in call.args)
                 self.assertIn('--remove-orphans', update)
-                self.assertNotIn('news-risk', update)
+                self.assertNotIn('jin10-calendar', update)
                 self.assertEqual(health.call_args.args[2], services)
             self.assertFalse((directory / 'deployment.pending.json').exists())
 

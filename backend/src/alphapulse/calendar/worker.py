@@ -374,6 +374,7 @@ class CalendarWorker:
         now = datetime.now(UTC)
         async with SessionLocal() as session:
             ids = list(await session.scalars(select(EconomicRelease.id).where(
+                EconomicRelease.source != "jin10",
                 EconomicRelease.schedule_status == "scheduled", EconomicRelease.scheduled_at <= now,
                 EconomicRelease.scheduled_at >= now - timedelta(days=HISTORY_DAYS), EconomicRelease.next_check_at <= now,
             ).order_by(EconomicRelease.scheduled_at.desc()).limit(8)))

@@ -11,6 +11,8 @@ FROM base AS check
 RUN uv sync --locked && uv run pytest && uvx ruff==0.14.14 check --select F,E9,B src tests
 
 FROM base AS runtime
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+RUN playwright install --with-deps --only-shell chromium
 ARG APP_VERSION=source
 ARG APP_COMMIT=unknown
 ENV APP_VERSION=$APP_VERSION APP_COMMIT=$APP_COMMIT
