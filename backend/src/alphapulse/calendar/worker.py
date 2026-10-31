@@ -12,7 +12,7 @@ from parsel import Selector
 from sqlalchemy import select
 
 from alphapulse.calendar.catalog import SCHEDULE_URLS, UMICH_CSV, UMICH_HISTORY, UMICH_HOME, UMICH_INFO
-from alphapulse.calendar import dol, eia, europe
+from alphapulse.calendar import adp, dol, eia, europe
 from alphapulse.calendar.parsers import EASTERN, MONTHS, bea_release_link, parse_fed_calendar, parse_ics, parse_values, release_date, bls_periods, release_metadata
 from alphapulse.calendar.service import apply_bls_periods, record_revision, next_poll, save_raw, save_result, save_schedule, save_series
 from alphapulse.calendar.umich import current_result, document_links, monthly_series, parse_schedule, pdf_text
@@ -64,7 +64,7 @@ class CalendarWorker:
         # 链接来自公开响应，限制到对应官方域名，避免外部内容扩大访问范围。
         allowed = {"bls": {"www.bls.gov"}, "bea": {"www.bea.gov", "apps.bea.gov"}, "fed": {"www.federalreserve.gov"},
                    "umich": {"www.sca.isr.umich.edu", "data.sca.isr.umich.edu"}, "dol": {"www.dol.gov", "oui.doleta.gov"},
-                   "eia": {"www.eia.gov", "ir.eia.gov"}, **HOSTS}
+                   "eia": {"www.eia.gov", "ir.eia.gov"}, "adp": {"mediacenter.adp.com"}, **HOSTS}
         if urlparse(url).scheme != "https" or urlparse(url).hostname not in allowed[source]:
             raise ValueError("公告链接不是对应机构的官方 HTTPS 地址")
         async with self.fetch_slots:
@@ -88,6 +88,7 @@ class CalendarWorker:
         urls += list(europe.SCHEDULES.items())
         urls += [("dol", dol.SCHEDULE)]
         urls += [("eia", eia.SCHEDULE)]
+        urls += [("adp", adp.INDEX)]
         # 启动时明确各来源尚未就绪；月份滚动后移除不再检查的旧月状态。
         self.sources = {url: self.sources.get(url, {"source": source, "checked_at": now.isoformat(), "error": "尚未同步"})
                         for source, url in urls}
@@ -99,7 +100,17 @@ class CalendarWorker:
                 fetch_url = europe.eurostat_calendar_url(now) if source == "eurostat" else url
                 response, raw_id = await self.fetch(source, fetch_url, query=europe.INSEE_QUERY if source == "insee" else None)
                 response.raise_for_status()
-                if source in ("dol", "eia"):
+                if source == "adp":
+                    links, _ = adp.release_links(response.text, url, datetime.min.date(), now.astimezone(EASTERN).date())
+                    if not links:
+                        raise ValueError("ADP 官方新闻索引缺少近期月报")
+                    report, evidence = await self.fetch(source, links[0])
+                    report.raise_for_status()
+                    events = adp.schedule(report.text, str(report.url))
+                    async with SessionLocal() as session:
+                        await save_schedule(session, source, url, events, evidence, datetime.now(UTC), withdraw_missing=False)
+                        await session.commit()
+                elif source in ("dol", "eia"):
                     events = (dol if source == "dol" else eia).schedule(response.text, now)
                     async with SessionLocal() as session:
                         await save_schedule(session, source, url, events, raw_id, datetime.now(UTC), withdraw_missing=False)
@@ -179,6 +190,24 @@ class CalendarWorker:
             await session.commit()
 
     async def result_page(self, row: EconomicRelease) -> tuple[httpx.Response, int] | None:
+        if row.source == "adp":
+            if row.release_url:
+                url = row.release_url
+            else:
+                index, _ = await self.fetch("adp", adp.INDEX)
+                index.raise_for_status()
+                links, _ = adp.release_links(index.text, adp.INDEX, row.scheduled_at.astimezone(EASTERN).date(), row.scheduled_at.astimezone(EASTERN).date())
+                if not links:
+                    return None
+                if len(links) != 1:
+                    raise ValueError("ADP 同日月度公告不唯一")
+                url = links[0]
+            response, raw_id = await self.fetch("adp", url)
+            response.raise_for_status()
+            announcement = adp.report(response.text)
+            if announcement.at != row.scheduled_at or announcement.period != row.period:
+                raise ValueError("ADP 公告时间或统计月与所选日程不符")
+            return response, raw_id
         if row.source == "eia":
             if self.eia_schedule_body is None:
                 schedule, _ = await self.fetch("eia", eia.SCHEDULE)
@@ -310,7 +339,10 @@ class CalendarWorker:
                 page = await self.result_page(row)
                 if page is not None:
                     response, raw_id = page
-                    if row.source == "eia":
+                    if row.source == "adp":
+                        announcement = adp.report(response.text)
+                        period, stage, values = announcement.period, announcement.stage, announcement.values
+                    elif row.source == "eia":
                         announcement = eia.report(response.text, self.eia_schedule_body)
                         period, stage, values = announcement.period, announcement.stage, announcement.values
                     elif row.source == "dol":

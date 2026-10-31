@@ -39,6 +39,7 @@ INDICATORS = {
     "umich_sentiment": Indicator("密歇根大学消费者信心指数", 3, "点"),
     "initial_claims": Indicator("初请失业金人数（季调）", 4, "万人"),
     "continued_claims": Indicator("续请失业金人数（季调）", 3, "万人"),
+    "adp_jobs": Indicator("ADP 私营部门就业净变动（月度）", 4, "万人"),
     "eia_crude": Indicator("EIA 商业原油库存变动（不含战略储备）", 4, "万桶"),
     "eia_gasoline": Indicator("EIA 汽油库存变动", 3, "万桶"),
     "eia_distillate": Indicator("EIA 精炼油库存变动", 3, "万桶"),
@@ -53,6 +54,7 @@ FAMILIES = {
     "umich": Family("US", "umich", ("umich_sentiment",)),
     "initial_claims": Family("US", "dol", ("initial_claims",)),
     "continued_claims": Family("US", "dol", ("continued_claims",)),
+    "adp_jobs": Family("US", "adp", ("adp_jobs",)),
     "eia_stocks": Family("US", "eia", ("eia_crude", "eia_gasoline", "eia_distillate")),
 }
 STAGES = {"preliminary": "初值", "final": "终值", "initial": "首发值", "updated": "更新估计", "advance": "初值", "second": "二次估计", "third": "终值"}

@@ -24,7 +24,7 @@ from parsel import Selector
 from sqlalchemy import select, text
 
 from alphapulse.calendar.archives import Announcement, parse_announcements, parse_umich_report
-from alphapulse.calendar import dol, eia, europe
+from alphapulse.calendar import adp, dol, eia, europe
 from alphapulse.calendar.catalog import UMICH_CSV, UMICH_HISTORY, UMICH_HOME, UMICH_INFO, UMICH_REPORTS
 from alphapulse.calendar.parsers import Scheduled, bea_family, compact
 from alphapulse.calendar.service import record_revision, save_raw, save_result, save_schedule, save_series
@@ -39,6 +39,7 @@ HOSTS = {"bls": {"www.bls.gov", "www.dol.gov"}, "bea": {"www.bea.gov"},
 US_SOURCES = frozenset(HOSTS)
 HOSTS["dol"] = {"www.dol.gov", "oui.doleta.gov"}
 HOSTS["eia"] = {"www.eia.gov", "ir.eia.gov"}
+HOSTS["adp"] = {"mediacenter.adp.com"}
 HOSTS.update(EUROPE_HOSTS)
 
 
@@ -202,6 +203,24 @@ async def fetch_documents(start: date, end: date, known: set[str], errors: list[
                 documents.append(await fetch("dol", dol.LATEST))
             except (httpx.HTTPError, ValueError) as exc:
                 report_error("dol", dol.LATEST, exc)
+        if "adp" in selected:
+            url = adp.INDEX
+            visited = set()
+            while url:
+                try:
+                    if url in visited:
+                        raise ValueError("ADP 官方分页形成循环")
+                    visited.add(url)
+                    page = await fetch("adp", url)
+                    links, following = adp.release_links(page.body.decode(), url, start, end)
+                    for link in links:
+                        if link not in known:
+                            documents.append(await fetch("adp", link))
+                            known.add(link)
+                    url = following
+                except (httpx.HTTPError, ValueError) as exc:
+                    report_error("adp", str(exc.request.url) if isinstance(exc, httpx.HTTPError) else url, exc)
+                    break
         if "eia" in selected:
             try:
                 documents.append(await fetch("eia", eia.SCHEDULE))
@@ -310,7 +329,7 @@ async def run(start: date, end: date, *, commit: bool = False, stored_only: bool
             RawResponse.source_code.in_(selected), RawResponse.status == 200,
             (RawResponse.url.contains("/news.release/") | RawResponse.url.contains("/newsroom/economicdata/") |
              RawResponse.url.contains("/news/202") | RawResponse.url.contains("/pressreleases/monetary") |
-             RawResponse.source_code.in_(("umich", "dol", "eia")) | RawResponse.source_code.in_(EUROPE_HOSTS)),
+             RawResponse.source_code.in_(("umich", "dol", "eia", "adp")) | RawResponse.source_code.in_(EUROPE_HOSTS)),
         ).distinct(RawResponse.source_code, RawResponse.url, RawResponse.body_sha256)
             .order_by(RawResponse.source_code, RawResponse.url, RawResponse.body_sha256, RawResponse.id))).all()
         documents = [Document(r.source_code, r.url, gzip.decompress(body), r.fetched_at, r.id, r.headers) for r, body in rows]
@@ -350,6 +369,12 @@ async def run(start: date, end: date, *, commit: bool = False, stored_only: bool
         announcements.append((document, "umich", announcement, schedules[identity][0].title))
     for document in sorted(documents, key=lambda d: d.captured_at):
         try:
+            if document.source == "adp":
+                if "ADP-National-Employment-Report-" in urlparse(document.url).path:
+                    announcement = adp.report(document.body.decode())
+                    if begin <= announcement.at < finish:
+                        announcements.append((document, "adp_jobs", announcement, adp.TITLE))
+                continue
             if document.source == "eia":
                 if urlparse(document.url).path.endswith("/table1.csv"):
                     if eia_schedule is None:

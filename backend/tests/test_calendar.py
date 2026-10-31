@@ -282,7 +282,7 @@ def test_worker_initializes_all_sources_and_drops_expired_month_status(trading):
         worker = CalendarWorker()
         worker.sources["https://www.federalreserve.gov/old-month.htm"] = {"error": "old"}
         async def unavailable(source, url, *, query=None):
-            assert len(worker.sources) == 17
+            assert len(worker.sources) == 18
             assert all(s["error"] for s in worker.sources.values())
             raise httpx.ConnectError("source unavailable")
         worker.fetch = unavailable
