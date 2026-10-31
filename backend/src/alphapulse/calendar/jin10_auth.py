@@ -14,6 +14,10 @@ class Jin10Error(Exception):
     pass
 
 
+class Jin10QrExpired(Jin10Error):
+    pass
+
+
 async def uc_request(path: str, params: dict | None = None, token: str | None = None) -> dict:
     headers = {**HEADERS, **({"x-token": token} if token else {})}
     try:
@@ -21,6 +25,8 @@ async def uc_request(path: str, params: dict | None = None, token: str | None = 
             response = await client.get(UC_URL + path, params=params, headers=headers)
             response.raise_for_status()
             body = response.json()
+        if path == "/qrcode/try_login" and isinstance(body, dict) and body.get("status") == 400 and body.get("message") == "二维码已过期":
+            raise Jin10QrExpired("金十二维码已过期")
         if not isinstance(body, dict) or body.get("status") != 200:
             raise Jin10Error("金十未接受请求，请重新扫码或稍后重试")
         return body
@@ -48,7 +54,10 @@ def qr_image(token: str) -> str:
 
 
 async def poll_qr(token: str) -> tuple[str, str | None]:
-    body = await uc_request("/qrcode/try_login", {"token": token})
+    try:
+        body = await uc_request("/qrcode/try_login", {"token": token})
+    except Jin10QrExpired:
+        return "expired", None
     data = body.get("data")
     if data is None:
         return "pending", None

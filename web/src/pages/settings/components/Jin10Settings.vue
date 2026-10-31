@@ -135,7 +135,7 @@ watch(visible, (value) => {
       <div v-loading="busy" class="jin10-qr">
         <img v-if="qr && state === 'pending'" :src="qr.image" alt="金十登录二维码" width="240" height="240">
         <p v-if="state === 'pending'">
-          请用金十 App 扫描并确认，二维码 60 秒后失效。
+          请立即用金十 App 扫描并确认，二维码有效时间较短，失效后可刷新。
         </p>
         <p v-else-if="state === 'expired'">
           二维码已失效，请刷新后重新扫码。

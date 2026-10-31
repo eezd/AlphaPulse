@@ -225,3 +225,31 @@ def test_upstream_errors_never_expose_tokens(qr_env, monkeypatch):
     with pytest.raises(jin10_auth.Jin10Error, match="金十连接失败") as exc:
         asyncio.run(jin10_auth.uc_request("/qrcode/try_login", {"token": "private"}))
     assert "private" not in str(exc.value)
+
+
+@pytest.mark.parametrize("message,expired", [("二维码已过期", True), ("请求被拒绝", False)])
+def test_observed_upstream_expiry_is_not_a_generic_connection_failure(qr_env, monkeypatch, message, expired):
+    from alphapulse.calendar import jin10_auth
+    import importlib
+    jin10_auth = importlib.reload(jin10_auth)
+    response = httpx.Response(200, json={"status": 400, "message": message}, request=httpx.Request("GET", "https://uc-api.jin10.com/qrcode/try_login"))
+    monkeypatch.setattr(httpx.AsyncClient, "get", AsyncMock(return_value=response))
+    if expired:
+        assert asyncio.run(jin10_auth.poll_qr("private")) == ("expired", None)
+    else:
+        with pytest.raises(jin10_auth.Jin10Error, match="未接受请求"):
+            asyncio.run(jin10_auth.poll_qr("private"))
+
+
+def test_upstream_expiry_clears_task_without_disconnecting_existing_account(qr_env):
+    e = qr_env
+    e.authorize()
+    e.pending()
+    e.row.token_encrypted = b"existing-encrypted-credential"
+    e.upstream.poll_qr.return_value = "expired", None
+    response = request(e, "POST", "/qr/task-a/poll")
+    assert response.status_code == 200
+    assert response.json()["data"]["state"] == "expired"
+    assert e.row.token_encrypted == b"existing-encrypted-credential"
+    assert e.row.qr_encrypted is None
+    assert e.row.error is None
