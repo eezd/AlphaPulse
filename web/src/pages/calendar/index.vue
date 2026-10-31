@@ -177,7 +177,7 @@ onUnmounted(() => {
       <div v-loading="loading" class="calendar-results">
         <section v-for="[date, items] in groups" :key="date">
           <h2>{{ date }} <small>{{ items.length }} 项记录</small></h2>
-          <el-table :data="items" stripe @row-click="openDetail">
+          <el-table :key="kind" :data="items" stripe @row-click="openDetail">
             <el-table-column label="时间" width="90">
               <template #default="{ row }">
                 {{ timeLabel(row as CalendarItem) }}
