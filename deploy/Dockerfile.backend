@@ -3,6 +3,8 @@ COPY --from=ghcr.io/astral-sh/uv:0.12 /uv /uvx /usr/local/bin/
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_NO_CACHE=1 UV_PROJECT_ENVIRONMENT=/opt/venv PATH=/opt/venv/bin:$PATH
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
+# Keep Playwright's bundled driver separate from the remaining Python dependencies.
+RUN uv sync --locked --no-dev --no-install-project --no-install-package playwright
 RUN uv sync --locked --no-dev --no-install-project
 COPY . .
 RUN uv sync --locked --no-dev
@@ -10,9 +12,19 @@ RUN uv sync --locked --no-dev
 FROM base AS check
 RUN uv sync --locked && uv run pytest && uvx ruff==0.14.14 check --select F,E9,B src tests
 
+FROM base AS browser-download
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+RUN playwright install --only-shell chromium
+# The executable alone nearly fills the CDN budget; copy its assets in another layer.
+RUN python -c 'from pathlib import Path; root = Path("/opt/ms-playwright"); binary, = root.glob("chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell"); target = Path("/opt/browser-executable") / binary.relative_to(root); target.parent.mkdir(parents=True); binary.rename(target)'
+
 FROM base AS runtime
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
-RUN playwright install --with-deps --only-shell chromium
+# Split graphics libraries from the remaining browser libraries and fonts.
+RUN apt-get update && apt-get install -y --no-install-recommends libgbm1 && rm -rf /var/lib/apt/lists/*
+RUN playwright install-deps chromium && rm -rf /var/lib/apt/lists/*
+COPY --from=browser-download /opt/browser-executable/ /opt/ms-playwright/
+COPY --from=browser-download /opt/ms-playwright/ /opt/ms-playwright/
 ARG APP_VERSION=source
 ARG APP_COMMIT=unknown
 ENV APP_VERSION=$APP_VERSION APP_COMMIT=$APP_COMMIT
