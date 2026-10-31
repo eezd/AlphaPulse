@@ -56,7 +56,7 @@ async function publish(version: SkillVersion) {
   const seq = requestSeq
   const current = props.skill?.published_version_no
   const action = current !== null && current !== undefined && version.version_no < current ? "回退到" : "发布"
-  await ElMessageBox.confirm(`${action} v${version.version_no}？发布后 Chat 下一轮起按此版本判断。`, "发布确认", { type: "warning" })
+  await ElMessageBox.confirm(`${action} v${version.version_no}？发布后对应用途的下一次任务起使用此版本。`, "发布确认", { type: "warning" })
   sessionScope.assertCurrent()
   if (seq !== requestSeq || !visible.value || skillId !== props.skill?.id)
     throw new CanceledError("查看的 Skill 已切换")

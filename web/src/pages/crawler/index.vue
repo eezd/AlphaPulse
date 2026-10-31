@@ -1,6 +1,6 @@
 <script lang="ts" setup>
 import type { SourcesInfo } from "@@/apis/crawler/type"
-import { listSourcesApi, restartCrawlerApi } from "@@/apis/crawler"
+import { createRssApi, listSourcesApi, restartCrawlerApi } from "@@/apis/crawler"
 import { useSessionScope } from "@@/composables/useSessionScope"
 import { formatTime } from "@@/utils/text"
 import { Monitor, RefreshRight } from "@element-plus/icons-vue"
@@ -9,6 +9,22 @@ import CalendarSourcePanel from "./components/CalendarSourcePanel.vue"
 import SourcePanel from "./components/SourcePanel.vue"
 import { useCrawlerLogs } from "./composables/useCrawlerLogs"
 
+const rssVisible = ref(false)
+const rssSaving = ref(false)
+const rssDraft = reactive({ name: "", url: "", interval_seconds: 300 })
+async function addRss() {
+  if (rssSaving.value) return
+  rssSaving.value = true
+  sessionScope.assertCurrent()
+  try {
+    await createRssApi({ ...rssDraft })
+    if (!sessionScope.isCurrent()) return
+    rssVisible.value = false
+    await refresh()
+  } finally {
+    rssSaving.value = false
+  }
+}
 const sessionScope = useSessionScope()
 
 // 连续失败达到该次数时卡片告警
@@ -89,6 +105,22 @@ onMounted(async () => {
 </script>
 
 <template>
+  <el-dialog v-model="rssVisible" title="新增RSS/Atom订阅（保存后默认暂停）">
+    <el-form label-position="top">
+      <el-form-item label="名称">
+        <el-input v-model="rssDraft.name" />
+      </el-form-item><el-form-item label="公开订阅地址">
+        <el-input v-model="rssDraft.url" />
+      </el-form-item><el-form-item label="间隔（秒）">
+        <el-input-number v-model="rssDraft.interval_seconds" :min="60" :max="86400" />
+      </el-form-item><el-button :loading="rssSaving" @click="addRss">
+        保存订阅
+      </el-button>
+    </el-form>
+  </el-dialog>
+  <el-button @click="rssVisible = true">
+    新增 RSS/Atom 订阅
+  </el-button>
   <div v-if="!info" v-loading="loading" class="min-h-40">
     <el-result v-if="failed" icon="error" title="采集状态读取失败">
       <template #extra>

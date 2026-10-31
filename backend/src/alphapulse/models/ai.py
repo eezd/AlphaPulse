@@ -40,6 +40,7 @@ class SkillNode(Base):
     parent_id: Mapped[int | None] = mapped_column(ForeignKey("skill_nodes.id"))
     # folder / skill
     kind: Mapped[str] = mapped_column(String(8))
+    scope: Mapped[str] = mapped_column(String(16), default="shared", server_default="shared")
     name: Mapped[str] = mapped_column(String(128))
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
     priority: Mapped[int] = mapped_column(Integer, default=0)

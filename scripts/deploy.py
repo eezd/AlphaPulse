@@ -2,6 +2,7 @@
 """Update the one data-bearing dev instance using verified image digests."""
 
 import argparse
+import secrets
 import json
 from pathlib import Path
 import re
@@ -10,8 +11,10 @@ import time
 
 from ci import IMAGES, ROOT, branch_head, locked, require, run, save
 
+SEARXNG_IMAGE = 'docker.io/searxng/searxng@sha256:f4aa660c54d062dedb268be84e821ea24e39f48c7a496af8dd02cc9eedb93847'
+
 INSTANCE = Path('/docker/gitea/dev/AlphaPulse')
-SERVICES = ('api', 'web', 'market', 'crawler', 'calendar', 'trader', 'news-risk', 'jin10-calendar')
+SERVICES = ('api', 'web', 'market', 'crawler', 'calendar', 'trader', 'news-risk', 'jin10-calendar', 'searxng')
 
 SCHEMA = '''
 import asyncio, json
@@ -91,6 +94,10 @@ def health(command, build, expected_services=SERVICES):
     for container in containers:
         require(container['State']['Running'] and not container['State']['Paused'] and container['RestartCount'] == 0,
                 'Service exited, paused or restarted')
+        service = container['Config']['Labels']['com.docker.compose.service']
+        if service == 'searxng':
+            require(container['Config']['Image'] == SEARXNG_IMAGE, 'Unexpected search image')
+            continue
         part = 'web' if container['Name'] == '/AlphaPulse-dev' else 'backend'
         expected = json.loads(run('docker', 'image', 'inspect', build['images'][part]['digest']))[0]['Id']
         require(container['Image'] == expected, 'Running image differs from the accepted digest')
@@ -100,6 +107,10 @@ def health(command, build, expected_services=SERVICES):
     payload = run('docker', 'exec', 'AlphaPulse-dev-api', 'python', '-c',
                   'import json,urllib.request; print(json.load(urllib.request.urlopen("http://web/version.json"))["commit"])')
     require(payload == build['commit'], 'Served frontend revision mismatch')
+    if 'searxng' in expected_services:
+        payload = run('docker', 'exec', 'AlphaPulse-dev-api', 'python', '-c',
+                      'import urllib.request; print(urllib.request.urlopen("http://searxng:8080/healthz", timeout=10).status)')
+        require(payload == '200', 'Search service health check failed')
 
 
 def deploy(build, directory=INSTANCE):
@@ -111,6 +122,7 @@ def deploy(build, directory=INSTANCE):
             print('Skipped: dev has advanced')
             return
         validate_images(build)
+        run('docker', 'pull', SEARXNG_IMAGE)
         # Only this read-only schema guard receives the existing application environment.
         print(run('docker', 'run', '--rm', '-i', '--network', 'dev_default', '--env-file', directory / '.env',
                   build['images']['backend']['digest'], 'python', '-', input=SCHEMA), flush=True)
@@ -150,10 +162,14 @@ def deploy(build, directory=INSTANCE):
                 run(*old_command, 'stop', 'trader')
                 run(*old_command, 'stop', *[service for service in previous_running if service != 'trader'])
             (directory / 'compose.yml').write_text((ROOT / 'deploy/docker-compose.yml').read_text())
+            search_config = directory / 'searxng.yml'
+            if not search_config.exists():
+                search_config.write_text((ROOT / 'deploy/searxng.yml').read_text().replace('@SEARXNG_SECRET@', secrets.token_hex(32)))
+                search_config.chmod(0o644)
             command = compose(directory, build)
             run(*command, 'config', '--quiet')
             run(*command, 'up', '-d', '--no-build', '--pull', 'never', '--wait', '--wait-timeout', '120', 'api', 'web')
-            run(*command, 'up', '-d', '--no-build', '--pull', 'never', 'market', 'crawler', 'calendar', 'trader', 'news-risk', 'jin10-calendar')
+            run(*command, 'up', '-d', '--no-build', '--pull', 'never', 'market', 'crawler', 'calendar', 'trader', 'news-risk', 'jin10-calendar', 'searxng')
             time.sleep(5)
             health(command, build)
             if previous:
@@ -199,12 +215,49 @@ def restore(directory, pending):
     print('Restored previous images and configuration; business data was retained', flush=True)
 
 
+
+def reset_news_ai(build, confirmed=False):
+    """Preview or clear only legacy news AI records under the deployment lock."""
+    validate_images(build)
+    with locked(INSTANCE / '.deploy.lock'):
+        require(not (INSTANCE / 'deployment.pending.json').exists(), 'Recover the pending deployment first')
+        command = ['docker', 'run', '--rm', '-i', '--network', 'dev_default', '--env-file', str(INSTANCE / '.env'),
+                   build['images']['backend']['digest'], 'python', '-']
+        run(*command, input=SCHEMA)
+        if confirmed:
+            current = json.loads((INSTANCE / 'deployment.json').read_text())
+            run(*compose(INSTANCE, current), 'stop', 'news-risk')
+        program = """
+import asyncio,json
+from sqlalchemy import text
+from alphapulse.core.db import engine
+async def main():
+    async with engine.begin() as c:
+        if not CONFIRMED:
+            await c.execute(text('SET TRANSACTION READ ONLY'))
+        counts = {table: await c.scalar(text('SELECT count(*) FROM '+table)) for table in
+            ('risk_analyses','risk_events','risk_snapshots')}
+        if CONFIRMED:
+            assert not await c.scalar(text('SELECT count(*) FROM news_ai_article_analyses')), 'New pipeline already contains data'
+            assert not await c.scalar(text('SELECT count(*) FROM news_ai_summaries')), 'New pipeline already contains data'
+            await c.execute(text('UPDATE risk_settings SET enabled=false, start_at=NULL'))
+            for table in ('risk_analyses','risk_events','risk_snapshots'):
+                await c.execute(text('DELETE FROM '+table))
+        print(json.dumps({'legacy_counts':counts,'cleared':CONFIRMED}))
+    await engine.dispose()
+asyncio.run(main())
+"""
+        print(run(*command, input='CONFIRMED = '+repr(confirmed)+'\n'+program), flush=True)
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('update', 'recover', 'rollback'))
+    parser.add_argument('command', choices=('update', 'recover', 'rollback', 'reset-news-ai'))
     parser.add_argument('--build', type=Path, default=ROOT / 'build.json')
+    parser.add_argument('--confirm-delete-old-news-ai', action='store_true')
     args = parser.parse_args()
-    if args.command == 'update':
+    if args.command == 'reset-news-ai':
+        reset_news_ai(json.loads(args.build.read_text()), args.confirm_delete_old_news_ai)
+    elif args.command == 'update':
         deploy(json.loads(args.build.read_text()))
     else:
         with locked(INSTANCE / '.deploy.lock'):

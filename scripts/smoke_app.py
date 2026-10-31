@@ -40,7 +40,7 @@ async def main():
         try:
             for path in ['/api/auth/me', '/api/news?q=CI', '/api/crawler/sources', '/api/market/symbols',
                          '/api/skills/tree', '/api/trading/status', '/api/chat/session',
-                         '/api/risk/settings', '/api/risk/overview', '/api/risk/events',
+                         '/api/risk/settings', '/api/risk/overview', '/api/risk/summaries',
                          '/api/calendar?start=' + now.strftime('%Y-%m-%d')]:
                 response = await client.get(path)
                 response.raise_for_status()

@@ -15,6 +15,7 @@ class Source(Base):
     name: Mapped[str] = mapped_column(String(64))
     list_url: Mapped[str] = mapped_column(String(255))
     # 新闻管理器只负责 news；日历专属来源不启动 Scrapy 子进程。
+    adapter: Mapped[str] = mapped_column(String(16), default="builtin", server_default="builtin")
     collector: Mapped[str] = mapped_column(String(16), default="news", server_default="news")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     interval_seconds: Mapped[int] = mapped_column(Integer)

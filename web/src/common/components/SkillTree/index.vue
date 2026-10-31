@@ -7,6 +7,7 @@ import { useSessionScope } from "@@/composables/useSessionScope"
 
 const props = defineProps<{
   nodes: SkillNode[]
+  scope?: "shared" | "news"
   editable?: boolean
   selectedId?: number | null
   /** 需要高亮的节点（如 Chat 刚生成草稿的 skill） */
@@ -79,7 +80,7 @@ async function create(parentId: number | null, kind: NodeKind) {
     inputValidator: NAME_RULE
   })
   sessionScope.assertCurrent()
-  const node = await createSkillNodeApi({ parent_id: parentId, kind, name: value.trim() })
+  const node = await createSkillNodeApi({ parent_id: parentId, kind, name: value.trim(), scope: props.scope ?? "shared" })
   emit("changed")
   if (kind === "skill")
     emit("select", node)
@@ -137,7 +138,7 @@ function onCollapse(item: TreeItem) {
             :class="{ 'opacity-50': !data.data.enabled, 'bg-amber-100': highlightIds?.includes(data.id) }"
           >
             <span>{{ data.data.kind === "folder" ? "📁" : "📄" }}</span>
-            <span class="truncate">{{ data.data.name }}</span>
+            <span class="truncate">{{ data.data.name }}{{ data.data.scope === "news" ? " · 新闻" : "" }}</span>
             <template v-if="data.data.kind === 'skill'">
               <el-tag size="small" effect="plain" class="shrink-0">
                 P{{ data.data.priority }}

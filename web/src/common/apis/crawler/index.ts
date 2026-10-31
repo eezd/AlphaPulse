@@ -43,3 +43,5 @@ export function subscribeCrawlerApi(signal: AbortSignal, version: number, onOpen
     if (name === "log") onMessage(data)
   })
 }
+
+export const createRssApi = (data: Crawler.RssInput) => request<{ code: string }>({ url: "/crawler/sources/rss", method: "post", data })

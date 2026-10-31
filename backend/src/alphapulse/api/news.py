@@ -15,7 +15,7 @@ from alphapulse.core.db import get_session
 from alphapulse.core.redis import redis
 from alphapulse.crawler.events import NEWS_CHANNEL
 from alphapulse.models import NewsItem, NewsRevision
-from alphapulse.models.risk import RiskAnalysis
+from alphapulse.models.risk import ArticleAnalysis, NewsSummary, SummaryArticle
 
 router = APIRouter(prefix="/api/news", tags=["news"], dependencies=[Depends(require_admin)])
 
@@ -120,17 +120,24 @@ async def list_news(
         conditions.append(NewsItem.id.in_(ids))
     total = await session.scalar(select(func.count()).select_from(NewsItem).where(*conditions))
     rows = (await session.execute(
-        select(NewsItem, func.left(NewsItem.content_text, EXCERPT_LENGTH).label("excerpt"), RiskAnalysis)
-        .outerjoin(RiskAnalysis, (RiskAnalysis.news_id == NewsItem.id) & (RiskAnalysis.content_hash == NewsItem.content_hash))
+        select(NewsItem, func.left(NewsItem.content_text, EXCERPT_LENGTH).label("excerpt"), ArticleAnalysis)
+        .outerjoin(ArticleAnalysis, (ArticleAnalysis.news_id == NewsItem.id) & (ArticleAnalysis.content_hash == NewsItem.content_hash))
         .where(*conditions)
         .order_by(NewsItem.published_at.desc(), NewsItem.id.desc())
         .offset((page - 1) * limit)
         .limit(limit)
     )).all()
 
-    items = [NewsBrief.model_validate({**news.__dict__, "excerpt": excerpt,
-        "risk": {**(analysis.result or {}), "state": analysis.state} if analysis else None})
-        for news, excerpt, analysis in rows]
+    items = []
+    for news, excerpt, analysis in rows:
+        summaries = (await session.scalars(select(NewsSummary).join(SummaryArticle).where(
+            SummaryArticle.analysis_id == analysis.id, NewsSummary.result.is_not(None)).order_by(NewsSummary.stars.desc()))).all() if analysis else []
+        risk = None
+        if analysis:
+            risk = {'state': 'pending' if analysis.state == 'done' else analysis.state}
+            if summaries:
+                risk = {**summaries[0].result, 'stars': summaries[0].stars, 'state': 'done'}
+        items.append(NewsBrief.model_validate({**news.__dict__, 'excerpt': excerpt, 'risk': risk}))
     return success(NewsPage(items=items, total=total))
 
 

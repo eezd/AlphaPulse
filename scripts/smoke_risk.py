@@ -1,38 +1,19 @@
-"""Exercise news risk regressions against the synthetic CI database only."""
+"""Exercise both news stages against the disposable CI database and fake models."""
 import asyncio
 from datetime import UTC, datetime, timedelta
 import json
 import os
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from urllib.parse import urlparse
-
 from fastapi import HTTPException
 from sqlalchemy import delete, func, select
-
 from alphapulse.ai import llm
+from alphapulse.ai.skills import create_node, add_version, published_skills
 from alphapulse.api.settings import delete_provider
 from alphapulse.core.db import SessionLocal, engine
-from alphapulse.models import AiProvider, NewsItem
-from alphapulse.models.risk import RiskAnalysis, RiskEvent, RiskSettings, RiskSnapshot
-from alphapulse.news_risk import service, worker
-
-
-def label(identifier, title, stars=0, event_id=None):
-    return service.Label(id=identifier, title=title, summary=title, category='security', entities=['Exchange'],
-        stars=stars, direction='unknown', verification='reported', confidence='low', reasoning='Synthetic fixture',
-        uncertainty='Synthetic fixture', evidence=title, event_id=event_id)
-
-
-def event(at, stars):
-    return RiskEvent(title='Exchange security incident', category='security', entities=['Exchange'],
-        stars=stars, peak_stars=stars, result=label(1, 'Exchange security incident', stars).model_dump(),
-        published_at=at, updated_at=at)
-
-
-def news(external_id, at, content='Synthetic fixture'):
-    return NewsItem(source_code='wscn_news', external_id='ci-risk-'+external_id, url='https://example.invalid',
-        title='Exchange security incident', summary='', content_text=content, published_at=at, content_hash=external_id)
+from alphapulse.models import AiProvider, NewsItem, SkillNode, SkillVersion
+from alphapulse.models.risk import RiskSettings, RiskSnapshot, ArticleAnalysis, NewsSummary, SummaryArticle, SummaryVersion, PackageEvidence
+from alphapulse.news_risk import service, pipeline, worker, briefing
 
 
 async def main():
@@ -42,111 +23,152 @@ async def main():
     now = datetime.now(UTC)
     async with SessionLocal() as session:
         assert await session.scalar(select(func.count()).select_from(RiskSettings)) == 0
-        provider = AiProvider(name='ci-risk', protocol='openai', base_url='https://example.invalid',
-            api_key_encrypted=b'fake', api_key_hint='fake', model='shared', max_tokens=256, context_window=200000)
-        session.add(provider); await session.flush()
-        provider_id = provider.id
-        session.add(RiskSettings(id=1, enabled=True, provider_id=provider.id, model='synthetic-news'))
-        original = event(now-timedelta(hours=3), 5)
-        article = news('correction', now-timedelta(minutes=1))
-        session.add_all([original, article]); await session.flush()
-        original_id, article_id = original.id, article.id
-        session.add(RiskAnalysis(news_id=article.id, content_hash='old-content', state='done', event_id=original.id,
-            input={'title': article.title, 'published_at': article.published_at.isoformat(), 'progress_at': article.published_at.isoformat()}))
-        for i in range(80):
-            unrelated = event(now-timedelta(minutes=i+2), 0)
-            unrelated.title = f'Company {i} ordinary earnings announcement'
-            unrelated.entities = [f'Company {i}']
-            unrelated.result = label(1, unrelated.title).model_dump()
-            session.add(unrelated)
+        provider = AiProvider(name='ci-news', protocol='openai', base_url='https://example.invalid', api_key_encrypted=b'fake',
+            api_key_hint='fake', model='shared', max_tokens=2048, context_window=200000)
+        session.add(provider); await session.flush(); provider_id = provider.id
+        skill_ids = {}
+        for role, (name, content) in pipeline.TEMPLATES.items():
+            node = await create_node(session, None, 'skill', name, scope='news')
+            version = await add_version(session, node, content, 'user', 'CI')
+            node.published_version_id = version.id
+            skill_ids[role+'_skill_id'] = node.id
+        await session.flush()
+        assert not await published_skills(session), 'News skills leaked into Chat or trading'
+        session.add(RiskSettings(id=1, enabled=True, provider_id=provider_id, model='luna', second_provider_id=provider_id,
+            second_model='reviewer', third_provider_id=provider_id, third_model='senior', start_at=now-timedelta(minutes=2), **skill_ids))
+        for key, at, content in [('old', now-timedelta(days=1), 'old'), ('first', now-timedelta(minutes=1), 'original'),
+                                  ('duplicate', now-timedelta(seconds=30), 'repost')]:
+            session.add(NewsItem(source_code='wscn_news', external_id='ci-news-'+key, url='https://example.invalid/'+key,
+                title='Exchange security incident', summary='', content_text=content, content_hash=key, published_at=at))
         await session.commit()
-
-    payloads = []
+    calls = []
+    broken = False
+    inject_update = False
+    finish_during_grouping = False
     async def stream(provider, system, messages, tools, effort):
-        payload = json.loads(messages[0]['text']); payloads.append(payload)
-        if 'news' in payload:
-            items = [label(n['id'], n['title'], 1 if n.get('revision_no') == 2 else 0,
-                original_id if n.get('revision_no') == 2 else None) for n in payload['news']]
-            result = service.Labels(items=items)
+        nonlocal inject_update, finish_during_grouping
+        data = json.loads(messages[0]['text']); calls.append((provider.model, data))
+        if 'article' in data:
+            assert provider.model == 'luna'
+            if finish_during_grouping:
+                finish_during_grouping = False
+                await worker.summarize()
+            candidates = data['candidates']
+            result = pipeline.Grouping( reason='Financial event', events=[pipeline.Match(
+                event_id=candidates[0]['id'] if candidates else None, group_key=None if candidates else 'security',
+                title='Exchange security incident', category='security', entities=['Exchange'], fact='incident',
+                evidence=data['article']['title'], urgent=True, tags=['Exchange'], content_kind='report')])
+        elif data.get('task') == 'event':
+            assert provider.model == 'reviewer'
+            if broken: raise ValueError('Synthetic validation failure')
+            if inject_update:
+                inject_update = False
+                async with SessionLocal() as other:
+                    changed = await other.get(NewsSummary, data['id'], with_for_update=True)
+                    worker.schedule(changed, datetime.now(UTC), True)
+                    await other.commit()
+            correction = any(a['content'] == 'correction' for a in data['articles'])
+            result = pipeline.EventResult(id=data['id'], title='Exchange security incident', summary='Correction' if correction else 'Incident',
+                category='security', entities=['Exchange'], risk_stars=1 if correction else 5, importance_stars=5, direction='unknown',
+                verification='refuted' if correction else 'reported', confidence='low', reasoning='Synthetic', uncertainty='Synthetic',
+                facts='Synthetic', timeline='Synthetic',
+                asset_impacts='Exchange', opinions='Uncertain', counter_evidence='Unknown', watchpoints='Updates', claims=[pipeline.Claim(statement='Synthetic', verdict='insufficient', evidence_refs=[])], related_packages=[], excluded_article_ids=[],
+                evidence_refs=[pipeline.Evidence(article_id=a['id'], quote=a['title']) for a in data['articles']])
+        elif data.get('task') == 'ranking':
+            assert provider.model == 'senior'
+            result = briefing.Ranked(reading=[briefing.Reading(id=p['id'], revision=p['revision'], priority=90, reason='Synthetic') for p in data['packages']], notes='Synthetic notes')
         else:
-            result = service.Outlook(windows=[service.Scenario(hours=h, direction='unknown', summary='Synthetic',
-                conditions='Synthetic', counter_factors='Synthetic', uncertainty='Synthetic',
-                event_ids=[e['id'] for e in payload['windows'][str(h)]]) for h in service.WINDOWS])
-        yield llm.Completion(tool_calls=[{'name': 'submit', 'arguments': result.model_dump()}])
-
-    class Binance:
-        def __init__(self, **kwargs): self.http = type('Http', (), {'aclose': AsyncMock()})()
-        async def ticker(self, *args): return {'lastPrice': '100', 'priceChangePercent': '-6', 'closeTime': 1}
-
+            trend = briefing.Trend(summary='Unknown', conditions='Unknown', counter_evidence='Unknown', watchpoints='Unknown')
+            result = briefing.Synthesis(summary='Synthetic', market='Unknown', short_term=trend, medium_term=trend, references=[])
+        yield llm.Completion(tool_calls=[{'name': 'submit', 'arguments': result.model_dump()}], usage={'input_tokens': 10})
     try:
-        async with SessionLocal() as session:
-            candidates, _ = await worker.find_candidates(session, [SimpleNamespace(
-                news_id=0, input={'title': 'Exchange security update', 'summary': ''})], now)
-            assert original_id in {e.id for e in candidates}
-            article = await session.get(NewsItem, article_id); article.revision_no = 2
-            await session.commit()
-        with patch.object(llm, 'stream', stream): await worker.analyze()
-        async with SessionLocal() as session:
-            original = await session.get(RiskEvent, original_id)
-            assert original.stars == 1 and original.peak_stars == 5
-            assert original_id in {e['id'] for e in payloads[-1]['candidates']}
-            assert await session.scalar(select(func.count()).select_from(RiskEvent)) == 81
-            assert (await session.get(AiProvider, provider_id)).model == 'shared'
-            await session.execute(delete(RiskAnalysis)); await session.execute(delete(RiskEvent))
-            session.add_all([event(now-timedelta(days=3), 5) for _ in range(100)])
-            fresh = event(now-timedelta(minutes=1), 4); session.add(fresh)
-            await session.flush(); fresh_id = fresh.id
-            await session.commit()
-        with patch.object(llm, 'stream', stream), patch.object(worker, 'BinanceClient', Binance):
-            await worker.summarize()
-        for hours in ('24', '48'):
-            assert [e['id'] for e in payloads[-1]['windows'][hours]] == [fresh_id]
-        assert len(payloads[-1]['windows']['168']) == 100
-        async with SessionLocal() as session:
-            snapshot = await session.scalar(select(RiskSnapshot))
-            snapshot.created_at = now-timedelta(minutes=11)
-            provider = await session.get(AiProvider, provider_id); provider.context_window = 8192
-            await session.commit()
-        with patch.object(llm, 'stream', stream), patch.object(worker, 'BinanceClient', Binance):
-            await worker.summarize()
-        for hours in ('24', '48'):
-            assert [e['id'] for e in payloads[-1]['windows'][hours]] == [fresh_id]
-        assert 0 < len(payloads[-1]['windows']['168']) < 100
-        async with SessionLocal() as session:
-            await session.execute(delete(RiskEvent))
-            provider = await session.get(AiProvider, provider_id); provider.context_window = 8192
-            article = await session.get(NewsItem, article_id); article.title = 'Batch article'
-            article.content_hash = 'current'; article.content_text = 'x'*1000; article.revision_no = 3
-            session.add_all([news(str(i), now-timedelta(minutes=i+2), 'x'*1000) for i in range(9)])
-            session.add(news('oversized', now-timedelta(seconds=1), 'x'*30000))
-            await session.commit()
         with patch.object(llm, 'stream', stream):
-            for _ in range(15): await worker.analyze()
-        async with SessionLocal() as session:
-            counts = dict((await session.execute(select(RiskAnalysis.state, func.count()).group_by(RiskAnalysis.state))).all())
-            assert counts == {'done': 10, 'failed': 1}, counts
-            failed = await session.scalar(select(RiskAnalysis).where(RiskAnalysis.state == 'failed'))
-            assert len(failed.input['content']) == 30000 and '上下文' in failed.error
-            assert all(len(p['news']) < 10 for p in payloads if 'news' in p)
-            try:
-                await delete_provider(provider_id, session)
-            except HTTPException as error:
-                assert error.status_code == 409
-            else:
-                raise AssertionError('Enabled risk provider deletion was accepted')
-            settings = await session.get(RiskSettings, 1); settings.enabled = False
-            await session.commit()
-            await delete_provider(provider_id, session)
-            assert (await session.get(RiskSettings, 1)).provider_id is None
-        print('News risk: correction recall, independent windows, context packing, isolated oversized article and provider deletion passed')
+            await worker.analyze()
+            finish_during_grouping = True
+            await worker.analyze()
+            async with SessionLocal() as session:
+                event = await session.scalar(select(NewsSummary))
+                assert event.state == 'pending' and event.revision == 2 and event.published_revision == 1, 'Grouping lost an update after concurrent summary completion'
+            await worker.summarize()
+            async with SessionLocal() as session:
+                assert await session.scalar(select(func.count()).select_from(ArticleAnalysis)) == 2
+                event = await session.scalar(select(NewsSummary)); event_id = event.id
+                assert event.stars == 5 and event.revision == 2
+                assert await session.scalar(select(func.count()).select_from(SummaryArticle)) == 2
+                article = await session.scalar(select(NewsItem).where(NewsItem.external_id == 'ci-news-first'))
+                article.content_hash = 'corrected'; article.content_text = 'correction'; article.revision_no = 2
+                article.source_updated_at = datetime.now(UTC)
+                await session.commit()
+            await worker.analyze(); await worker.summarize()
+            async with SessionLocal() as session:
+                event = await session.get(NewsSummary, event_id)
+                assert event.stars == 1 and event.peak_stars == 5 and event.result['verification'] == 'refuted'
+                version = await session.scalar(select(SummaryVersion).order_by(SummaryVersion.id.desc()).limit(1))
+                assert len(version.input['articles']) == 2, 'Superseded article revision entered the current summary'
+                event.revision += 1; event.state = 'pending'; event.due_at = datetime.now(UTC)
+                await session.commit()
+            inject_update = True
+            await worker.summarize()
+            async with SessionLocal() as session:
+                event = await session.get(NewsSummary, event_id)
+                assert event.state == 'pending' and event.revision > event.published_revision, 'Concurrent update was lost'
+            broken = True
+            await worker.summarize()
+            async with SessionLocal() as session:
+                event = await session.get(NewsSummary, event_id)
+                assert event.state == 'failed' and event.stars == 1 and event.result['summary'] == 'Correction'
+            broken = False
+            async with SessionLocal() as session:
+                failed = RiskSnapshot(state='failed', model='reviewer', quotes={}, error='Synthetic old failure',
+                    created_at=datetime.now(UTC)-timedelta(minutes=20))
+                session.add(failed); await session.commit(); failed_id = failed.id
+            await worker.outlook()
+            async with SessionLocal() as session:
+                snapshot = await session.scalar(select(RiskSnapshot).order_by(RiskSnapshot.id.desc()).limit(1))
+                assert snapshot.state == 'done' and snapshot.result['inputs'][0]['id'] == event_id
+                assert (await session.get(AiProvider, provider_id)).model == 'shared'
+            from fastapi import FastAPI
+            import httpx
+            from alphapulse.api import risk as risk_api, news as news_api
+            app = FastAPI()
+            app.include_router(risk_api.router); app.include_router(news_api.router)
+            app.dependency_overrides[risk_api.require_admin] = lambda: None
+            with patch.object(risk_api.redis, 'get', AsyncMock(return_value=None)):
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test') as client:
+                    for path in ('/api/risk/settings', '/api/risk/overview', '/api/risk/summaries',
+                                 f'/api/risk/summaries/{event_id}', '/api/news'):
+                        response = await client.get(path)
+                        assert response.status_code == 200, (path, response.text)
+                        assert response.json()['code'] == 0
+                    response = await client.get(f'/api/risk/summaries/{event_id}')
+                    assert response.json()['data']['event']['article_count'] == 2
+                    assert response.json()['data']['versions']
+                    response = await client.get('/api/risk/summaries', params={'hours': 25})
+                    assert response.status_code == 422
+                    response = await client.post(f'/api/risk/tasks/{failed_id}/retry', params={'stage': 'outlook'})
+                    assert response.status_code == 202, response.text
+                    await worker.outlook()
+                    async with SessionLocal() as session:
+                        assert await session.scalar(select(func.count()).select_from(RiskSnapshot)) == 3, 'Old failed outlook retry was ignored'
+                        assert not (await session.get(RiskSnapshot, failed_id)).quotes.get('retry_requested')
+            async with SessionLocal() as session:
+                try: await delete_provider(provider_id, session)
+                except HTTPException as error: assert error.status_code == 409
+                else: raise AssertionError('Enabled model provider deletion accepted')
+                settings = await session.get(RiskSettings, 1); settings.enabled = False
+                await session.commit(); await delete_provider(provider_id, session)
+                assert settings.provider_id is None and settings.second_provider_id is None and settings.third_provider_id is None
+        print('Three-stage packages: scope, cutoff, grouping, reposts, revisions, corrections, peak risk, retained success, outlook and provider isolation passed')
     finally:
         async with SessionLocal() as session:
-            for model in (RiskAnalysis, RiskEvent, RiskSnapshot, RiskSettings):
+            for model in (PackageEvidence, SummaryVersion, SummaryArticle, NewsSummary, ArticleAnalysis, RiskSnapshot, RiskSettings):
                 await session.execute(delete(model))
-            await session.execute(delete(NewsItem).where(NewsItem.external_id.startswith('ci-risk-')))
+            await session.execute(delete(NewsItem).where(NewsItem.external_id.startswith('ci-news-')))
             await session.execute(delete(AiProvider).where(AiProvider.id == provider_id))
+            await session.execute(SkillNode.__table__.update().where(SkillNode.id.in_(skill_ids.values())).values(published_version_id=None))
+            await session.execute(delete(SkillVersion).where(SkillVersion.skill_id.in_(skill_ids.values())))
+            await session.execute(delete(SkillNode).where(SkillNode.id.in_(skill_ids.values())))
             await session.commit()
         await engine.dispose()
-
 
 asyncio.run(main())

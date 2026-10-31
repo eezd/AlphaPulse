@@ -9,6 +9,13 @@ import { renderMarkdown } from "@@/utils/markdown"
 const sessionScope = useSessionScope()
 
 const nodes = ref<SkillNode[]>([])
+const scope = ref<"shared" | "news">("shared")
+async function changeScope(value: "shared" | "news") {
+  if (dirty.value) await ElMessageBox.confirm("当前 Skill 有未保存的修改，切换后会丢失。继续？", "未保存", { type: "warning" })
+  sessionScope.assertCurrent()
+  scope.value = value
+  selectedId.value = null
+}
 const selectedId = ref<number | null>(null)
 const selected = computed(() => nodes.value.find(n => n.id === selectedId.value) ?? null)
 
@@ -90,7 +97,7 @@ async function publishLatest() {
   const version = await saveDraft()
   if (!version || selectedId.value !== id || contentRequest !== contentVersion)
     return
-  await ElMessageBox.confirm(`发布 v${version.version_no}？发布后 Chat 下一轮起按此版本判断。`, "发布确认", { type: "warning" })
+  await ElMessageBox.confirm(`发布 v${version.version_no}？发布后对应用途的下一次任务起使用此版本。`, "发布确认", { type: "warning" })
   sessionScope.assertCurrent()
   if (selectedId.value !== id || contentRequest !== contentVersion)
     return
@@ -132,9 +139,16 @@ onMounted(loadTree)
   <div class="skills-workspace h-full flex flex-col gap-3 lg:flex-row">
     <el-card class="skills-tree max-h-56 w-full flex shrink-0 flex-col lg:max-h-none lg:w-64" body-class="min-h-0 flex-1" shadow="never">
       <template #header>
-        Skills
+        Skills（新闻专用规则独立生效）
       </template>
-      <SkillTree :nodes="nodes" :selected-id="selectedId" editable @select="select" @changed="loadTree" />
+      <el-radio-group :model-value="scope" @update:model-value="value => changeScope(value as 'shared' | 'news')" class="mb-2">
+        <el-radio-button value="shared">
+          Chat／交易
+        </el-radio-button><el-radio-button value="news">
+          新闻
+        </el-radio-button>
+      </el-radio-group>
+      <SkillTree :nodes="nodes.filter(n => n.scope === scope)" :scope="scope" :selected-id="selectedId" editable @select="select" @changed="loadTree" />
     </el-card>
 
     <el-card class="min-w-0 flex flex-1 flex-col" body-class="min-h-0 flex-1 flex flex-col gap-3" shadow="never">

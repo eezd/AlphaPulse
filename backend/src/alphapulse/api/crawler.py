@@ -81,6 +81,7 @@ class SourcesOut(BaseModel):
 
 
 class SourcePatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=64)
     enabled: bool | None = None
     interval_seconds: Annotated[int | None, Field(ge=5, le=86400)] = None
     # 设为时间表示开始或继续回补到该时间；显式传 null 表示取消
@@ -275,3 +276,21 @@ async def restart(body: RestartIn, session: Annotated[AsyncSession, Depends(get_
     if receivers == 0:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "采集管理进程未运行")
     return success(None)
+
+
+class RssIn(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    url: str = Field(min_length=1, max_length=255)
+    interval_seconds: int = Field(default=300, ge=60, le=86400)
+
+
+@router.post('/sources/rss', status_code=201)
+async def create_rss(body: RssIn, session: Annotated[AsyncSession, Depends(get_session)]):
+    from alphapulse.news_risk.research import public_address
+    try: await public_address(body.url)
+    except ValueError as error: raise HTTPException(422, str(error)) from error
+    except OSError as error: raise HTTPException(422, '无法解析订阅来源地址') from error
+    source = Source(code='rss_'+uuid.uuid4().hex[:24], name=body.name, list_url=body.url,
+        adapter='rss', collector='news', enabled=False, interval_seconds=body.interval_seconds, backfill_hours=72)
+    session.add(source); await session.commit()
+    return success({'code': source.code})

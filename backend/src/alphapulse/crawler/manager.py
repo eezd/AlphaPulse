@@ -35,6 +35,7 @@ class Worker:
     next_run_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     # 下一次触发的类型：schedule / startup / restart
     trigger: str = "schedule"
+    adapter: str = "builtin"
     restarting: bool = False
     restart_delay: int = RESTART_DELAY_MIN
     wake: asyncio.Event = field(default_factory=asyncio.Event)
@@ -53,11 +54,13 @@ class Manager:
     def __init__(self) -> None:
         self.workers: dict[str, Worker] = {}
         self.stopping = asyncio.Event()
+        self.dynamic_tasks = set()
+        self.supervisor_group = None
 
     async def run(self) -> None:
         async with SessionLocal() as session:
-            codes = (await session.scalars(select(Source.code).where(Source.collector == "news").order_by(Source.code))).all()
-        self.workers = {code: Worker(code) for code in codes}
+            sources = (await session.scalars(select(Source).where(Source.collector == "news").order_by(Source.code))).all()
+        self.workers = {source.code: Worker(source.code, adapter=source.adapter) for source in sources}
 
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -66,12 +69,15 @@ class Manager:
         # 各循环自行重试可恢复的错误；仍有异常逃出时 TaskGroup 让整个进程退出，由 docker 重启，
         # 避免出现"进程活着但调度或守护任务已经死掉"的状态
         async with asyncio.TaskGroup() as tg:
+            self.supervisor_group = tg
             for w in self.workers.values():
                 tg.create_task(self.supervise(w))
             loops = [tg.create_task(c) for c in (self.schedule_loop(), self.control_loop(), self.status_loop())]
             await self.stopping.wait()
             logger.info("收到退出信号，停止全部子进程")
             await asyncio.gather(*(self.stop_process(w) for w in self.workers.values()))
+            for task in self.dynamic_tasks:
+                task.cancel()
             for task in loops:
                 task.cancel()
         await redis.delete(STATUS_KEY)
@@ -79,7 +85,8 @@ class Manager:
     async def supervise(self, w: Worker) -> None:
         while not self.stopping.is_set():
             await self.cleanup_before_spawn(w)
-            w.proc = await asyncio.create_subprocess_exec("scrapy", "crawl", w.code)
+            arguments = ["scrapy", "crawl", "custom_rss", "-a", "source_code="+w.code] if w.adapter == "rss" else ["scrapy", "crawl", w.code]
+            w.proc = await asyncio.create_subprocess_exec(*arguments)
             w.started_at = datetime.now(UTC)
             # 新进程的第一轮立即执行，并做全量回溯扫描
             if w.trigger == "schedule":
@@ -145,11 +152,16 @@ class Manager:
         for s in sources:
             w = self.workers.get(s.code)
             if w is None:
-                # 启动后才新增的来源，需要重启管理进程才会接管
-                if s.code not in unknown:
-                    unknown.add(s.code)
-                    logger.warning("来源 %s 不在本进程的守护列表中，重启管理进程后生效", s.code)
-                continue
+                if s.adapter != 'rss':
+                    if s.code not in unknown:
+                        unknown.add(s.code)
+                        logger.warning("来源 %s 不在本进程的守护列表中，重启管理进程后生效", s.code)
+                    continue
+                w = Worker(s.code, adapter='rss')
+                self.workers[s.code] = w
+                task = self.supervisor_group.create_task(self.supervise(w))
+                self.dynamic_tasks.add(task)
+                task.add_done_callback(self.dynamic_tasks.discard)
             if not s.enabled or w.proc is None or w.restarting:
                 continue
             if s.paused_until and s.paused_until > now:

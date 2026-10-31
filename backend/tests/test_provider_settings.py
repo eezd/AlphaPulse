@@ -57,7 +57,7 @@ def test_patch_provider_default_contract(trading, monkeypatch, initial, requeste
 def test_delete_provider_handles_news_risk_reference(trading, monkeypatch, enabled):
     from fastapi import HTTPException
     from alphapulse.api import settings
-    reference = SimpleNamespace(enabled=enabled, provider_id=1)
+    reference = SimpleNamespace(enabled=enabled, provider_id=1, second_provider_id=1, third_provider_id=1)
     provider = SimpleNamespace(id=1, is_default=False)
     session = SimpleNamespace(scalar=AsyncMock(return_value=reference), delete=AsyncMock(),
         flush=AsyncMock(), commit=AsyncMock())

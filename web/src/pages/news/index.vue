@@ -89,7 +89,7 @@ onBeforeUnmount(() => media?.removeEventListener("change", updateMobile))
                 · {{ item.risk.summary }}
               </template>
               <template v-else>
-                {{ item.risk?.state === 'failed' ? 'AI 分析失败' : item.risk?.state === 'processing' ? 'AI 分析中' : 'AI 尚未分析' }}
+                {{ item.risk?.state === 'skipped' ? '非财经新闻，原文保留' : item.risk?.state === 'failed' ? 'AI 分析失败' : item.risk?.state === 'processing' ? 'AI 分析中' : '未纳入新流程或等待总结' }}
               </template>
             </div>
           </div>

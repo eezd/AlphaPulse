@@ -21,6 +21,7 @@ class NodeOut(BaseModel):
     id: int
     parent_id: int | None
     kind: Literal["folder", "skill"]
+    scope: Literal["shared", "news"] = "shared"
     name: str
     path: str
     sort_order: int
@@ -35,6 +36,7 @@ class NodeOut(BaseModel):
 class NodeIn(BaseModel):
     parent_id: int | None = None
     kind: Literal["folder", "skill"]
+    scope: Literal["shared", "news"] = "shared"
     name: Annotated[str, Field(min_length=1, max_length=128)]
     priority: int = 0
     # 新建 skill 时的初始内容，保存为 v1 草稿（未发布）；为空则不建版本
@@ -102,7 +104,7 @@ async def tree(session: Annotated[AsyncSession, Depends(get_session)]) -> ApiRes
 @router.post("/nodes", status_code=status.HTTP_201_CREATED)
 async def create(body: NodeIn, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[NodeOut]:
     try:
-        node = await create_node(session, body.parent_id, body.kind, body.name, body.priority)
+        node = await create_node(session, body.parent_id, body.kind, body.name, body.priority, body.scope)
         # 没有初始内容时不建空版本，第一次保存即 v1
         if body.kind == "skill" and body.content:
             await add_version(session, node, body.content, "user", "新建")
@@ -138,6 +140,8 @@ async def move(node_id: int, body: MoveIn, session: Annotated[AsyncSession, Depe
     node = await get_node(session, node_id)
     if body.parent_id is not None:
         parent = await get_node(session, body.parent_id)
+        if parent.scope != node.scope:
+            raise HTTPException(400, "不能跨用途移动 Skill")
         if parent.kind != "folder":
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "只能移动到文件夹中")
         # 不能移到自己或自己的子孙下面
@@ -169,6 +173,11 @@ async def delete(node_id: int, session: Annotated[AsyncSession, Depends(get_sess
     node = await get_node(session, node_id)
     if node.kind == "folder" and await session.scalar(select(func.count()).where(SkillNode.parent_id == node_id)):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "文件夹不为空，请先移走或删除其中的节点")
+    from alphapulse.models.risk import RiskSettings
+    referenced = await session.scalar(select(RiskSettings.id).where(
+        (RiskSettings.grouping_skill_id == node_id) | (RiskSettings.analysis_skill_id == node_id) | (RiskSettings.outlook_skill_id == node_id)))
+    if referenced:
+        raise HTTPException(409, "请先解除新闻模型的Skill绑定")
     # 先解除对版本的引用，版本随节点级联删除
     node.published_version_id = None
     await session.flush()

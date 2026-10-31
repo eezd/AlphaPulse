@@ -316,3 +316,96 @@ def test_bls_transport_error_reaches_existing_scrapy_retry_boundary(trading, mon
     with pytest.raises(httpx.ReadTimeout, match="transient timeout") as exc:
         asyncio.run(rss.BlsDownloadHandler(15).download_request(Request("https://www.bls.gov/feed/cpi.rss")))
     assert isinstance(exc.value, tuple(x for x in rss.BlsSpider.custom_settings["RETRY_EXCEPTIONS"] if isinstance(x, type)))
+
+
+@pytest.mark.parametrize('kind', ['summary', 'content'])
+def test_custom_atom_uses_article_link_and_preserves_html_and_scope(trading, kind):
+    from alphapulse.crawler.spiders.rss import CustomRssSpider
+    from alphapulse.crawler.spiders.base import RunState
+    spider = CustomRssSpider(source_code='rss_'+'a'*24)
+    now = datetime.now(UTC)
+    spider.run = RunState(uuid.uuid4(), 'schedule', now, now-timedelta(hours=72))
+    response = XmlResponse(url='https://example.invalid/feed.xml', body=f'''<feed xmlns="http://www.w3.org/2005/Atom"><entry>
+      <title>Public statement</title><id>statement-1</id><published>2026-10-31T00:00:00Z</published>
+      <link rel="self" href="https://example.invalid/entry.xml"/><link rel="alternate" href="https://example.invalid/article"/>
+      <{kind} type="html">&lt;p&gt;Public &amp;amp; original&lt;/p&gt;</{kind}><category term="Politics"/>
+      </entry></feed>'''.encode(), request=Request('https://example.invalid/feed.xml', meta={'raw_response_id': 12}))
+    item, = spider.parse_feed(response)
+    assert item['url'] == 'https://example.invalid/article'
+    assert item['content_text'] == 'Public & original'
+    assert item['tags'] == ['Politics']
+    assert item['extra']['content_scope'] == ('feed_content' if kind == 'content' else 'feed_summary')
+
+
+def test_new_rss_is_paused_and_discovered_without_manager_restart(trading, monkeypatch):
+    from unittest.mock import AsyncMock
+    from alphapulse.api.crawler import RssIn, create_rss
+    from alphapulse.crawler import manager
+    from alphapulse.news_risk import research
+    added = []
+    session = SimpleNamespace(add=added.append, commit=AsyncMock())
+    monkeypatch.setattr(research, 'public_address', AsyncMock())
+    async def check():
+        await create_rss(RssIn(name='Global news', url='https://example.invalid/feed.xml'), session)
+        source, = added
+        assert source.adapter == 'rss' and source.enabled is False
+        source.paused_until = None
+        fake_session = AsyncMock()
+        fake_session.__aenter__.return_value = fake_session
+        fake_session.scalars.return_value = SimpleNamespace(all=lambda: [source])
+        monkeypatch.setattr(manager, 'SessionLocal', lambda: fake_session)
+        instance = manager.Manager()
+        supervised = []
+        async def supervise(worker): supervised.append(worker.code)
+        instance.supervise = supervise
+        async with asyncio.TaskGroup() as group:
+            instance.supervisor_group = group
+            await instance.schedule_once(set())
+            await asyncio.sleep(0)
+            await instance.schedule_once(set())
+        assert supervised == [source.code]
+        assert instance.workers[source.code].adapter == 'rss'
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize('encoding,title', [('iso-8859-1', 'Café résumé'), ('utf-8', '中文说明 Café')])
+@pytest.mark.parametrize('compressed', [False, True])
+def test_custom_feed_preserves_declared_xml_encoding_through_public_downloader(trading, monkeypatch, encoding, title, compressed):
+    import gzip
+    from urllib.parse import urlsplit
+    from unittest.mock import AsyncMock
+    import httpx
+    from alphapulse.crawler.spiders import rss
+    from alphapulse.news_risk import research
+    url = 'https://example.invalid/feed.xml'
+    item_xml = ITEM.replace('Bitcoin &amp; Ethereum', title).replace('公开摘要 &amp; 数据', 'Public summary')
+    body = f'<?xml version="1.0" encoding="{encoding}"?><rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/"><channel>{item_xml}</channel></rss>'.encode(encoding)
+    original_client = httpx.AsyncClient
+    def handle(request):
+        assert request.url.host == '8.8.8.8' and request.headers['host'] == 'example.invalid'
+        headers = {'content-type': f'application/rss+xml; charset={encoding}'}
+        if compressed: headers['content-encoding'] = 'gzip'
+        return httpx.Response(200, headers=headers, stream=httpx.ByteStream(gzip.compress(body) if compressed else body))
+    monkeypatch.setattr(research, 'public_address', AsyncMock(return_value=(urlsplit(url), '8.8.8.8')))
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: original_client(transport=httpx.MockTransport(handle), **kwargs))
+    response = asyncio.run(rss.PublicFeedDownloadHandler().download_request(Request(url, meta={'raw_response_id': 12})))
+    assert response.body == body and 'content-encoding' not in response.headers
+    assert response.headers['content-type'].decode() == f'application/rss+xml; charset={encoding}'
+    spider = make_spider(rss.CoinDeskSpider)
+    item, = spider.parse_feed(response)
+    assert item['title'] == title and not spider.run.errors
+
+
+def test_custom_feed_keeps_http_failure_status_for_scrapy_retry(trading, monkeypatch):
+    from urllib.parse import urlsplit
+    from unittest.mock import AsyncMock
+    import httpx
+    from alphapulse.crawler.spiders import rss
+    from alphapulse.news_risk import research
+    url = 'https://example.invalid/feed.xml'
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(research, 'public_address', AsyncMock(return_value=(urlsplit(url), '8.8.8.8')))
+    transport = httpx.MockTransport(lambda request: httpx.Response(503, content=b'Service unavailable'))
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: original_client(transport=transport, **kwargs))
+    response = asyncio.run(rss.PublicFeedDownloadHandler().download_request(Request(url)))
+    assert response.status == 503 and response.body == b'Service unavailable'

@@ -1,199 +1,254 @@
-"""Single durable worker; never invokes trading or private chat tools."""
+"""Independent, durable grouping and event analysis loops."""
 import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
-from sqlalchemy import select, update, func, exists, or_
+from sqlalchemy import select, update, func, exists, text, case
 from sqlalchemy.dialects.postgresql import insert
 from alphapulse.core.db import SessionLocal, engine
 from alphapulse.core.redis import redis
 from alphapulse.models import NewsItem
-from alphapulse.models.risk import RiskSettings, RiskAnalysis, RiskEvent, RiskSnapshot
-from alphapulse.news_risk.service import START, SYSTEM, WINDOWS, Labels, Outlook, complete, fits_context, provider_for, validate_labels
-from alphapulse.market.binance import BinanceClient
+from alphapulse.models.risk import RiskSettings, RiskSnapshot, ArticleAnalysis, NewsSummary, SummaryArticle, SummaryVersion, PackageEvidence
+from alphapulse.news_risk.service import complete
+from alphapulse.news_risk.pipeline import configuration, Grouping, summarize_articles, validate_evidence, Evidence, grouping_payload, pack_candidates
+from alphapulse.news_risk.research import Research
+from alphapulse.news_risk import briefing
 
 logger = logging.getLogger(__name__)
-OUTLOOK_SYSTEM = SYSTEM + '\n综合给出三个窗口的市场判断，预测期限为未来数小时至24小时。' \
-    '只能引用对应窗口中的事件 ID。必须区分行情已发生变化和预测，不能推断因果。历史补分析不是实时预测。' \
-    '窗口没有事件时说明证据不足；不能把没有已识别风险解释为市场安全。'
+analysis_lock = asyncio.Lock()
 
 
-async def enqueue(session):
-    rows = (await session.scalars(select(NewsItem).where(
-        NewsItem.published_at >= START, NewsItem.published_at <= datetime.now(UTC),
-        ~exists(select(RiskAnalysis.id).where(RiskAnalysis.news_id == NewsItem.id,
-                                             RiskAnalysis.content_hash == NewsItem.content_hash)),
-    ).order_by(NewsItem.published_at.desc(), NewsItem.id.desc()).limit(200))).all()
+def eligible(start):
+    return (func.greatest(NewsItem.published_at, NewsItem.source_updated_at) >= start) & (NewsItem.published_at <= datetime.now(UTC))
+
+
+def schedule(event, now, urgent):
+    event.revision += 1
+    event.changed_at = now
+    event.dirty_since = event.dirty_since or now
+    event.due_at = now if urgent or event.result is None else min(now+timedelta(seconds=60), event.dirty_since+timedelta(seconds=180))
+    event.state = 'pending'
+    event.error = None
+
+
+async def enqueue(session, settings):
+    rows = (await session.scalars(select(NewsItem).where(eligible(settings.start_at),
+        ~exists(select(ArticleAnalysis.id).where(ArticleAnalysis.news_id == NewsItem.id,
+            ArticleAnalysis.content_hash == NewsItem.content_hash))).order_by(NewsItem.published_at.desc()).limit(200))).all()
     for news in rows:
-        await session.execute(insert(RiskAnalysis).values(news_id=news.id, content_hash=news.content_hash, state='pending',
-            input={'title': news.title, 'summary': news.summary, 'content': news.content_text,
-                   'published_at': news.published_at.isoformat(), 'source': news.source_code,
-                   'progress_at': max(news.published_at, news.source_updated_at or news.published_at).isoformat(),
-                   'url': news.url, 'revision_no': news.revision_no}).on_conflict_do_nothing())
+        await session.execute(insert(ArticleAnalysis).values(news_id=news.id, content_hash=news.content_hash,
+            state='pending', input={'title': news.title, 'summary': news.summary, 'content': news.content_text,
+            'published_at': news.published_at.isoformat(), 'progress_at': max(news.published_at, news.source_updated_at or news.published_at).isoformat(),
+            'url': news.url, 'source': news.source_code, 'revision_no': news.revision_no}).on_conflict_do_nothing())
     await session.commit()
-
-
-async def find_candidates(session, rows, now):
-    linked = (await session.execute(select(RiskAnalysis.news_id, RiskAnalysis.event_id).where(
-        RiskAnalysis.news_id.in_([row.news_id for row in rows]), RiskAnalysis.event_id.is_not(None),
-    ).order_by(RiskAnalysis.id.desc()))).all()
-    previous = {}
-    for news_id, event_id in linked:
-        previous.setdefault(news_id, event_id)
-    relevance = func.greatest(*[func.similarity(RiskEvent.title, row.input['title'] + ' ' + row.input.get('summary', ''))
-                               for row in rows])
-    candidates = (await session.scalars(select(RiskEvent).where(or_(
-        RiskEvent.id.in_(previous.values()), RiskEvent.updated_at >= now - timedelta(days=7),
-    )).order_by(RiskEvent.id.in_(previous.values()).desc(), relevance.desc(),
-               RiskEvent.stars.desc(), RiskEvent.updated_at.desc(), RiskEvent.id.desc()).limit(80))).all()
-    return candidates, previous
-
-
-def batch_payload(rows, candidates):
-    return {'news': [{'id': r.id, **r.input} for r in rows], 'candidates': [
-        {'id': e.id, 'title': e.title, 'category': e.category, 'entities': e.entities,
-         'published_at': e.published_at.isoformat(), 'updated_at': e.updated_at.isoformat(),
-         'summary': e.result['summary']} for e in candidates]}
-
-
-def pack_batch(provider, rows, candidates, previous):
-    rows = list(rows)
-    candidates = list(candidates)
-    while len(rows) > 1 and not fits_context(provider, SYSTEM, batch_payload(rows, candidates), Labels):
-        rows.pop()
-    required = {previous[row.news_id] for row in rows if row.news_id in previous}
-    while not fits_context(provider, SYSTEM, batch_payload(rows, candidates), Labels):
-        optional = next((e for e in reversed(candidates) if e.id not in required), None)
-        if optional is None:
-            break
-        candidates.remove(optional)
-    # A source that cannot fit alone fails explicitly; other articles stay queued.
-    return rows, candidates, batch_payload(rows, candidates)
 
 
 async def analyze():
     async with SessionLocal() as session:
         settings = await session.get(RiskSettings, 1)
-        if not settings or not settings.enabled:
+        if not settings or not settings.enabled or not settings.start_at:
             return
-        provider = await provider_for(session, settings)
-        await enqueue(session)
-        rows = (await session.scalars(select(RiskAnalysis).join(NewsItem).where(
-            RiskAnalysis.state == 'pending', RiskAnalysis.content_hash == NewsItem.content_hash,
-        ).order_by(func.greatest(NewsItem.published_at, NewsItem.source_updated_at).desc(), NewsItem.id.desc()).limit(10))).all()
-        if not rows:
+        await enqueue(session, settings)
+        row = await session.scalar(select(ArticleAnalysis).join(NewsItem).where(
+            ArticleAnalysis.state == 'pending', ArticleAnalysis.content_hash == NewsItem.content_hash
+        ).order_by(NewsItem.published_at.desc()).limit(1))
+        if row is None:
             return
-        now = datetime.now(UTC)
-        candidates, previous = await find_candidates(session, rows, now)
-        rows, candidates, payload = pack_batch(provider, rows, candidates, previous)
-        for row in rows:
-            row.state = 'processing'; row.started_at = now; row.model = provider.model
+        provider, system, rules, _ = await configuration(session, settings, 'grouping')
+        candidates = (await session.scalars(select(NewsSummary).order_by(
+            func.similarity(NewsSummary.title, row.input['title']).desc(), NewsSummary.updated_at.desc()).limit(80))).all()
+        candidate_inputs = [{'id': e.id, 'title': e.title, 'published_at': e.published_at.isoformat(), 'entities': e.entities, 'tags': e.tags, 'fact': e.fact, 'content_kind': e.content_kind} for e in candidates]
+        row.state = 'processing'; row.started_at = datetime.now(UTC); row.rules = rules; row.model = provider.model
         await session.commit()
-        ids = [r.id for r in rows]
+        row_id = row.id
         try:
-            result, usage = await complete(provider, SYSTEM, payload, Labels)
-            validate_labels(result, {r.id: r.input for r in rows}, {e.id for e in candidates})
-            assigned = {}
-            for label in sorted(result.items, key=lambda label: ids.index(label.id)):
-                row = next(r for r in rows if r.id == label.id)
-                row.result = label.model_dump(); row.state = 'done'; row.finished_at = datetime.now(UTC)
-                # Usage belongs to one batch, recorded once rather than multiplied per article.
-                row.usage = usage if row.id == ids[0] else None
-                current = await session.get(NewsItem, row.news_id, populate_existing=True)
-                if current.content_hash != row.content_hash:
-                    continue
-                published = datetime.fromisoformat(row.input['published_at'])
+            payload, usages = await grouping_payload(provider, system, {'id': row.id, **row.input}, candidate_inputs)
+            for attempt in range(2):
+                try:
+                    result, usage = await complete(provider, system, payload, Grouping)
+                    usages.append(usage)
+                    for match in result.events:
+                        if match.event_id is not None and match.event_id not in {e['id'] for e in payload['candidates']}:
+                            raise ValueError('模型引用未知候选事件')
+                        validate_evidence([Evidence(article_id=row.id, quote=match.evidence)], {row.id: row.input})
+                    break
+                except ValueError as error:
+                    if attempt:
+                        raise
+                    payload = pack_candidates(provider, system, {**payload, 'correction': str(error)}, payload['candidates'])
+            # Check the article again before changing event membership.
+            current = await session.get(NewsItem, row.news_id, populate_existing=True)
+            if current.content_hash != row.content_hash:
+                row.state = 'superseded'; await session.commit(); return
+            now = datetime.now(UTC)
+            old_ids = select(SummaryArticle.summary_id).join(ArticleAnalysis).where(ArticleAnalysis.news_id == row.news_id)
+            old_events = (await session.scalars(select(NewsSummary).where(NewsSummary.id.in_(old_ids))
+                .with_for_update().execution_options(populate_existing=True))).all()
+            touched = {e.id: e for e in old_events}
+            groups = {}
+            for match in result.events:
+                event = await session.get(NewsSummary, match.event_id, with_for_update=True, populate_existing=True) if match.event_id else groups.get(match.group_key)
                 progress = datetime.fromisoformat(row.input['progress_at'])
-                target = assigned.get(label.same_event_as) if label.same_event_as else label.event_id
-                event = await session.get(RiskEvent, target) if target else None
+                published = datetime.fromisoformat(row.input['published_at'])
                 if event is None:
-                    event = RiskEvent(title=label.title, category=label.category, entities=label.entities,
-                        stars=label.stars, peak_stars=label.stars, result=label.model_dump(),
-                        published_at=published, updated_at=progress)
-                    session.add(event); await session.flush()
-                else:
-                    event.peak_stars = max(event.peak_stars, label.stars)
-                    event.published_at = min(event.published_at, published)
-                    if progress >= event.updated_at:
-                        event.title = label.title; event.result = label.model_dump(); event.stars = label.stars
-                        event.updated_at = progress; event.entities = label.entities; event.category = label.category
-                row.event_id = event.id
-                assigned[row.id] = event.id
+                    event = NewsSummary(title=match.title, category=match.category, entities=match.entities,
+                        published_at=published, updated_at=progress, changed_at=now, due_at=now,
+                        revision=0, published_revision=0, state='pending')
+                    session.add(event); await session.flush(); groups[match.group_key] = event
+                event.tags = sorted(set(event.tags or []) | {t.strip().casefold() for t in match.tags if t.strip()})
+                event.content_kind = match.content_kind; event.fact = match.fact
+                event.published_at = min(event.published_at, published)
+                if row.input['revision_no'] > 1:
+                    event.updated_at = max(event.updated_at, progress)
+                session.add(SummaryArticle(summary_id=event.id, analysis_id=row.id))
+                touched[event.id] = event
+            for event in touched.values():
+                schedule(event, now, any(m.urgent for m in result.events))
+            row.result = result.model_dump(); row.usage = {'attempts': usages}; row.state = 'done'
+            row.error = None; row.finished_at = now
             await session.commit()
         except Exception as error:
             await session.rollback()
-            await session.execute(update(RiskAnalysis).where(RiskAnalysis.id.in_(ids)).values(
+            await session.execute(update(ArticleAnalysis).where(ArticleAnalysis.id == row_id).values(
                 state='failed', error=str(error)[:2000], finished_at=datetime.now(UTC)))
             await session.commit()
-            logger.exception('新闻风控分析失败')
+            logger.exception('新闻初筛失败')
 
 
 async def summarize():
-    now = datetime.now(UTC)
-    async with SessionLocal() as session:
+    async with analysis_lock, SessionLocal() as session:
         settings = await session.get(RiskSettings, 1)
         if not settings or not settings.enabled:
             return
-        latest = await session.scalar(select(RiskSnapshot).order_by(RiskSnapshot.id.desc()).limit(1))
-        urgent = await session.scalar(select(func.max(RiskAnalysis.finished_at)).join(RiskEvent).where(RiskEvent.stars >= 4))
-        delay = 60 if urgent and latest and urgent > latest.created_at else 600
-        if latest and (now - latest.created_at).total_seconds() < delay:
+        event = await session.scalar(select(NewsSummary).where(NewsSummary.state == 'pending',
+            NewsSummary.due_at <= datetime.now(UTC)).order_by(NewsSummary.due_at, NewsSummary.id).limit(1).with_for_update())
+        if event is None:
             return
-        windows = {}
-        for hours in WINDOWS:
-            events = (await session.scalars(select(RiskEvent).where(
-                RiskEvent.updated_at >= now - timedelta(hours=hours), RiskEvent.stars > 0,
-            ).order_by(RiskEvent.stars.desc(), RiskEvent.updated_at.desc(), RiskEvent.id.desc()).limit(100))).all()
-            windows[str(hours)] = [{**e.result, 'id': e.id, 'stars': e.stars, 'at': e.updated_at.isoformat()} for e in events]
-        if not any(windows.values()) and not await session.scalar(select(RiskAnalysis.id).where(RiskAnalysis.state == 'done').limit(1)):
+        provider, system, rules, fingerprint = await configuration(session, settings, 'analysis')
+        rows = (await session.scalars(select(ArticleAnalysis).join(SummaryArticle).join(NewsItem).where(
+            SummaryArticle.summary_id == event.id, ArticleAnalysis.content_hash == NewsItem.content_hash,
+            ArticleAnalysis.state == 'done').order_by(ArticleAnalysis.id))).all()
+        articles = [{'id': r.id, **r.input} for r in rows]
+        package = {key: getattr(event, key) for key in ('id', 'title', 'fact', 'category', 'tags', 'content_kind')}
+        if not articles:
+            event.result = None; event.state = 'withdrawn'; await session.commit(); return
+        version = await session.scalar(select(SummaryVersion).where(SummaryVersion.summary_id == event.id,
+            SummaryVersion.revision == event.revision, SummaryVersion.fingerprint == fingerprint))
+        if version and version.state == 'done':
+            event.state = 'done'; event.error = None; event.dirty_since = None
+            await session.commit()
             return
-        provider = await provider_for(session, settings)
-        quotes = {'at': now.isoformat()}
-        snapshot = RiskSnapshot(state='failed', model=provider.model, quotes=quotes)
+        if version is None:
+            version = SummaryVersion(summary_id=event.id, revision=event.revision, fingerprint=fingerprint,
+                state='processing', input={'package': package, 'articles': articles}, rules=rules, model=provider.model, started_at=datetime.now(UTC))
+            session.add(version)
+        else:
+            version.state = 'processing'; version.error = None
+        event.state = 'processing'
+        await session.commit()
+        identifier, event_id, revision = version.id, event.id, version.revision
+        research = Research()
+        evidence_rows = (await session.scalars(select(PackageEvidence).where(PackageEvidence.version_id == identifier).order_by(PackageEvidence.id))).all()
+        research.restore([r.data for r in evidence_rows])
         try:
-            client = BinanceClient(wait=False)
-            try:
-                for symbol in ('BTCUSDT', 'ETHUSDT'):
-                    ticker = await client.ticker('um', symbol)
-                    quotes[symbol] = {key: ticker[key] for key in ('lastPrice', 'priceChangePercent', 'closeTime')}
-            finally:
-                await client.http.aclose()
-            payload = {'as_of': now.isoformat(), 'quotes': quotes, 'windows': windows}
-            while not fits_context(provider, OUTLOOK_SYSTEM, payload, Outlook):
-                largest = max(windows.values(), key=len)
-                if len(largest) <= 1:
-                    break
-                largest.pop()
-            result, _ = await complete(provider, OUTLOOK_SYSTEM, payload, Outlook)
-            if sorted(w.hours for w in result.windows) != list(WINDOWS):
-                raise ValueError('综合判断窗口不完整或重复')
-            for window in result.windows:
-                allowed = {e['id'] for e in payload['windows'][str(window.hours)]}
-                if not set(window.event_ids) <= allowed:
-                    raise ValueError('综合判断引用未知事件')
-            snapshot.state = 'done'; snapshot.result = result.model_dump()
+            result, usage = await summarize_articles(provider, system, articles, package, research)
+            event = await session.get(NewsSummary, event_id, populate_existing=True, with_for_update=True)
+            version.result = result.model_dump(); version.usage = usage; version.state = 'done'; version.finished_at = datetime.now(UTC)
+            if revision > event.published_revision:
+                event.result = result.model_dump(); event.title = result.title; event.category = result.category; event.entities = result.entities
+                event.stars = result.risk_stars; event.peak_stars = max(event.peak_stars, result.risk_stars)
+                event.importance_stars = result.importance_stars
+                event.published_revision = revision; event.analyzed_at = version.finished_at; event.error = None
+            event.state = 'done' if event.revision == revision else 'pending'
+            if event.state == 'done': event.dirty_since = None
+            for record in research.records:
+                session.add(PackageEvidence(summary_id=event_id, version_id=identifier, kind=record['tool'], reference=str(record['arguments']), data=record))
+            await session.commit()
         except Exception as error:
-            snapshot.error = str(error)[:2000]
-            logger.exception('新闻风控综合判断失败')
-        snapshot.quotes = quotes
+            await session.rollback()
+            for record in research.records:
+                session.add(PackageEvidence(summary_id=event_id, version_id=identifier, kind=record['tool'], reference=str(record['arguments']), data=record))
+            await session.execute(update(SummaryVersion).where(SummaryVersion.id == identifier).values(
+                state='failed', error=str(error)[:2000], finished_at=datetime.now(UTC)))
+            await session.execute(update(NewsSummary).where(NewsSummary.id == event_id).values(
+                state=case((NewsSummary.revision > revision, 'pending'), else_='failed'), error=str(error)[:2000]))
+            await session.commit(); logger.exception('事件总结失败')
+
+
+async def outlook():
+    async with analysis_lock, SessionLocal() as session:
+        settings = await session.get(RiskSettings, 1)
+        if not settings or not settings.enabled: return
+        now = datetime.now(UTC)
+        latest = await session.scalar(select(RiskSnapshot).order_by(RiskSnapshot.id.desc()).limit(1))
+        requested = await session.scalar(select(RiskSnapshot).where(RiskSnapshot.state == 'failed',
+            RiskSnapshot.quotes['retry_requested'].as_boolean().is_(True)).order_by(RiskSnapshot.id).limit(1).with_for_update())
+        events = (await session.scalars(select(NewsSummary).where(NewsSummary.result.is_not(None),
+            NewsSummary.updated_at >= now-timedelta(hours=72)).order_by(NewsSummary.importance_stars.desc(), NewsSummary.updated_at.desc()))).all()
+        provider, system, rules, _ = await configuration(session, settings, 'outlook')
+        inputs = [{'id': e.id, 'revision': e.published_revision, 'importance_stars': e.importance_stars,
+            'category': e.category, 'tags': e.tags, 'result': e.result} for e in events]
+        semantic = briefing.semantic_packages(inputs)
+        key = briefing.fingerprint(semantic, rules)
+        important = {str(p['id']): briefing.fingerprint(p, {}) for p in semantic if p['importance_stars'] == 5}
+        if requested is None and latest and latest.quotes.get('fingerprint') == key: return
+        if latest and requested is None:
+            urgent_change = any(latest.quotes.get('important', {}).get(identifier) != value for identifier, value in important.items())
+            if urgent_change:
+                if (now-latest.created_at).total_seconds() < 60: return
+            else:
+                dirty = latest.quotes.get('dirty_since')
+                if dirty is None:
+                    latest.quotes = {**latest.quotes, 'dirty_since': now.isoformat()}
+                    await session.commit(); return
+                if (now-datetime.fromisoformat(dirty)).total_seconds() < 900: return
+        snapshot = RiskSnapshot(state='processing', model=provider.model, quotes={'fingerprint': key, 'important': important})
         session.add(snapshot); await session.commit()
+        try:
+            main = [p for p in inputs if p['importance_stars'] >= 3]
+            low = [p for p in inputs if p['importance_stars'] < 3]
+            result = await briefing.generate(provider, system, main) if main else {'reading': [], 'synthesis': None, 'usage': []}
+            # Score all low-star candidates, then select up to three distinct domains.
+            expansion = await briefing.generate(provider, system, low) if low else {'reading': []}
+            domains, extra = set(), []
+            by_id = {p['id']: p for p in inputs}
+            for row in expansion['reading']:
+                category = by_id[row['id']]['category']
+                if category not in domains:
+                    domains.add(category); extra.append(row)
+                if len(extra) == 3: break
+            snapshot.result = {**result, 'expansion': extra, 'inputs': inputs, 'rules': rules,
+                'expansion_usage': expansion.get('usage', []), 'as_of': now.isoformat()}
+            snapshot.state = 'done'
+        except Exception as error:
+            snapshot.state = 'failed'; snapshot.error = str(error)[:2000]
+            logger.exception('阅读编排失败')
+        if requested: requested.quotes = {k: v for k, v in requested.quotes.items() if k != 'retry_requested'}
+        await session.commit()
+
+
+async def loop(action, heartbeat):
+    while True:
+        try:
+            await redis.set(heartbeat, datetime.now(UTC).isoformat(), ex=1800)
+            await action()
+        except Exception:
+            logger.exception('新闻AI处理异常')
+        await asyncio.sleep(10)
 
 
 async def main():
-    # A session advisory lock prevents duplicate workers without holding business transactions open.
     async with engine.connect() as lock:
-        from sqlalchemy import text
         if not await lock.scalar(text('SELECT pg_try_advisory_lock(20261030, 1)')):
-            raise RuntimeError('新闻风控 worker 已运行')
+            raise RuntimeError('新闻AI worker 已运行')
         async with SessionLocal() as session:
-            await session.execute(update(RiskAnalysis).where(RiskAnalysis.state == 'processing').values(state='pending'))
+            await session.execute(update(ArticleAnalysis).where(ArticleAnalysis.state == 'processing').values(state='pending'))
+            await session.execute(update(NewsSummary).where(NewsSummary.state == 'processing').values(state='pending'))
+            await session.execute(update(SummaryVersion).where(SummaryVersion.state == 'processing').values(state='pending'))
             await session.commit()
-        while True:
-            try:
-                await redis.set('ap:risk:heartbeat', datetime.now(UTC).isoformat(), ex=1800)
-                await analyze(); await summarize()
-            except Exception:
-                logger.exception('新闻风控任务异常')
-            await asyncio.sleep(10)
+            await session.execute(update(RiskSnapshot).where(RiskSnapshot.state == 'processing').values(state='failed', error='进程中断，请重试'))
+            await session.commit()
+        await asyncio.gather(loop(analyze, 'ap:risk:heartbeat'), loop(summarize, 'ap:risk:analysis:heartbeat'),
+            loop(outlook, 'ap:risk:outlook:heartbeat'))
 
 
 if __name__ == '__main__':

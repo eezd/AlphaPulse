@@ -170,3 +170,74 @@ class BlsDownloadHandler:
                     str(response.url), status=response.status_code, headers=response.headers.multi_items(),
                     body=body, request=request,
                 )
+
+
+class CustomRssSpider(RssNewsSpider):
+    """Load administrator-managed subscriptions without registering new spider classes."""
+    name = 'custom_rss'
+
+    def __init__(self, source_code, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not re.fullmatch(r'rss_[0-9a-f]{24}', source_code):
+            raise ValueError('订阅来源标识无效')
+        self.name = source_code
+
+    async def start(self):
+        from alphapulse.core.db import SessionLocal
+        from alphapulse.models import Source
+        from alphapulse.news_risk.research import public_address
+        async with SessionLocal() as session:
+            source = await session.get(Source, self.name)
+            if source is None or source.adapter != 'rss': raise ValueError('订阅不存在')
+            await public_address(source.list_url)
+            self.feeds = (source.list_url,)
+        async for request in super().start(): yield request
+
+    custom_settings = {'DOWNLOAD_HANDLERS': {'http': 'alphapulse.crawler.spiders.rss.PublicFeedDownloadHandler',
+        'https': 'alphapulse.crawler.spiders.rss.PublicFeedDownloadHandler'}}
+
+    def _parse_entry(self, response, entry):
+        if entry.tag == ATOM+'entry':
+            # Prefer the article link over Atom's optional self/edit links.
+            links = entry.findall(ATOM+'link')
+            article_link = next((link for link in links if link.get('rel', 'alternate') == 'alternate'), None)
+            if article_link is not None:
+                entry.remove(article_link)
+                entry.insert(0, article_link)
+        item = super()._parse_entry(response, entry)
+        full_content = False
+        if entry.tag == ATOM+'entry':
+            content = entry.find(ATOM+'content')
+            full_content = content is not None
+            if content is None:
+                content = entry.find(ATOM+'summary')
+            if content is not None:
+                if content.get('type') == 'xhtml':
+                    body = ''.join(ElementTree.tostring(child, encoding='unicode') for child in content)
+                elif content.get('type') == 'html': body = content.text or ''
+                else: body = escape(content.text or '')
+            else: body = item['content_html']
+            item['tags'] = [node.get('term') or node.text.strip() for node in entry.findall(ATOM+'category') if node.get('term') or (node.text and node.text.strip())]
+        else:
+            encoded = entry.findtext('{http://purl.org/rss/1.0/modules/content/}encoded')
+            full_content = bool(encoded)
+            body = encoded or item['content_html']
+        item.update(content_html=body, content_text=html_to_text(body), summary=html_to_text(body))
+        item['extra']['language'] = 'und'
+        item['extra']['content_scope'] = 'feed_content' if full_content else 'feed_summary'
+        return item
+
+
+class PublicFeedDownloadHandler:
+    lazy = True
+
+    @classmethod
+    def from_crawler(cls, crawler): return cls()
+
+    async def close(self): pass
+
+    async def download_request(self, request):
+        from alphapulse.news_risk.research import fetch_public_response
+        response = await fetch_public_response(request.url)
+        return Response(str(response.url), status=response.status_code, body=response.content, request=request,
+            headers=response.headers.multi_items())

@@ -62,6 +62,7 @@ export interface CrawlLog {
 }
 
 export interface SourcePatch {
+  name?: string
   enabled?: boolean
   interval_seconds?: number
   /** ISO 时间表示回补到该时间；null 表示取消回补 */
@@ -73,3 +74,5 @@ export type PatchSourceResponseData = null
 export type ListLogsResponseData = CrawlLog[]
 
 export type RestartCrawlerResponseData = null
+
+export interface RssInput { name: string, url: string, interval_seconds: number }

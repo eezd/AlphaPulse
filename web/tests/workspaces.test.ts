@@ -5,7 +5,7 @@ import axios from "axios"
 import * as vue from "vue"
 import { moduleLoader } from "./module-loader.ts"
 
-const globals = { ...vue, onMounted() {}, onBeforeUnmount() {}, onBeforeRouteLeave() {}, ElMessage: { success() {}, warning() {} } }
+const globals = { ...vue, useRoute: () => ({ query: {} }), onMounted() {}, onBeforeUnmount() {}, onBeforeRouteLeave() {}, ElMessage: { success() {}, warning() {} } }
 
 const tradingStatus = (limit = 120) => ({ exchange: "bybit", configured: true, provider_id: null, reasoning_effort: null, snapshot: null, today: { analyses: 10, limit, input_tokens: 0, output_tokens: 0 } })
 
@@ -354,6 +354,7 @@ test("风险首页丢弃旧窗口与旧会话结果，详情关闭后不写回",
       listRiskEventsApi: async () => ({ items: [], total: 0 }),
       getRiskEventApi: () => details.promise
     },
+    "@@/apis/skills": { listSkillTreeApi: async () => [] },
     "@/common/apis/settings": {},
     "@/pinia/stores/user": { useUserStore: () => user }
   }, globals)
@@ -384,6 +385,7 @@ test("新闻模型列表随接入配置更新，保留手填值并丢弃旧配�
   let unmount = () => {}
   const user = vue.reactive({ sessionVersion: 1 })
   const load = moduleLoader({
+    "@@/apis/skills": { listSkillTreeApi: async () => [] },
     "@/common/apis/risk": { getRiskSettingsApi: async () => ({ provider_id: 1, model: "manual-model", enabled: false }) },
     "@/common/apis/settings": {
       listProvidersApi: async () => [],
@@ -434,12 +436,68 @@ test("新闻模型列表随接入配置更新，保留手填值并丢弃旧配�
   assert.equal(page.models.value.length, 0)
 })
 
+test("第二阶段模型列表随接入配置更新，保留手填值并丢弃旧配置、关闭及旧会话结果", async () => {
+  const requests: { id: number, response: ReturnType<typeof Promise.withResolvers> }[] = []
+  let unmount = () => {}
+  const user = vue.reactive({ sessionVersion: 1 })
+  const load = moduleLoader({
+    "@@/apis/skills": { listSkillTreeApi: async () => [] },
+    "@/common/apis/risk": { getRiskSettingsApi: async () => ({ second_provider_id: 1, second_model: "manual-model", enabled: false }) },
+    "@/common/apis/settings": {
+      listProvidersApi: async () => [],
+      listProviderModelsApi: (id: number) => {
+        const response = Promise.withResolvers()
+        requests.push({ id, response })
+        return response.promise
+      }
+    },
+    "@/pinia/stores/user": { useUserStore: () => user }
+  }, { ...globals, clearInterval, onBeforeUnmount: (callback: () => void) => unmount = callback })
+  const page = load("@/pages/home/index.vue").default.setup({}, { expose() {} })
+  await page.openSettings()
+  await vue.nextTick()
+  assert.equal(requests[0].id, 1)
+  page.settings.value.second_provider_id = 2
+  await vue.nextTick()
+  requests[1].response.resolve(["model-two"])
+  await setImmediate()
+  requests[0].response.resolve(["model-one"])
+  await setImmediate()
+  assert.deepEqual(Array.from(page.secondModels.value), ["model-two"])
+  assert.equal(page.settings.value.second_model, "manual-model")
+  const failed = page.loadSecondModels()
+  requests[2].response.reject(new Error("目录不可用"))
+  await failed
+  assert.equal(page.secondModelsError.value, "目录不可用")
+  assert.equal(page.settings.value.second_model, "manual-model")
+  const closed = page.loadSecondModels()
+  page.showSettings.value = false
+  await vue.nextTick()
+  requests[3].response.resolve(["closed"])
+  await closed
+  assert.equal(page.secondModels.value.length, 0)
+  await page.openSettings()
+  await vue.nextTick()
+  user.sessionVersion++
+  await vue.nextTick()
+  requests[4].response.resolve(["previous-session"])
+  await setImmediate()
+  assert.equal(page.showSettings.value, false)
+  assert.equal(page.secondModels.value.length, 0)
+  await page.openSettings()
+  await vue.nextTick()
+  unmount()
+  requests[5].response.resolve(["unmounted"])
+  await setImmediate()
+  assert.equal(page.secondModels.value.length, 0)
+})
+
 test("新闻 AI 详情绑定新闻修订版本，旧分析响应不能覆盖当前版本", async () => {
   const requests: { params: unknown, response: ReturnType<typeof Promise.withResolvers> }[] = []
   const props = vue.reactive({ newsId: 1, revision: 1 })
   const user = { sessionVersion: 1 }
   const load = moduleLoader({
-    "@/common/apis/risk": { listRiskAnalysesApi: (params: unknown) => {
+    "@/common/apis/risk": { listNewsSummariesApi: async () => [], listRiskAnalysesApi: (params: unknown) => {
       const response = Promise.withResolvers()
       requests.push({ params, response })
       return response.promise
@@ -472,7 +530,7 @@ test("新闻 AI 详情等待期间自动刷新，完成后停止；隐藏、旧�
   const document = { hidden: false }
   const user = { sessionVersion: 1 }
   const load = moduleLoader({
-    "@/common/apis/risk": { listRiskAnalysesApi: async () => {
+    "@/common/apis/risk": { listNewsSummariesApi: async () => [], listRiskAnalysesApi: async () => {
       requests++
       return [{ state }]
     } },
@@ -574,4 +632,82 @@ test("新闻列表只更新可见条目的匹配版本评级，保留滚动与�
   assert.equal(page.items.value[0].risk, undefined)
   await page.refreshRisk()
   assert.equal(queries.length, 5)
+})
+
+test("第三阶段模型列表随接入配置更新，保留手填值并丢弃旧配置、关闭及旧会话结果", async () => {
+  const requests: { id: number, response: ReturnType<typeof Promise.withResolvers> }[] = []
+  let unmount = () => {}
+  const user = vue.reactive({ sessionVersion: 1 })
+  const load = moduleLoader({
+    "@@/apis/skills": { listSkillTreeApi: async () => [] },
+    "@/common/apis/risk": { getRiskSettingsApi: async () => ({ third_provider_id: 1, third_model: "manual-model", enabled: false }) },
+    "@/common/apis/settings": {
+      listProvidersApi: async () => [],
+      listProviderModelsApi: (id: number) => {
+        const response = Promise.withResolvers()
+        requests.push({ id, response })
+        return response.promise
+      }
+    },
+    "@/pinia/stores/user": { useUserStore: () => user }
+  }, { ...globals, clearInterval, onBeforeUnmount: (callback: () => void) => unmount = callback })
+  const page = load("@/pages/home/index.vue").default.setup({}, { expose() {} })
+  await page.openSettings()
+  await vue.nextTick()
+  assert.equal(requests[0].id, 1)
+  page.settings.value.third_provider_id = 2
+  await vue.nextTick()
+  requests[1].response.resolve(["model-two"])
+  await setImmediate()
+  requests[0].response.resolve(["model-one"])
+  await setImmediate()
+  assert.deepEqual(Array.from(page.thirdModels.value), ["model-two"])
+  assert.equal(page.settings.value.third_model, "manual-model")
+  const failed = page.loadThirdModels()
+  requests[2].response.reject(new Error("目录不可用"))
+  await failed
+  assert.equal(page.thirdError.value, "目录不可用")
+  assert.equal(page.settings.value.third_model, "manual-model")
+  const closed = page.loadThirdModels()
+  page.showSettings.value = false
+  await vue.nextTick()
+  requests[3].response.resolve(["closed"])
+  await closed
+  assert.equal(page.thirdModels.value.length, 0)
+  await page.openSettings()
+  await vue.nextTick()
+  user.sessionVersion++
+  await vue.nextTick()
+  requests[4].response.resolve(["previous-session"])
+  await setImmediate()
+  assert.equal(page.showSettings.value, false)
+  assert.equal(page.thirdModels.value.length, 0)
+  await page.openSettings()
+  await vue.nextTick()
+  unmount()
+  requests[5].response.resolve(["unmounted"])
+  await setImmediate()
+  assert.equal(page.thirdModels.value.length, 0)
+})
+
+test("72小时阅读列表分页保留全部包，更新缩页后回到有效页", async () => {
+  let count = 45
+  const load = moduleLoader({
+    "@/common/apis/risk": {
+      getRiskOverviewApi: async () => ({ briefing: { reading: Array.from({ length: count }, (_, id) => ({ id })) } }),
+      listRiskEventsApi: async () => ({ items: [], total: 0 })
+    },
+    "@@/apis/skills": {},
+    "@/common/apis/settings": {},
+    "@/pinia/stores/user": { useUserStore: () => ({ sessionVersion: 1 }) }
+  }, globals)
+  const page = load("@/pages/home/index.vue").default.setup({}, { expose() {} })
+  await page.load()
+  assert.equal(page.readingRows.value.length, 20)
+  page.readingPage.value = 3
+  assert.deepEqual(Array.from(page.readingRows.value, (row: { id: number }) => row.id), [40, 41, 42, 43, 44])
+  count = 1
+  await page.load()
+  assert.equal(page.readingPage.value, 1)
+  assert.equal(page.readingRows.value[0].id, 0)
 })

@@ -3,6 +3,7 @@ import type { CrawlLog, SourceInfo } from "@@/apis/crawler/type"
 import type { NewsBrief } from "@@/apis/news/type"
 import { patchSourceApi } from "@@/apis/crawler"
 import { listNewsApi } from "@@/apis/news"
+import { useSessionScope } from "@@/composables/useSessionScope"
 import { formatTime } from "@@/utils/text"
 import { CircleCheck, RefreshRight } from "@element-plus/icons-vue"
 import dayjs from "dayjs"
@@ -20,10 +21,18 @@ const emit = defineEmits<{
 }>()
 
 const latest = ref<NewsBrief[]>([])
+const sessionScope = useSessionScope()
+const sourceName = ref(props.source.name)
+async function saveName() {
+  sessionScope.assertCurrent()
+  await patchSourceApi(props.source.code, { name: sourceName.value })
+  if (sessionScope.isCurrent()) emit("changed")
+}
 const interval = ref(props.source.interval_seconds)
 
 async function loadLatest() {
-  latest.value = (await listNewsApi({ source: [props.source.code], limit: 5 })).items
+  const result = await listNewsApi({ source: [props.source.code], limit: 5 })
+  if (sessionScope.isCurrent()) latest.value = result.items
 }
 
 // 本来源有新的“本轮完成”日志时刷新最新入库列表
@@ -97,6 +106,11 @@ onMounted(loadLatest)
 </script>
 
 <template>
+  <div v-if="source.code.startsWith('rss_')" class="flex gap-2">
+    <el-input v-model="sourceName" placeholder="订阅名称" /><el-button @click="saveName">
+      保存名称
+    </el-button>
+  </div>
   <div
     class="flex flex-col gap-3 border rounded-lg border-solid p-4 shadow-sm"
     :class="alert ? 'border-rose-300 bg-rose-50/50' : 'border-slate-200 bg-white'"

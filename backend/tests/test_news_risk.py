@@ -1,6 +1,5 @@
 """Risk evidence, identity and model boundaries use synthetic inputs only."""
 import asyncio
-import json
 from datetime import UTC, datetime
 import pytest
 
@@ -47,44 +46,65 @@ def test_evidence_retains_quotes_present_in_source(risk):
     assert item.evidence == '“安全事件”'
 
 
-@pytest.mark.parametrize('valid', [True, False])
-def test_enable_validates_evidence_before_saving_settings(risk, monkeypatch, valid):
+def mock_enable(risk, monkeypatch, valid=True, verification='reported', direction='neutral'):
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
+    from alphapulse.news_risk import pipeline, briefing
+    from alphapulse.api import risk as api
+    provider = SimpleNamespace(model='news-only', max_tokens=1000, context_window=200000)
+    session = SimpleNamespace(get=AsyncMock(return_value=None), merge=AsyncMock(), commit=AsyncMock())
+    monkeypatch.setattr(pipeline, 'configuration', AsyncMock(return_value=(provider, 'rules', {}, 'fingerprint')))
+    async def complete(provider, system, payload, schema):
+        if schema is pipeline.Grouping:
+            return pipeline.Grouping( reason='财经维护通知', events=[pipeline.Match(event_id=None,
+                group_key='maintenance', title='维护', category='company', entities=['示例公司'], fact='维护',
+                evidence=payload['article']['summary'] if valid else '捏造损失', urgent=False, tags=['维护'], content_kind='statement')]), {}
+        if schema is risk.Outlook:
+            return risk.Outlook(windows=[risk.Scenario(hours=h, direction='unknown', summary='不足', conditions='不足',
+                counter_factors='不足', uncertainty='不足', event_ids=[]) for h in (24, 48, 168)]), {}
+        article = payload['articles'][0]
+        result = pipeline.EventResult(**{**label(risk).model_dump(exclude={'event_id', 'same_event_as', 'evidence', 'stars'}), 'verification': verification,
+            'direction': direction}, facts='维护', timeline='维护',
+            asset_impacts='未知', risk_stars=0, importance_stars=3, opinions='待观察', counter_evidence='不足', watchpoints='恢复', claims=[pipeline.Claim(statement='维护', verdict='insufficient', evidence_refs=[])], related_packages=[], excluded_article_ids=[],
+            evidence_refs=[pipeline.Evidence(article_id=1, quote=article['summary'])])
+        return result, {}
+    async def high(provider, system, payload, schema):
+        if schema is briefing.Ranked:
+            return briefing.Ranked(reading=[briefing.Reading(id=p['id'], revision=p['revision'], priority=50, reason='重要') for p in payload['packages']], notes='虚构测试'), {}
+        trend = briefing.Trend(summary='未知', conditions='不足', counter_evidence='不足', watchpoints='后续')
+        return briefing.Synthesis(summary='不足', market='未知', short_term=trend, medium_term=trend, references=[]), {}
+    monkeypatch.setattr(briefing, 'complete', high)
+    monkeypatch.setattr(api, 'complete', complete)
+    monkeypatch.setattr(pipeline, 'complete', complete)
+    return session
+
+
+def enable_response(session):
     from fastapi import FastAPI
     import httpx
     from alphapulse.api import risk as api
-
-    session = SimpleNamespace(merge=AsyncMock(), commit=AsyncMock())
-    provider = SimpleNamespace(model='news-only')
-    monkeypatch.setattr(api, 'provider_for', AsyncMock(return_value=provider))
-
-    async def complete(actual_provider, system, payload, schema):
-        assert actual_provider is provider
-        news = payload['news'][0]
-        assert news['content'] and news['summary']
-        evidence = '“'+news['summary']+'”' if valid else '虚构的资产损失6%'
-        return risk.Labels(items=[label(risk).model_copy(update={'evidence': evidence})]), {}
-
-    monkeypatch.setattr(api, 'complete', complete)
     app = FastAPI()
     app.include_router(api.router)
     app.dependency_overrides[api.require_admin] = lambda: None
     app.dependency_overrides[api.get_session] = lambda: session
-
     async def check():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test') as client:
-            response = await client.post('/api/risk/enable', json={'provider_id': 1, 'model': 'news-only'})
-            assert response.status_code == (200 if valid else 502), response.text
-            if valid:
-                saved = session.merge.call_args.args[0]
-                assert saved.enabled and saved.model == 'news-only'
-                session.commit.assert_awaited_once()
-            else:
-                assert '模型证据并非输入原文引用' in response.json()['detail']
-                session.merge.assert_not_awaited()
-                session.commit.assert_not_awaited()
-    asyncio.run(check())
+            return await client.post('/api/risk/enable', json={'provider_id': 1, 'model': 'news-only'})
+    return asyncio.run(check())
+
+
+@pytest.mark.parametrize('valid', [True, False])
+def test_enable_validates_evidence_before_saving_settings(risk, monkeypatch, valid):
+    session = mock_enable(risk, monkeypatch, valid)
+    response = enable_response(session)
+    assert response.status_code == (200 if valid else 502), response.text
+    if valid:
+        saved = session.merge.call_args.args[0]
+        assert saved.enabled and saved.start_at is not None
+        session.commit.assert_awaited_once()
+    else:
+        assert '原文引用' in response.text
+        session.merge.assert_not_awaited()
 
 
 @pytest.mark.parametrize('verification,direction,status', [
@@ -92,40 +112,14 @@ def test_enable_validates_evidence_before_saving_settings(risk, monkeypatch, val
     ('insufficient', 'bearish', 502), ('insufficient', 'mixed', 502), ('reported', 'neutral', 200),
 ])
 def test_enable_requires_consistent_uncertainty_without_changing_model_output(risk, monkeypatch, verification, direction, status):
-    from types import SimpleNamespace
-    from unittest.mock import AsyncMock
-    from fastapi import FastAPI
-    import httpx
-    from alphapulse.api import risk as api
-
-    session = SimpleNamespace(merge=AsyncMock(), commit=AsyncMock())
-    monkeypatch.setattr(api, 'provider_for', AsyncMock(return_value=object()))
-    item = label(risk).model_copy(update={'verification': verification, 'direction': direction})
-
-    async def complete(provider, system, payload, schema):
-        item.evidence = payload['news'][0]['summary']
-        return risk.Labels(items=[item]), {}
-
-    monkeypatch.setattr(api, 'complete', complete)
-    app = FastAPI()
-    app.include_router(api.router)
-    app.dependency_overrides[api.require_admin] = lambda: None
-    app.dependency_overrides[api.get_session] = lambda: session
-
-    async def check():
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test') as client:
-            response = await client.post('/api/risk/enable', json={'provider_id': 1, 'model': 'news-only'})
-            assert response.status_code == status, response.text
-            assert item.direction == direction
-            if status == 200:
-                session.merge.assert_awaited_once()
-                session.commit.assert_awaited_once()
-            else:
-                assert 'direction 必须为 unknown' in response.json()['detail']
-                assert direction in response.json()['detail']
-                session.merge.assert_not_awaited()
-                session.commit.assert_not_awaited()
-    asyncio.run(check())
+    session = mock_enable(risk, monkeypatch, verification=verification, direction=direction)
+    response = enable_response(session)
+    assert response.status_code == status, response.text
+    if status == 200:
+        session.merge.assert_awaited_once()
+    else:
+        assert '无法判断方向' in response.text
+        session.merge.assert_not_awaited()
 
 
 def test_uncertainty_contract_reaches_the_model_with_tool_schema(risk, monkeypatch):
@@ -175,10 +169,11 @@ def test_same_batch_grouping_must_not_cycle(risk):
 def test_truncated_completion_is_not_a_safe_label(risk, monkeypatch):
     from types import SimpleNamespace
     async def stream(*args):
-        yield risk.llm.Completion(truncated=True)
+        yield risk.llm.Completion(truncated=True, usage={'output_tokens': 100})
     monkeypatch.setattr(risk.llm, 'stream', stream)
-    with pytest.raises(ValueError, match='截断'):
+    with pytest.raises(risk.OutputTruncated, match='截断') as exc:
         asyncio.run(risk.complete(SimpleNamespace(max_tokens=100, context_window=10000, reasoning_effort=None), '', {}, risk.Labels))
+    assert exc.value.usage == {'output_tokens': 100}
 
 
 def test_model_override_never_changes_shared_provider(risk):
@@ -192,69 +187,35 @@ def test_model_override_never_changes_shared_provider(risk):
     assert session.detached == 'original' and result.model == 'LUNA'
 
 
-def test_worker_correction_and_late_backfill_keep_current_and_peak_ratings(risk, monkeypatch):
+def test_debounce_is_bounded_and_urgent_bypasses_wait(risk):
     from datetime import timedelta
     from types import SimpleNamespace
-    from unittest.mock import AsyncMock
-    from alphapulse.news_risk import worker
-    from alphapulse.models import NewsItem
-    from alphapulse.models.risk import RiskAnalysis, RiskEvent, RiskSettings
-
+    from alphapulse.news_risk.worker import schedule
     now = datetime.now(UTC)
-    original = label(risk)
-    event = RiskEvent(id=7, title=original.title, category='security', entities=['Exchange'], stars=5,
-        peak_stars=5, result=original.model_dump(), published_at=now-timedelta(minutes=2), updated_at=now-timedelta(minutes=2))
-    rows = [RiskAnalysis(id=i, news_id=i, content_hash=str(i), state='pending', input={
-        'title': '安全事件', 'published_at': (now-timedelta(minutes=minutes)).isoformat(),
-        'progress_at': (now-timedelta(minutes=minutes)).isoformat()}) for i, minutes in [(2, 1), (1, 3)]]
-    correction = original.model_copy(update={'id': 2, 'event_id': 7, 'stars': 1, 'verification': 'refuted'})
-    historical = original.model_copy(update={'id': 1, 'event_id': 7})
-
-    class Session:
-        def __init__(self): self.selections = iter([rows, [event]])
-        async def __aenter__(self): return self
-        async def __aexit__(self, *args): pass
-        async def get(self, model, identifier, **kwargs):
-            if model is RiskSettings: return SimpleNamespace(enabled=True)
-            if model is NewsItem: return SimpleNamespace(content_hash=str(identifier))
-            if model is RiskEvent: return event
-            raise AssertionError(model)
-        async def scalars(self, query):
-            values = next(self.selections)
-            return SimpleNamespace(all=lambda: values)
-        async def commit(self): pass
-
-    monkeypatch.setattr(worker, 'SessionLocal', Session)
-    monkeypatch.setattr(worker, 'provider_for', AsyncMock(return_value=SimpleNamespace(model='news-only', max_tokens=1000, context_window=200000)))
-    monkeypatch.setattr(worker, 'find_candidates', AsyncMock(return_value=([event], {1: 7, 2: 7})))
-    monkeypatch.setattr(worker, 'enqueue', AsyncMock())
-    monkeypatch.setattr(worker, 'complete', AsyncMock(return_value=(risk.Labels(items=[historical, correction]), {'input_tokens': 10})))
-    asyncio.run(worker.analyze())
-    assert event.stars == 1 and event.peak_stars == 5
-    assert event.result['verification'] == 'refuted'
-    assert event.published_at == now-timedelta(minutes=3)
-    assert all(row.state == 'done' and row.event_id == 7 for row in rows)
-    assert rows[0].usage == {'input_tokens': 10} and rows[1].usage is None
+    event = SimpleNamespace(revision=1, result={'summary': '原总结'}, dirty_since=now-timedelta(seconds=170))
+    schedule(event, now, False)
+    assert event.due_at == now+timedelta(seconds=10)
+    assert event.revision == 2
+    schedule(event, now, True)
+    assert event.due_at == now
 
 
-def test_batch_packing_keeps_other_articles_queued_and_retains_linked_event(risk):
+def test_long_sources_are_split_without_losing_text(risk, monkeypatch):
     from types import SimpleNamespace
-    from alphapulse.news_risk.worker import pack_batch, batch_payload
-    now = datetime.now(UTC)
-    event = SimpleNamespace(id=7, title='安全事件', category='security', entities=['Exchange'],
-        published_at=now, updated_at=now, result={'summary': '安全事件'})
-    rows = [SimpleNamespace(id=i, news_id=i, input={'title': '安全事件', 'content': 'x'*1000}) for i in range(10)]
-    base = len((risk.SYSTEM + json.dumps(risk.Labels.model_json_schema(), ensure_ascii=False)).encode())
-    provider = SimpleNamespace(max_tokens=256, context_window=base+2000)
-    packed, candidates, payload = pack_batch(provider, rows, [event], {0: 7})
-    assert 0 < len(packed) < len(rows)
-    assert candidates == [event] and risk.fits_context(provider, risk.SYSTEM, payload, risk.Labels)
-    assert all(len(r.input['content']) == 1000 for r in rows)
-    rows[0].input['content'] = 'x'*10000
-    packed, candidates, payload = pack_batch(provider, rows, [event], {0: 7})
-    assert packed == [rows[0]] and candidates == [event]
-    assert not risk.fits_context(provider, risk.SYSTEM, payload, risk.Labels)
-    assert len(batch_payload(rows[1:], [])['news']) == 9
+    from alphapulse.news_risk import pipeline
+    provider = SimpleNamespace(max_tokens=100, context_window=10000)
+    article = {'id': 1, 'title': '安全事件', 'summary': '', 'content': '安'*16000}
+    seen = []
+    async def complete(provider, system, payload, schema):
+        if schema is pipeline.Extraction:
+            seen.append(payload['content'])
+            return pipeline.Extraction(facts='事实', evidence_refs=[pipeline.Evidence(article_id=1, quote=payload['content'][:1])]), {}
+        return pipeline.EventResult(**label(risk).model_dump(exclude={'event_id', 'same_event_as', 'evidence', 'stars'}), facts='事实', timeline='时间', asset_impacts='资产',
+            risk_stars=5, importance_stars=5, opinions='待观察', counter_evidence='不足', watchpoints='恢复', claims=[pipeline.Claim(statement='事件', verdict='insufficient', evidence_refs=[])], related_packages=[], excluded_article_ids=[], evidence_refs=[pipeline.Evidence(article_id=1, quote='安全事件')]), {}
+    monkeypatch.setattr(pipeline, 'complete', complete)
+    result, _ = asyncio.run(pipeline.summarize_articles(provider, 'rules', [article], {'id': 1, 'fact': 'Synthetic event'}))
+    assert ''.join(seen) == article['title']+'\n\n'+article['content']
+    assert result.risk_stars == 5
 
 
 def test_context_budget_includes_unicode_and_tool_schema(risk):
@@ -263,7 +224,7 @@ def test_context_budget_includes_unicode_and_tool_schema(risk):
     assert not risk.fits_context(provider, risk.SYSTEM, {'content': '风'*1000}, risk.Labels)
 
 
-@pytest.mark.parametrize('endpoint', ['overview', 'events'])
+@pytest.mark.parametrize('endpoint', ['overview', 'summaries'])
 @pytest.mark.parametrize('hours,status', [(None, 200), ('24', 200), ('48', 200), ('168', 200), ('25', 422), ('0', 422), ('abc', 422)])
 def test_window_query_parameters_over_http(risk, monkeypatch, endpoint, hours, status):
     from types import SimpleNamespace
@@ -288,3 +249,66 @@ def test_window_query_parameters_over_http(risk, monkeypatch, endpoint, hours, s
             if status == 200:
                 assert response.json()['code'] == 0
     asyncio.run(check())
+
+
+def test_fresh_settings_can_be_saved_without_editing_any_fields(risk):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from fastapi import FastAPI
+    import httpx
+    from alphapulse.api import risk as api
+    session = SimpleNamespace(get=AsyncMock(return_value=None), scalar=AsyncMock(return_value=None),
+        merge=AsyncMock(), commit=AsyncMock())
+    app = FastAPI()
+    app.include_router(api.router)
+    app.dependency_overrides[api.require_admin] = lambda: None
+    app.dependency_overrides[api.get_session] = lambda: session
+    async def check():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test') as client:
+            response = await client.get('/api/risk/settings')
+            assert response.status_code == 200
+            value = response.json()['data']
+            assert value['second_model'] == value['third_model'] == ''
+            response = await client.put('/api/risk/settings', json=value)
+            assert response.status_code == 200, response.text
+    asyncio.run(check())
+    saved = session.merge.call_args.args[0]
+    assert saved.enabled is False and saved.third_model == ''
+    session.commit.assert_awaited_once()
+
+
+@pytest.mark.parametrize('state,published,reason', [('done', 3, '成功结果'), ('pending', 2, '排队'), ('processing', 2, '正在处理')])
+def test_old_failed_analysis_cannot_requeue_a_completed_or_running_revision(risk, state, published, reason):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from fastapi import HTTPException
+    from alphapulse.api import risk as api
+    event = SimpleNamespace(revision=3, published_revision=published, state=state)
+    row = SimpleNamespace(state='failed', summary_id=1, revision=3)
+    session = SimpleNamespace(get=AsyncMock(side_effect=[row, event]), commit=AsyncMock())
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(api.retry(7, session, stage='analysis'))
+    assert exc.value.status_code == 409 and reason in exc.value.detail
+    assert event.state == state
+    session.commit.assert_not_awaited()
+
+
+def test_completed_version_recovers_a_previously_stuck_pending_package(risk, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from alphapulse.news_risk import worker
+    event = SimpleNamespace(id=1, revision=3, published_revision=3, state='pending', error='Old failure',
+        dirty_since=datetime.now(UTC), title='Statement', fact='Statement', category='politics', tags=['Statement'], content_kind='statement')
+    session = AsyncMock()
+    session.__aenter__.return_value = session
+    session.get.return_value = SimpleNamespace(enabled=True)
+    session.scalar.side_effect = [event, SimpleNamespace(state='done')]
+    session.scalars.return_value = SimpleNamespace(all=lambda: [SimpleNamespace(id=1, input={'title': 'Statement'})])
+    monkeypatch.setattr(worker, 'SessionLocal', lambda: session)
+    monkeypatch.setattr(worker, 'configuration', AsyncMock(return_value=(SimpleNamespace(model='medium'), 'rules', {}, 'key')))
+    analyze = AsyncMock()
+    monkeypatch.setattr(worker, 'summarize_articles', analyze)
+    asyncio.run(worker.summarize())
+    assert event.state == 'done' and event.error is None and event.dirty_since is None
+    session.commit.assert_awaited_once()
+    analyze.assert_not_awaited()

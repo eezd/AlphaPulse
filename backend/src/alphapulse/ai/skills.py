@@ -65,7 +65,7 @@ async def add_version(session: AsyncSession, skill: SkillNode, content: str, sou
     return version
 
 
-async def create_node(session: AsyncSession, parent_id: int | None, kind: str, name: str, priority: int = 0) -> SkillNode:
+async def create_node(session: AsyncSession, parent_id: int | None, kind: str, name: str, priority: int = 0, scope: str = "shared") -> SkillNode:
     name = name.strip()
     if not name or "/" in name:
         raise SkillError("名称不能为空，也不能包含 /")
@@ -73,11 +73,13 @@ async def create_node(session: AsyncSession, parent_id: int | None, kind: str, n
         parent = await session.get(SkillNode, parent_id)
         if parent is None or parent.kind != "folder":
             raise SkillError("只能在文件夹下新建")
+    if parent_id is not None:
+        scope = parent.scope
     same_parent = SkillNode.parent_id.is_not_distinct_from(parent_id)
     if await session.scalar(select(SkillNode.id).where(same_parent, SkillNode.name == name)):
         raise SkillError(f"同一文件夹下已存在：{name}")
     last = await session.scalar(select(func.max(SkillNode.sort_order)).where(same_parent))
-    node = SkillNode(parent_id=parent_id, kind=kind, name=name, priority=priority, sort_order=(last or 0) + 1, enabled=True)
+    node = SkillNode(parent_id=parent_id, kind=kind, name=name, priority=priority, sort_order=(last or 0) + 1, enabled=True, scope=scope)
     session.add(node)
     await session.flush()
     return node
@@ -96,7 +98,7 @@ async def published_skills(session: AsyncSession) -> list[tuple[NodeInfo, str]]:
                 return True
             node = by_id[node.parent_id]
 
-    chosen = [i for i in tree if i.node.kind == "skill" and i.node.published_version_id is not None and active(i.node)]
+    chosen = [i for i in tree if i.node.kind == "skill" and i.node.scope == "shared" and i.node.published_version_id is not None and active(i.node)]
     contents = dict((await session.execute(
         select(SkillVersion.id, SkillVersion.content).where(SkillVersion.id.in_([i.node.published_version_id for i in chosen]))
     )).all())

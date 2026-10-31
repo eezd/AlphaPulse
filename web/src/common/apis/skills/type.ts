@@ -3,6 +3,7 @@ export type NodeKind = "folder" | "skill"
 export interface SkillNode {
   id: number
   parent_id: number | null
+  scope: "shared" | "news"
   kind: NodeKind
   name: string
   path: string
@@ -28,7 +29,7 @@ export type ListSkillTreeResponseData = SkillNode[]
 
 export type CreateSkillNodeResponseData = SkillNode
 
-export interface CreateSkillNodeBodyRequestData { parent_id: number | null, kind: NodeKind, name: string, priority?: number, content?: string }
+export interface CreateSkillNodeBodyRequestData { parent_id: number | null, kind: NodeKind, name: string, priority?: number, scope?: "shared" | "news", content?: string }
 
 export type PatchSkillNodeResponseData = SkillNode
 

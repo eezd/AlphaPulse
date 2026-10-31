@@ -81,6 +81,27 @@ class BuildTests(unittest.TestCase):
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
+class NewsResetTests(unittest.TestCase):
+    def test_preview_never_stops_worker_or_confirms_deletion(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            build = {'images': {'backend': {'digest': 'synthetic'}}}
+            with patch.object(deploy, 'INSTANCE', directory), patch.object(deploy, 'validate_images'), patch.object(deploy, 'run', return_value='{}') as run:
+                deploy.reset_news_ai(build)
+                self.assertEqual(run.call_count, 2)
+                self.assertTrue(run.call_args.kwargs['input'].startswith('CONFIRMED = False'))
+                self.assertFalse(any('stop' in call.args for call in run.call_args_list))
+
+    def test_reset_refuses_pending_deployment(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            ci.save(directory / 'deployment.pending.json', {})
+            with patch.object(deploy, 'INSTANCE', directory), patch.object(deploy, 'validate_images'), patch.object(deploy, 'run') as run:
+                with self.assertRaisesRegex(RuntimeError, 'pending deployment'):
+                    deploy.reset_news_ai({}, True)
+                run.assert_not_called()
+
+
 class RecoveryTests(unittest.TestCase):
     def test_rollback_removes_new_calendar_worker_and_checks_previous_services(self):
         with tempfile.TemporaryDirectory() as temporary:

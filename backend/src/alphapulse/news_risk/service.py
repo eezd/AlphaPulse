@@ -67,6 +67,14 @@ class Outlook(BaseModel):
     windows: list[Scenario]
 
 
+class OutputTruncated(ValueError):
+    """A read-only model call may be repeated with a smaller input batch."""
+
+    def __init__(self, message, usage=None):
+        super().__init__(message)
+        self.usage = usage
+
+
 async def complete(provider: AiProvider, system: str, payload: dict, schema: type[BaseModel]):
     text = json.dumps(payload, ensure_ascii=False)
     if not fits_context(provider, system, payload, schema):
@@ -76,7 +84,9 @@ async def complete(provider: AiProvider, system: str, payload: dict, schema: typ
     async for item in llm.stream(provider, system, [{'role': 'user', 'text': text}], [tool], provider.reasoning_effort):
         if isinstance(item, llm.Completion):
             completion = item
-    if completion is None or completion.truncated:
+    if completion is not None and completion.truncated:
+        raise OutputTruncated('模型输出被截断', completion.usage)
+    if completion is None:
         raise ValueError('模型未完成输出或输出被截断')
     calls = [call for call in completion.tool_calls if call['name'] == 'submit']
     if len(calls) != 1:
@@ -132,5 +142,5 @@ async def default_settings(session):
     if settings is None:
         provider = await session.scalar(select(AiProvider).where(AiProvider.is_default))
         return RiskSettings(id=1, enabled=False, provider_id=provider.id if provider else None,
-                            model=provider.model if provider else '')
+                            model=provider.model if provider else '', second_model='', third_model='')
     return settings
