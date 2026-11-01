@@ -4,7 +4,7 @@ from enum import IntEnum
 from typing import Annotated, Literal
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import select, func, text
+from sqlalchemy import select, func, text, BigInteger
 from sqlalchemy.ext.asyncio import AsyncSession
 from alphapulse.ai.llm import Effort
 from alphapulse.api.response import success
@@ -437,7 +437,7 @@ async def reprocess_retry(identifier: int, session: DB):
         await session.execute(update(ReprocessItem).where(ReprocessItem.job_id==job.id,ReprocessItem.state=='failed').values(state='pending',error=None))
     outlook_ids = {f['id'] for f in job.failures if f['stage'] == 'outlook'}
     snapshots = (await session.scalars(select(RiskSnapshot).where(RiskSnapshot.id.in_(outlook_ids), RiskSnapshot.state == 'failed',
-        RiskSnapshot.quotes['job_id'].as_integer() == job.id))).all()
+        RiskSnapshot.quotes['job_id'].astext.cast(BigInteger) == job.id))).all()
     for snapshot in snapshots: snapshot.quotes = {**snapshot.quotes, 'retry_requested': True}
     from alphapulse.models.risk import NewsEvent
     for stage, model in (('analysis', NewsSummary), ('events', NewsEvent)):

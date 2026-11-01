@@ -1,5 +1,5 @@
 """Explicit bounded historical jobs, sharing the normal news pipeline."""
-from sqlalchemy import select, text, update
+from sqlalchemy import select, text, update, BigInteger
 from alphapulse.core.db import SessionLocal
 from alphapulse.models import NewsItem
 from alphapulse.models.risk import RiskSettings, ReprocessJob, ReprocessItem, ArticleAnalysis, NewsSummary, EventMember
@@ -68,7 +68,7 @@ async def process_job(item_index=None):
                 inputs = await reading_inputs(session, datetime.now(UTC)-timedelta(hours=72))
                 key = briefing.fingerprint(briefing.semantic_packages(inputs), job.settings['configurations']['outlook']['rules'])
                 snapshot = await session.scalar(select(RiskSnapshot).where(
-                    RiskSnapshot.quotes['job_id'].as_integer() == job.id,
+                    RiskSnapshot.quotes['job_id'].astext.cast(BigInteger) == job.id,
                     RiskSnapshot.quotes['fingerprint'].as_string() == key).order_by(RiskSnapshot.id.desc()).limit(1))
                 if snapshot is None or snapshot.state == 'processing' or snapshot.quotes.get('retry_requested'): return
                 if snapshot.state == 'failed':

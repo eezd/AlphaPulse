@@ -1,7 +1,7 @@
 """Queue presentation combines durable work with short-lived execution steps."""
 import json
 from datetime import UTC, datetime
-from sqlalchemy import select, func, or_, exists
+from sqlalchemy import select, func, or_, exists, BigInteger
 from alphapulse.models import NewsItem
 from alphapulse.models.risk import (ReprocessItem, ReprocessTarget, ArticleAnalysis, NewsSummary, NewsEvent, RiskSnapshot, RiskSettings, ReprocessJob)
 from alphapulse.core.redis import redis
@@ -61,15 +61,15 @@ async def listing(session, state, stage, origin, job_id, page, limit):
             if origin=='realtime':continue
             if job_id:query=query.where(model.job_id==job_id)
         elif kind in ('analysis','events'):
-            batch=model.review_config['job_id'].as_integer()
+            batch=model.review_config['job_id'].astext.cast(BigInteger)
             if origin:query=query.where(batch.is_not(None) if origin=='history' else batch.is_(None))
             if job_id:
                 tracked=exists(select(ReprocessTarget.id).where(ReprocessTarget.job_id==job_id,
                     ReprocessTarget.kind==kind,ReprocessTarget.object_id==model.id))
                 query=query.where(or_(tracked,batch==job_id))
         elif kind=='outlook':
-            if job_id:query=query.where(model.quotes['job_id'].as_integer()==job_id)
-            if origin:query=query.where(model.quotes['job_id'].as_integer().is_not(None) if origin=='history' else model.quotes['job_id'].as_integer().is_(None))
+            if job_id:query=query.where(model.quotes['job_id'].astext.cast(BigInteger)==job_id)
+            if origin:query=query.where(model.quotes['job_id'].astext.cast(BigInteger).is_not(None) if origin=='history' else model.quotes['job_id'].astext.cast(BigInteger).is_(None))
         elif job_id or origin=='history':continue
         count = await session.scalar(select(func.count()).select_from(query.subquery()))
         total += count

@@ -324,6 +324,27 @@ async def main():
                 assert await session.scalar(select(func.count()).select_from(RiskSnapshot))==count+2
             assert not await worker.outlook(prepare_only=True)
         no_model.assert_not_awaited()
+        # JSON batch references must preserve the BIGINT identity used by job rows.
+        async with SessionLocal() as session:
+            original=await session.get(ReprocessJob,job_id)
+            large=ReprocessJob(id=2147483648,state='failed',settings={**original.settings,'job_id':2147483648},
+                items=[],position=0,failures=[])
+            package=await session.get(NewsSummary,package_ids[0])
+            package.review_config=large.settings; package.state='failed'
+            event=NewsEvent(title='Large batch',updated_at=now,due_at=now,state='failed',review_config=large.settings)
+            snapshot=RiskSnapshot(state='failed',model='senior',quotes={'job_id':large.id})
+            session.add_all([large,event,snapshot]); await session.flush()
+            large.failures=[{'stage':'outlook','id':snapshot.id,'error':'Synthetic large batch failure'}]
+            await session.commit()
+            result=await queue.listing(session,'failed',None,'history',large.id,1,20)
+            assert {(r['stage'],r['object_id']) for r in result['items']}=={
+                ('analysis',package.id),('events',event.id),('outlook',snapshot.id)}
+            for state in ('running','queued','waiting','failed','done',None):
+                result=await queue.listing(session,state,None,None,9223372036854775807,1,20)
+                assert result['total']==0 and result['items']==[]
+            from alphapulse.api.risk import reprocess_retry
+            await reprocess_retry(large.id,session)
+            assert (await session.get(RiskSnapshot,snapshot.id)).quotes['retry_requested']
     async with SessionLocal() as session:
         for model in (ReprocessTarget,ReprocessItem,ReprocessJob,EventMember,NewsEvent,PackageCorrection,RiskSnapshot,GroupingVersion,SummaryArticle,NewsSummary,ArticleAnalysis):
             await session.execute(delete(model))
