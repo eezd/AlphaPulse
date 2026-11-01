@@ -224,3 +224,27 @@ class EventLink(Base):
     event_id: Mapped[int] = mapped_column(ForeignKey('news_ai_events.id'), primary_key=True)
     reason: Mapped[str] = mapped_column(Text)
     package_revision: Mapped[int] = mapped_column(Integer)
+
+
+class ReprocessItem(Base):
+    __tablename__ = 'news_ai_reprocess_items'
+    __table_args__ = (UniqueConstraint('job_id', 'news_id'),)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    job_id: Mapped[int] = mapped_column(ForeignKey('news_ai_reprocess_jobs.id'), index=True)
+    news_id: Mapped[int] = mapped_column(ForeignKey('news_items.id'), index=True)
+    content_hash: Mapped[str] = mapped_column(String(64))
+    mode: Mapped[str] = mapped_column(String(16))
+    state: Mapped[str] = mapped_column(String(16), default='pending', index=True)
+    error: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ReprocessTarget(Base):
+    __tablename__ = 'news_ai_reprocess_targets'
+    __table_args__ = (UniqueConstraint('job_id', 'kind', 'object_id'),)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    job_id: Mapped[int] = mapped_column(ForeignKey('news_ai_reprocess_jobs.id'), index=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    object_id: Mapped[int] = mapped_column(BigInteger)
+    revision: Mapped[int] = mapped_column(Integer)

@@ -122,3 +122,45 @@ individual states, so completion order does not change progress or skip unfinish
 
 Migration `e5f701234567` adds the limit and converts legacy historical checkpoints to
 item states. Deployment and execution of this migration require separate authorization.
+
+### Historical news AI backfill and queue
+
+The home page's **AI 历史回补** selects publication times in `[start, end)` using
+stored current news revisions. `missing` completes unfinished grouping/package analysis
+and reuses published successes; `review` explicitly repeats grouping/TAG and package
+verification, preserving previous successful versions. Selecting both includes all
+news in the range. Related event timelines are refreshed; a batch waits only for its
+own package/event targets, while the home reading window stays at 72 hours.
+Corrections register every resulting package in the same transaction, including new
+branches when a split retains the original ID. An empty reading window saves a cleared
+snapshot without a model call or concurrency slot.
+
+`POST /api/risk/reprocess/preview` accepts `start`, `end`, and `modes`. Its opaque
+`preview_id` expires after 15 minutes and fixes news IDs, content hashes, models,
+reasoning efforts, and published Skills. `POST /api/risk/reprocess` accepts that ID;
+changed configuration requires a new preview, and changed source content fails its
+individual item explicitly. A missing item completed before execution is skipped.
+Only one batch runs at a time. Batches use spare slots in the shared concurrency
+pool, respect global AI pause, support cancellation of further news admissions and
+explicit retry of failed items, and reclaim interrupted news items after restart.
+Already scheduled downstream package/event updates continue after cancellation.
+An in-flight news item also keeps its identity reserved after cancellation, so a new
+batch waits for that item to finish while unrelated news can still use spare slots.
+
+`GET /api/risk/reprocess/{id}` returns paginated per-news states and downstream
+stage counts. `GET /api/risk/queue` filters by `state`, `stage`, `origin`, `job_id`
+and page. The home queue refreshes every three seconds while visible. Actual model
+waits, research rounds, tool calls and save steps are transient telemetry under
+`ap:risk:active`; PostgreSQL remains the durable queue. Heartbeat expiry means unknown
+execution state. Empty outlook polls and batch completion checks do not consume AI
+slots or appear as running model tasks.
+Batch filters include durable package/event targets even after real-time updates
+change their execution configuration; displayed model/source metadata describes the
+current execution. Open news details refresh with the batch list, retaining their page
+and rejecting responses from an older selection or session.
+
+Migration `f60123456789` adds normalized batch news items and package/event targets,
+retaining legacy job JSON and execution semantics. Isolated acceptance includes
+`scripts/smoke_backfill.py`; it mocks all model/Redis I/O and checks mode behavior,
+frozen previews, source changes, target completion and queue queries. Live migration,
+deployment and real backfill execution require separate authorization.

@@ -1,7 +1,7 @@
 """Authenticated news risk research endpoints."""
 from datetime import UTC, datetime, timedelta
 from enum import IntEnum
-from typing import Annotated
+from typing import Annotated, Literal
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select, func, text
@@ -195,7 +195,9 @@ async def overview(session: DB, hours: RiskWindow = RiskWindow.DAY):
     if runtime: concurrency.update(json.loads(runtime))
     from alphapulse.models.risk import ReprocessJob
     jobs = (await session.scalars(select(ReprocessJob).where(ReprocessJob.state.in_(['pending', 'running'])))).all()
+    from alphapulse.models.risk import ReprocessItem
     historical_pending = sum(i['state'] == 'pending' for job in jobs for i in job.items)
+    historical_pending += await session.scalar(select(func.count()).select_from(ReprocessItem).where(ReprocessItem.job_id.in_([j.id for j in jobs if j.settings.get('request')]), ReprocessItem.state=='pending')) or 0
     coverage_data = await coverage(session)
     concurrency['queued'] = historical_pending + sum(stage2.get(k, 0) for k in ('pending',)) + event_states.get('pending', 0) + coverage_data['pending']
     return success({'concurrency': concurrency, 'event_states': event_states, 'stage2': stage2, 'stage3': stage3, 'as_of': now, 'counts': counts, 'coverage': coverage_data, 'scenario': scenario, 'briefing': snapshot.result if snapshot else None,
@@ -372,11 +374,13 @@ async def event_timeline(identifier: int, session: DB):
 
 
 class ReprocessIn(BaseModel):
+    modes: list[Literal['missing','review']] = Field(min_length=1,max_length=2)
     start: datetime
     end: datetime
 
     @model_validator(mode='after')
     def range_valid(self):
+        if len(set(self.modes)) != len(self.modes): raise ValueError('回补选项不能重复')
         if self.start.tzinfo is None or self.end.tzinfo is None or self.start >= self.end:
             raise ValueError('请提供带时区的有效起止时间')
         return self
@@ -384,15 +388,19 @@ class ReprocessIn(BaseModel):
 
 @router.post('/reprocess/preview')
 async def reprocess_preview(body: ReprocessIn, session: DB):
-    from alphapulse.news_risk.reprocess import preview
-    counts, _ = await preview(session, body.start, body.end)
-    return success(counts)
+    from alphapulse.news_risk.backfill import preview
+    try: return success(await preview(session,body.start,body.end,body.modes))
+    except ValueError as error: raise HTTPException(409,str(error)) from error
+
+
+class ReprocessStart(BaseModel):
+    preview_id: str = Field(min_length=20,max_length=80,pattern='^[A-Za-z0-9_-]+$')
 
 
 @router.post('/reprocess', status_code=202)
-async def reprocess_start(body: ReprocessIn, session: DB):
-    from alphapulse.news_risk.reprocess import start_job
-    try: result = await start_job(session, body.start, body.end)
+async def reprocess_start(body: ReprocessStart, session: DB):
+    from alphapulse.news_risk.backfill import start
+    try: result = await start(session, body.preview_id)
     except ValueError as error: raise HTTPException(409, str(error)) from error
     return success(result)
 
@@ -401,8 +409,8 @@ async def reprocess_start(body: ReprocessIn, session: DB):
 async def reprocess_list(session: DB):
     from alphapulse.models.risk import ReprocessJob
     rows = (await session.scalars(select(ReprocessJob).order_by(ReprocessJob.id.desc()).limit(20))).all()
-    return success([{'id': r.id, 'state': r.state, 'total': len(r.items), 'completed': r.position, 'failures': r.failures,
-        'created_at': r.created_at} for r in rows])
+    from alphapulse.news_risk.queue import job_out
+    return success([await job_out(session,r) for r in rows])
 
 
 @router.post('/reprocess/{identifier}/cancel')
@@ -423,6 +431,10 @@ async def reprocess_retry(identifier: int, session: DB):
     if job is None or job.state != 'failed': raise HTTPException(409, '仅可重试失败任务')
     if await session.scalar(select(ReprocessJob.id).where(ReprocessJob.state.in_(['pending', 'running'])).limit(1)):
         raise HTTPException(409, '已有重整理任务')
+    if job.settings.get('request'):
+        from alphapulse.models.risk import ReprocessItem
+        from sqlalchemy import update
+        await session.execute(update(ReprocessItem).where(ReprocessItem.job_id==job.id,ReprocessItem.state=='failed').values(state='pending',error=None))
     outlook_ids = {f['id'] for f in job.failures if f['stage'] == 'outlook'}
     snapshots = (await session.scalars(select(RiskSnapshot).where(RiskSnapshot.id.in_(outlook_ids), RiskSnapshot.state == 'failed',
         RiskSnapshot.quotes['job_id'].as_integer() == job.id))).all()
@@ -442,3 +454,24 @@ async def reprocess_retry(identifier: int, session: DB):
         job.position = len(job.items)
     job.failures = []; job.state = 'running'
     await session.commit(); return success(None)
+
+
+@router.get('/queue')
+async def queue(session: DB, state: Literal['running','queued','waiting','failed','done'] | None = None,
+                stage: Literal['grouping','analysis','events','outlook','backfill'] | None = None,
+                origin: Literal['history','realtime'] | None = None, job_id: int | None = Query(None,gt=0),
+                page: int = Query(1,ge=1), limit: int = Query(20,ge=1,le=100)):
+    from alphapulse.news_risk.queue import listing
+    return success(await listing(session,state,stage,origin,job_id,page,limit))
+
+
+@router.get('/reprocess/{identifier}')
+async def reprocess_detail(identifier: int, session: DB, page: int = Query(1,ge=1), limit: int = Query(20,ge=1,le=100)):
+    from alphapulse.models.risk import ReprocessJob, ReprocessItem
+    from alphapulse.news_risk.queue import job_out
+    job=await session.get(ReprocessJob,identifier)
+    if job is None: raise HTTPException(404,'回补批次不存在')
+    rows=(await session.execute(select(ReprocessItem,NewsItem.title,NewsItem.url).join(NewsItem).where(
+        ReprocessItem.job_id==identifier).order_by(ReprocessItem.id).offset((page-1)*limit).limit(limit))).all()
+    return success({**await job_out(session,job),'items':[{'id':i.id,'news_id':i.news_id,'title':title,'url':url,
+        'mode':i.mode,'state':i.state,'error':i.error} for i,title,url in rows]})

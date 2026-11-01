@@ -21,7 +21,7 @@ def test_pause_after_claim_does_not_count_old_success(trading, monkeypatch):
     job = N(id=20, state='pending', position=0, items=[{'id':21,'hash':'abc'}], failures=[], settings={})
     old = N(id=25, state='done', error=None, result={'old_success':True})
     session = session_mock()
-    session.scalar.side_effect = [None, None, job, old]
+    session.scalar.side_effect = [None, None, job, None, old]
     session.get.side_effect = lambda model, *a, **kw: {
         RiskSettings:N(enabled=True), NewsItem:N(id=21,content_hash='abc'), ArticleAnalysis:old, ReprocessJob:job}[model]
     paused = session_mock()
@@ -59,7 +59,7 @@ def test_downstream_failure_does_not_mark_unrelated_news_failed(trading, monkeyp
 @pytest.mark.parametrize('stage', ['grouping', 'analysis', 'events', 'outlook'])
 def test_retry_resumes_only_failed_stage(trading, stage):
     from alphapulse.api.risk import reprocess_retry
-    job = N(id=10,state='failed',position=2,items=[{'id':11},{'id':12}],
+    job = N(id=10,state='failed',position=2,settings={},items=[{'id':11},{'id':12}],
         failures=[{'stage':stage,'id':11,'error':'Synthetic failure'}])
     failed = N(id=11,state='failed',quotes={})
     session = session_mock()
@@ -81,7 +81,7 @@ def test_job_outlook_retry_waits_for_its_grouping_retry(trading, monkeypatch):
     from alphapulse.news_risk import reprocess, worker, events
     session = session_mock()
     session.get.return_value = N(enabled=True)
-    session.scalar.side_effect = [None, N(quotes={'job_id':10}), N(id=10,position=0,items=[{'id':11}])]
+    session.scalar.side_effect = [None, N(quotes={'job_id':10}), N(id=10,position=0,settings={},items=[{'id':11}])]
     monkeypatch.setattr(worker,'SessionLocal',lambda:session)
     monkeypatch.setattr(events,'reading_inputs',AsyncMock(return_value=[]))
     current = AsyncMock(side_effect=AssertionError('Must not use current settings for a job retry'))

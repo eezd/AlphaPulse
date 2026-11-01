@@ -9,6 +9,7 @@ import * as api from "@/common/apis/risk"
 import { listProviderModelsApi, listProvidersApi } from "@/common/apis/settings"
 import { useUserStore } from "@/pinia/stores/user"
 
+import AiQueue from "./components/AiQueue.vue"
 import EventResearch from "./components/EventResearch.vue"
 
 const eventResearch = ref<InstanceType<typeof EventResearch> | null>(null)
@@ -257,6 +258,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="mx-auto max-w-7xl flex flex-col gap-4">
+    <AiQueue @package="openEvent" @event="openReading({ kind: 'event', id: $event, revision: 0, priority: 0, reason: '' })" />
     <div class="flex flex-wrap items-center gap-3">
       <div class="flex-1">
         <h1 class="m-0 text-xl font-semibold">

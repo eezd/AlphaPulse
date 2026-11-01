@@ -7,6 +7,7 @@ from alphapulse.core.db import SessionLocal
 from alphapulse.news_risk.pipeline import configuration
 from alphapulse.news_risk.contracts import PackageTimePoint
 from alphapulse.news_risk.service import complete
+from alphapulse.news_risk.progress import step
 
 
 class TimelinePoint(PackageTimePoint):
@@ -54,6 +55,9 @@ async def dirty_event(session, package_id, review_config=None):
         event.review_config = review_config
         event.state = 'pending'
         event.due_at = datetime.now(UTC)+timedelta(seconds=60)
+        if review_config and review_config.get('request'):
+            from alphapulse.news_risk.backfill import target
+            await target(session, review_config['job_id'], 'events', event)
 
 
 async def associate(session, package, result, researched_ids, researched_events=None):
@@ -89,6 +93,9 @@ async def associate(session, package, result, researched_ids, researched_events=
     event.review_config = package.review_config
     event.state = 'pending'; event.due_at = datetime.now(UTC)+timedelta(seconds=60)
     event.updated_at = max(p.updated_at for p in members)
+    if package.review_config and package.review_config.get('request'):
+        from alphapulse.news_risk.backfill import target
+        await target(session, package.review_config['job_id'], 'events', event)
 
 
 async def organize(target_id=None):
@@ -122,7 +129,9 @@ async def organize(target_id=None):
         version_id, event_id = version.id, event.id
         try:
             if config_error: raise ValueError(config_error)
+            step('梳理事件时间线')
             result, usage = await complete(provider, system, {'task': 'event_timeline', 'previous': event.result, 'packages': packages}, EventResult)
+            step('核对时间线与证据')
             validate_timeline(result, packages)
             version.result = result.model_dump(mode='json'); version.usage = usage; version.state = 'done'
             from alphapulse.news_risk.worker import publication_lock

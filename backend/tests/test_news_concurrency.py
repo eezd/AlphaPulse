@@ -12,6 +12,7 @@ def fake_session(settings):
     session.get = AsyncMock(return_value=settings)
     session.scalars = AsyncMock(return_value=N(all=lambda: []))
     session.commit = AsyncMock()
+    session.execute = AsyncMock()
     return session
 
 
@@ -117,7 +118,7 @@ def test_history_completion_is_counted_independently_of_item_order(trading, monk
         items=[{'id':i,'hash':'current','state':'pending'} for i in (1,2,3)])
     article = N(id=30, state='done', error=None)
     session = fake_session(None)
-    session.scalar = AsyncMock(side_effect=[job, article])
+    session.scalar = AsyncMock(side_effect=[job, None, article])
     session.get = AsyncMock(side_effect=lambda model,*a,**kw: {
         RiskSettings:N(enabled=True), ReprocessJob:job,
         ArticleAnalysis:article, NewsItem:N(id=3, content_hash='current')}[model])

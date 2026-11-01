@@ -882,3 +882,171 @@ test("新闻并发独立保存保留模型草稿，重复点击和旧会话响�
   await current
   assert.equal(page.concurrencySaving.value, false)
 })
+
+test("AI 队列隔离旧会话与旧筛选响应，轮询隐藏页面时暂停并在卸载后清理", async () => {
+  const user = vue.reactive({ sessionVersion: 1 })
+  const pending: ReturnType<typeof Promise.withResolvers>[] = []
+  const queries: any[] = []
+  let poll = () => {}
+  let unmount = () => {}
+  let cleared = false
+  const doc = { hidden: true, addEventListener() {}, removeEventListener() {} }
+  const load = moduleLoader({
+    "@/pinia/stores/user": { useUserStore: () => user },
+    "@/common/apis/risk": { listRiskQueueApi: (query: unknown) => {
+      queries.push(query)
+      const request = Promise.withResolvers()
+      pending.push(request)
+      return request.promise
+    } },
+    "@@/utils/text": { formatTime: (value: string) => value }
+  }, { ...globals, document: doc, setInterval: (callback: () => void) => {
+    poll = callback
+    return 1
+  }, clearInterval: () => {
+    cleared = true
+  }, onMounted: (callback: () => void) => callback(), onBeforeUnmount: (callback: () => void) => {
+    unmount = callback
+  } })
+  const page = load("@/pages/home/components/AiQueue.vue").default.setup({}, { expose() {}, emit() {} })
+  assert.equal(queries.length, 1)
+  poll()
+  assert.equal(queries.length, 1)
+  user.sessionVersion++
+  await vue.nextTick()
+  const current = page.load()
+  pending[1].resolve({ total: 7, items: [] })
+  await current
+  pending[0].resolve({ total: 99, items: [] })
+  await setImmediate()
+  assert.equal(page.result.value.total, 7)
+  page.state.value = "queued"
+  await vue.nextTick()
+  assert.equal(queries[2].state, "queued")
+  page.stage.value = "analysis"
+  await vue.nextTick()
+  pending[2].resolve({ total: 999, items: [] })
+  await setImmediate()
+  assert.equal(page.result.value.total, 7)
+  doc.hidden = false
+  poll()
+  pending[3].resolve({ total: 4, items: [] })
+  await setImmediate()
+  assert.equal(queries[3].stage, "analysis")
+  assert.equal(page.result.value.total, 4)
+  const late = page.load()
+  unmount()
+  pending[4].resolve({ total: 100, items: [] })
+  await late
+  assert.equal(page.result.value.total, 4)
+  assert.equal(cleared, true)
+})
+
+test("回补确认绑定原预览，确认期间替换预览不能启动另一批次", async () => {
+  const confirmation = Promise.withResolvers()
+  const started: unknown[] = []
+  const load = moduleLoader({
+    "@/pinia/stores/user": { useUserStore: () => ({ sessionVersion: 1 }) },
+    "@/common/apis/risk": { startReprocessApi: async (body: unknown) => {
+      started.push(body)
+    } },
+    "@@/utils/text": { formatTime: (value: string) => value }
+  }, { ...globals, ElMessageBox: { confirm: () => confirmation.promise } })
+  const page = load("@/pages/home/components/EventResearch.vue").default.setup({}, { expose() {}, emit() {} })
+  page.range.value = [new Date("2026-10-01"), new Date("2026-11-01")]
+  await vue.nextTick()
+  page.preview.value = { preview_id: "accepted-preview", articles: 2 }
+  const action = page.start()
+  page.preview.value = { preview_id: "replacement-preview", articles: 10 }
+  confirmation.resolve(true)
+  await action
+  assert.deepEqual(started, [])
+})
+
+test("回补新闻明细随轮询和手动刷新更新，保留批次分页并支持失败重试", async () => {
+  const user = vue.reactive({ sessionVersion: 1 })
+  let state = "pending"
+  let fail = false
+  const requests: [number, number][] = []
+  let poll = () => {}
+  const doc = { hidden: false }
+  const load = moduleLoader({
+    "@/pinia/stores/user": { useUserStore: () => user },
+    "@/common/apis/risk": {
+      listNewsEventsApi: async () => ({ items: [], total: 0 }),
+      listReprocessApi: async () => [{ id: 7, state }],
+      getReprocessDetailApi: async (id: number, page: number) => {
+        requests.push([id, page])
+        if (fail) throw new Error("Synthetic detail failure")
+        return { id, state, total: 40, items: [{ id: 21, state }] }
+      }
+    },
+    "@@/utils/text": { formatTime: (value: string) => value }
+  }, { ...globals, document: doc, onMounted: (callback: () => void) => callback(), setInterval: (callback: () => void) => {
+    poll = callback
+    return 1
+  } })
+  const page = load("@/pages/home/components/EventResearch.vue").default.setup({}, { expose() {}, emit() {} })
+  await setImmediate()
+  await page.openBatch(7, 2)
+  state = "done"
+  poll()
+  await setImmediate()
+  assert.equal(page.batch.value.items[0].state, "done")
+  assert.equal(page.batchPage.value, 2)
+  assert.deepEqual(requests, [[7, 2], [7, 2]])
+  doc.hidden = true
+  poll()
+  await setImmediate()
+  assert.equal(requests.length, 2)
+  fail = true
+  await page.load()
+  assert.equal(page.batchError.value, true)
+  assert.equal(page.batch.value.items[0].state, "done")
+  assert.equal(page.batchLoading.value, false)
+  fail = false
+  await page.openBatch(7, 2)
+  assert.equal(page.batchError.value, false)
+})
+
+test("回补明细刷新不抢占新选择，旧会话与旧请求不能覆盖当前批次", async () => {
+  const user = vue.reactive({ sessionVersion: 1 })
+  const requests: { id: number, page: number, promise: ReturnType<typeof Promise.withResolvers> }[] = []
+  const load = moduleLoader({
+    "@/pinia/stores/user": { useUserStore: () => user },
+    "@/common/apis/risk": {
+      listNewsEventsApi: async () => ({ items: [], total: 0 }),
+      listReprocessApi: async () => [],
+      getReprocessDetailApi: (id: number, page: number) => {
+        const promise = Promise.withResolvers()
+        requests.push({ id, page, promise })
+        return promise.promise
+      }
+    },
+    "@@/utils/text": { formatTime: (value: string) => value }
+  }, globals)
+  const page = load("@/pages/home/components/EventResearch.vue").default.setup({}, { expose() {}, emit() {} })
+  const old = page.openBatch(7, 2)
+  const selected = page.openBatch(8, 1)
+  await page.load()
+  assert.deepEqual(requests.map(r => [r.id, r.page]), [[7, 2], [8, 1]])
+  requests[0].promise.resolve({ id: 7, items: [] })
+  await old
+  assert.equal(page.batchLoading.value, true)
+  requests[1].promise.resolve({ id: 8, items: [] })
+  await selected
+  assert.equal(page.batch.value.id, 8)
+  const late = page.openBatch(8, 2)
+  user.sessionVersion++
+  await vue.nextTick()
+  const current = page.openBatch(9, 1)
+  requests[2].promise.reject(new Error("Old session failure"))
+  await late
+  assert.equal(page.batchLoading.value, true)
+  assert.equal(page.batchError.value, false)
+  requests[3].promise.resolve({ id: 9, items: [] })
+  await current
+  assert.equal(page.batch.value.id, 9)
+  assert.equal(page.batchId.value, 9)
+  assert.equal(page.batchPage.value, 1)
+})

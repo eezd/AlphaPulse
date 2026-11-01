@@ -67,6 +67,9 @@ async def apply_correction(session, proposal: Correction, current_id, researched
                 link = SummaryArticle(summary_id=package.id, analysis_id=assignment.analysis_id); session.add(link)
             link.active = True; link.unit = {'fact':replacement.fact,'evidence':assignment.evidence,'correction':True}
         schedule(package, now, True); outputs.append(package.id)
+        if package.review_config and package.review_config.get('request'):
+            from alphapulse.news_risk.backfill import target
+            await target(session, package.review_config['job_id'], 'analysis', package)
     for package in packages:
         if package.id not in outputs:
             package.replacement_ids = outputs; package.state = 'superseded'

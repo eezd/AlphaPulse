@@ -118,6 +118,17 @@ export interface EventDetail extends NewsEvent {
   packages: RiskEvent[]
   versions: { id: number, revision: number, state: string, error: string | null, result: NewsEvent["result"] }[]
 }
-export interface ReprocessRange { start: string, end: string }
-export interface ReprocessPreview { articles: number, packages: number, events: number }
-export interface ReprocessJob { id: number, state: string, total: number, completed: number, failures: { stage: "grouping" | "analysis" | "events" | "outlook", id: number, error: string }[] }
+export interface ReprocessRange { start: string, end: string, modes: ("missing" | "review")[] }
+export interface ReprocessPreview { articles: number, packages: number, events: number, total: number, missing: number, review: number, preview_id: string, models: Record<string, { model: string, reasoning_effort: string | null }> }
+export interface ReprocessJob { request?: { start: string, end: string, modes: string[] }, counts?: Record<string, number>, stages?: Record<string, Record<string, number>>, id: number, state: string, total: number, completed: number, failures: { stage: "grouping" | "analysis" | "events" | "outlook", id: number, error: string }[] }
+
+export interface QueueItem { key: string, stage: string, object_id: number, title: string, job_id: number | null, origin: string, state: string, phase: string, model: string | null, reasoning_effort: string | null, started_at: string | null, updated_at: string | null, finished_at: string | null, url: string | null, round: number | null, tool: string | null, error: string | null }
+export interface Queue {
+  items: QueueItem[]
+  total: number
+  as_of: string
+  worker_alive: boolean
+  enabled: boolean
+  limit: number
+  concurrency: { running: number, stages: Record<string, number> } | null
+}

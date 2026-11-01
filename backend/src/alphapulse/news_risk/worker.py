@@ -11,6 +11,7 @@ from alphapulse.news_risk.service import complete
 from alphapulse.news_risk.pipeline import configuration, Grouping, summarize_articles, validate_evidence, Evidence, grouping_payload, pack_candidates
 from alphapulse.news_risk.research import Research
 from alphapulse.news_risk import briefing
+from alphapulse.news_risk.progress import step
 
 logger = logging.getLogger(__name__)
 publication_lock = asyncio.Lock()
@@ -73,6 +74,7 @@ async def _analyze(target_id=None, frozen=None):
         row_id = row.id
         row_input = row.input
         try:
+            step('提取与归并新闻')
             payload, usages = await grouping_payload(provider, system, {'id': row.id, **row.input}, candidate_inputs)
             for attempt in range(2):
                 try:
@@ -87,6 +89,7 @@ async def _analyze(target_id=None, frozen=None):
                     if attempt:
                         raise
                     payload = pack_candidates(provider, system, {**payload, 'correction': str(error)}, payload['candidates'])
+            step('校验并保存分包结果')
             async with publication_lock:
                 # Check the article again before changing event membership.
                 current = await session.get(NewsItem, row.news_id, populate_existing=True)
@@ -133,6 +136,9 @@ async def _analyze(target_id=None, frozen=None):
                     if event.id in changed:
                         event.review_config = frozen
                         schedule(event, now, any(m.urgent for m in result.packages))
+                        if frozen and frozen.get('request'):
+                            from alphapulse.news_risk.backfill import target
+                            await target(session, frozen['job_id'], 'analysis', event)
                 session.add(GroupingVersion(analysis_id=row.id, input=row.input, result=result.model_dump(mode='json'), rules=rules, state='done'))
                 row.result = result.model_dump(mode='json'); row.usage = {'attempts': usages}; row.state = 'done'
                 row.error = None; row.finished_at = now
@@ -201,6 +207,7 @@ async def summarize(target_id=None):
         try:
             if config_error: raise ValueError(config_error)
             result, usage = await summarize_articles(provider, system, articles, package, research)
+            step('校验并保存包研判')
             async with publication_lock:
                 event = await session.get(NewsSummary, event_id, populate_existing=True, with_for_update=True)
                 if event.replacement_ids or event.state == 'withdrawn':
@@ -240,7 +247,7 @@ async def summarize(target_id=None):
             await session.commit(); logger.exception('事件总结失败')
 
 
-async def outlook():
+async def outlook(prepare_only=False):
     async with SessionLocal() as session:
         settings = await session.get(RiskSettings, 1)
         if not settings or not settings.enabled: return
@@ -252,6 +259,7 @@ async def outlook():
         inputs = await reading_inputs(session, now-timedelta(hours=72))
         from alphapulse.models.risk import ReprocessJob
         job = await session.scalar(select(ReprocessJob).where(ReprocessJob.state == 'running').limit(1))
+        if job and job.settings.get('request'): job = None
         if job and job.position < len(job.items):
             if requested and requested.quotes.get('job_id') == job.id: return
             job = None
@@ -266,7 +274,17 @@ async def outlook():
         semantic = briefing.semantic_packages(inputs)
         key = briefing.fingerprint(semantic, rules)
         important = {p.get('kind', 'package')+':'+str(p['id']): briefing.fingerprint(p, {}) for p in semantic if p['importance_stars'] == 5}
-        if requested is None and latest and latest.quotes.get('fingerprint') == key and (job is None or latest.quotes.get('job_id') == job.id): return
+        unchanged = requested is None and latest and latest.quotes.get('fingerprint') == key and (job is None or latest.quotes.get('job_id') == job.id)
+        if unchanged and (inputs or latest.state == 'done'): return
+        if not inputs:
+            # Empty reading windows are durable housekeeping, without an AI slot.
+            session.add(RiskSnapshot(state='done', model=provider.model,
+                quotes={'fingerprint':key,'important':{},**({'job_id':job.id} if job else {})},
+                result={'reading':[],'synthesis':None,'usage':[],'expansion':[],'expansion_usage':[],
+                    'inputs':[],'rules':rules,'as_of':now.isoformat()}))
+            if requested: requested.quotes = {k:v for k,v in requested.quotes.items() if k != 'retry_requested'}
+            await session.commit()
+            return
         if latest and requested is None and job is None:
             urgent_change = any(latest.quotes.get('important', {}).get(identifier) != value for identifier, value in important.items())
             if urgent_change:
@@ -277,8 +295,11 @@ async def outlook():
                     latest.quotes = {**latest.quotes, 'dirty_since': now.isoformat()}
                     await session.commit(); return
                 if (now-datetime.fromisoformat(dirty)).total_seconds() < 900: return
+        if prepare_only: return True
+        step('整理72小时阅读与趋势')
         snapshot = RiskSnapshot(state='processing', model=provider.model, quotes={'fingerprint': key, 'important': important, **({'job_id': job.id} if job else {})})
         session.add(snapshot); await session.commit()
+        step('生成阅读与趋势', object_id=snapshot.id)
         try:
             main = [p for p in inputs if p['importance_stars'] >= 3]
             low = [p for p in inputs if p['importance_stars'] < 3]
@@ -294,6 +315,7 @@ async def outlook():
                 if len(extra) == 3: break
             snapshot.result = {**result, 'expansion': extra, 'inputs': inputs, 'rules': rules,
                 'expansion_usage': expansion.get('usage', []), 'as_of': now.isoformat()}
+            step('保存阅读与趋势')
             snapshot.state = 'done'
         except Exception as error:
             snapshot.state = 'failed'; snapshot.error = str(error)[:2000]

@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select, text, func
 from alphapulse.core.db import SessionLocal
 from alphapulse.core.redis import redis
-from alphapulse.models.risk import RiskSettings, NewsSummary, NewsEvent, ArticleAnalysis, ReprocessJob
+from alphapulse.models.risk import RiskSettings, NewsSummary, NewsEvent, ArticleAnalysis, ReprocessJob, ReprocessItem
 
 logger = logging.getLogger(__name__)
 GATE = 20261102
@@ -18,7 +18,8 @@ class Pool:
         self.tasks = {}
 
     def start(self, key, action):
-        self.tasks[asyncio.create_task(action())] = key
+        from alphapulse.news_risk.progress import execute
+        self.tasks[asyncio.create_task(execute(key, action))] = key
 
     async def reap(self, timeout=1):
         if not self.tasks:
@@ -50,6 +51,9 @@ async def candidate(active, cursor, allow_outlook=True):
         await worker.enqueue(session, settings)
         history_news = []
         for kind, identity in active:
+            if kind == 'backfill':
+                item = await session.get(ReprocessItem, identity)
+                history_news.append(item.news_id)
             if kind == 'history' and identity[1] >= 0:
                 job = await session.get(ReprocessJob, identity[0])
                 history_news.append(job.items[identity[1]]['id'])
@@ -61,7 +65,12 @@ async def candidate(active, cursor, allow_outlook=True):
                 busy = [key[1] for key in active if key[0] == stage]
                 if stage == 'outlook':
                     if not busy and allow_outlook:
-                        return (stage, 0), worker.outlook, (cursor + offset + 1) % 4
+                        try:
+                            ready = await worker.outlook(prepare_only=True)
+                        except ValueError:
+                            logger.exception('阅读编排配置检查失败')
+                            ready = False
+                        if ready: return (stage, 0), worker.outlook, (cursor + offset + 1) % 4
                     continue
                 model = {'grouping': ArticleAnalysis, 'analysis': NewsSummary, 'events': NewsEvent}[stage]
                 query = select(model.id).where(model.state == 'pending', model.id.not_in(busy))
@@ -81,17 +90,29 @@ async def candidate(active, cursor, allow_outlook=True):
                     action = {'grouping': worker.analyze, 'analysis': worker.summarize, 'events': events.organize}[stage]
                     return (stage, identifier), lambda action=action, identifier=identifier: action(identifier), (cursor + offset + 1) % 4
         job = await session.scalar(select(ReprocessJob).where(ReprocessJob.state.in_(['pending', 'running'])).order_by(ReprocessJob.id).limit(1))
+        if job and job.settings.get('request'):
+            from alphapulse.news_risk.backfill import process
+            busy = [k[1] for k in active if k[0]=='backfill']
+            candidates = (await session.scalars(select(ReprocessItem).where(ReprocessItem.job_id==job.id,
+                ReprocessItem.state=='pending',ReprocessItem.id.not_in(busy),ReprocessItem.news_id.not_in(history_news))
+                .order_by(ReprocessItem.id).limit(len(active)+1))).all()
+            for item in candidates:
+                article_id = await session.scalar(select(ArticleAnalysis.id).where(ArticleAnalysis.news_id==item.news_id,
+                    ArticleAnalysis.content_hash==item.content_hash))
+                if ('grouping',article_id) not in active:
+                    return ('backfill',item.id), lambda identifier=item.id: process(identifier), cursor
+            return None
         if job:
             for index, item in enumerate(job.items):
                 key = ('history', (job.id, index))
-                if item.get('state', 'pending') == 'pending' and key not in active:
+                if item.get('state', 'pending') == 'pending' and key not in active and item['id'] not in history_news:
                     # Real-time and historical grouping share the article identity.
                     row_id = await session.scalar(select(ArticleAnalysis.id).where(ArticleAnalysis.news_id == item['id'], ArticleAnalysis.content_hash == item['hash']))
                     if row_id is not None and ('grouping', row_id) in active:
                         continue
                     return key, lambda index=index: reprocess.process_job(index), cursor
             if not any(k[0] == 'history' for k in active):
-                return ('history', (job.id, -1)), lambda: reprocess.process_job(-1), cursor
+                await reprocess.process_job(-1)
     return None
 
 
@@ -103,6 +124,11 @@ async def run(lock):
     # Interrupted historical items are reclaimed independently of completion order.
     async with SessionLocal() as session:
         jobs = (await session.scalars(select(ReprocessJob).where(ReprocessJob.state.in_(['pending', 'running'])))).all()
+        from sqlalchemy import update
+        interrupted = (await session.scalars(select(ReprocessItem).where(ReprocessItem.state=='processing'))).all()
+        for item in interrupted:
+            await session.execute(update(ArticleAnalysis).where(ArticleAnalysis.news_id==item.news_id, ArticleAnalysis.content_hash==item.content_hash, ArticleAnalysis.state=='pending').values(state='reprocess'))
+        await session.execute(update(ReprocessItem).where(ReprocessItem.state=='processing').values(state='pending'))
         for job in jobs:
             for item in job.items:
                 if item['state'] == 'processing':
@@ -136,9 +162,16 @@ async def run(lock):
                 async with SessionLocal() as session:
                     settings = await session.get(RiskSettings, 1)
                     limit, enabled = settings.max_concurrency, settings.enabled
+            async with SessionLocal() as session:
+                from alphapulse.news_risk.backfill import reconcile
+                jobs = (await session.scalars(select(ReprocessJob).where(ReprocessJob.state.in_(['pending','running'])))).all()
+                for job in jobs:
+                    if job.settings.get('request'): await reconcile(session,job)
             now = datetime.now(UTC).isoformat()
-            counts = {stage: sum(k[0] == stage for k in pool.tasks.values()) for stage in ('grouping', 'analysis', 'events', 'outlook', 'history')}
+            counts = {stage: sum(k[0] == stage for k in pool.tasks.values()) for stage in ('grouping', 'analysis', 'events', 'outlook', 'history', 'backfill')}
             try:
+                from alphapulse.news_risk.progress import active
+                await redis.set('ap:risk:active', json.dumps(list(active.values())), ex=15)
                 await redis.set('ap:risk:concurrency', json.dumps({'running': len(pool.tasks), 'stages': counts, 'updated_at': now}), ex=15)
                 for stage in ('', 'analysis:', 'events:', 'outlook:', 'reprocess:'):
                     await redis.set('ap:risk:' + stage + 'heartbeat', now, ex=15)

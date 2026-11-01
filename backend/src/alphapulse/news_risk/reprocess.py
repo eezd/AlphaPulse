@@ -1,8 +1,8 @@
 """Explicit bounded historical jobs, sharing the normal news pipeline."""
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from alphapulse.core.db import SessionLocal
 from alphapulse.models import NewsItem
-from alphapulse.models.risk import RiskSettings, ReprocessJob, ArticleAnalysis, NewsSummary, EventMember
+from alphapulse.models.risk import RiskSettings, ReprocessJob, ReprocessItem, ArticleAnalysis, NewsSummary, EventMember
 from alphapulse.news_risk.pipeline import configuration
 
 
@@ -21,6 +21,7 @@ async def capture(session, settings):
     from alphapulse.api.risk import config_out
     value = config_out(settings)
     value.pop('start_at')
+    value.pop('enabled', None)
     value.pop('max_concurrency', None)
     configurations = {}
     for stage in ('grouping', 'analysis', 'outlook'):
@@ -80,6 +81,11 @@ async def process_job(item_index=None):
         if item.get('state') not in (None, 'pending'): return
         job.items = [{**entry, 'state': 'processing'} if n == index else entry for n, entry in enumerate(job.items)]
         job_id = job.id
+        durable = await session.scalar(select(ReprocessItem).where(ReprocessItem.job_id==job.id,ReprocessItem.news_id==item['id']))
+        if durable:
+            durable.state='processing'
+            from alphapulse.news_risk.progress import step
+            step('历史新闻分包',stage='backfill',object_id=durable.id)
         try:
             for stage in ('grouping', 'analysis', 'outlook'):
                 await frozen_configuration(session, job.settings, stage)
@@ -98,6 +104,7 @@ async def process_job(item_index=None):
             if outcome == 'deferred':
                 job = await session.get(ReprocessJob, job_id, populate_existing=True, with_for_update=True)
                 job.items = [{**entry, 'state': 'pending'} if n == index else entry for n, entry in enumerate(job.items)]
+                await session.execute(update(ReprocessItem).where(ReprocessItem.job_id==job_id,ReprocessItem.news_id==item['id']).values(state='pending'))
                 await session.commit(); return
             row = await session.get(ArticleAnalysis, row_id, populate_existing=True)
             if outcome != 'done' or row.state != 'done' or row.error: raise ValueError(row.error or '原文已变化')
@@ -111,6 +118,7 @@ async def process_job(item_index=None):
         job = await session.get(ReprocessJob, job_id, populate_existing=True, with_for_update=True)
         job.items = [{**entry, 'state': terminal} if n == index else entry for n, entry in enumerate(job.items)]
         job.position = sum(entry.get('state') in ('done', 'failed') for entry in job.items)
+        await session.execute(update(ReprocessItem).where(ReprocessItem.job_id==job_id,ReprocessItem.news_id==item['id']).values(state=terminal))
         await session.commit()
 
 

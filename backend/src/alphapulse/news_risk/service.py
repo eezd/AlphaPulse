@@ -76,6 +76,8 @@ class OutputTruncated(ValueError):
 
 
 async def complete(provider: AiProvider, system: str, payload: dict, schema: type[BaseModel]):
+    from alphapulse.news_risk.progress import step, current
+    if current.get() is not None: step('等待模型响应', model=provider.model, reasoning_effort=provider.reasoning_effort)
     text = json.dumps(payload, ensure_ascii=False)
     if not fits_context(provider, system, payload, schema):
         raise ValueError('新闻输入超出模型上下文；未截断或发送，请调整模型配置')

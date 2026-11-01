@@ -124,6 +124,8 @@ class Research:
 
     async def tool(self, name, arguments):
         if name not in TOOLS: raise ValueError('未知研究工具')
+        from alphapulse.news_risk.progress import step
+        step('查询资料', tool=name)
         args = TOOLS[name][0].model_validate(arguments)
         key = name+json.dumps(arguments, sort_keys=True)
         if key in self.cache: return self.cache[key]
@@ -196,7 +198,9 @@ class Research:
         submit = llm.ToolSpec('submit', '提交完整研判，引用实际读取来源', schema.model_json_schema())
         messages = [{'role': 'user', 'text': json.dumps(payload, ensure_ascii=False)}]
         usages = []
+        from alphapulse.news_risk.progress import step, current
         for round_no in range(9):
+            if current.get() is not None: step('模型研判', round=round_no+1, model=provider.model, reasoning_effort=provider.reasoning_effort)
             if not self.fits_messages(provider, system, messages, schema):
                 raise ValueError('研究上下文不足，请增大上下文配置；证据未截断')
             completion = None
