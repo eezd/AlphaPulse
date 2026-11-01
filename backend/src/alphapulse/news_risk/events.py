@@ -91,11 +91,11 @@ async def associate(session, package, result, researched_ids, researched_events=
     event.updated_at = max(p.updated_at for p in members)
 
 
-async def organize():
+async def organize(target_id=None):
     async with SessionLocal() as session:
         settings = await session.get(RiskSettings, 1)
         if not settings or not settings.enabled: return
-        event = await session.scalar(select(NewsEvent).where(NewsEvent.state == 'pending', NewsEvent.due_at <= datetime.now(UTC)).order_by(NewsEvent.due_at).limit(1))
+        event = await session.scalar(select(NewsEvent).where(NewsEvent.state == 'pending', NewsEvent.due_at <= datetime.now(UTC), NewsEvent.id == target_id if target_id else True).order_by(NewsEvent.due_at).limit(1))
         if event is None: return
         members = (await session.scalars(select(NewsSummary).join(EventMember, EventMember.package_id == NewsSummary.id)
             .where(EventMember.event_id == event.id))).all()
@@ -125,18 +125,21 @@ async def organize():
             result, usage = await complete(provider, system, {'task': 'event_timeline', 'previous': event.result, 'packages': packages}, EventResult)
             validate_timeline(result, packages)
             version.result = result.model_dump(mode='json'); version.usage = usage; version.state = 'done'
-            current_members = (await session.scalars(select(NewsSummary).join(EventMember, EventMember.package_id == NewsSummary.id)
-                .where(EventMember.event_id == event_id).order_by(NewsSummary.id).with_for_update(of=NewsSummary).execution_options(populate_existing=True))).all()
-            current = await session.get(NewsEvent, event_id, populate_existing=True, with_for_update=True)
-            current_members = [p for p in current_members if not p.replacement_ids and p.state != 'withdrawn']
-            unchanged = {(p.id, p.published_revision) for p in current_members} == {(p['id'], p['revision']) for p in packages}
-            unchanged = unchanged and all(p.state == 'done' and not p.replacement_ids for p in current_members)
-            if current.revision == version.revision and unchanged:
-                current.published_revision = version.revision
-                current.result = version.result; current.title = result.title; current.state = 'done'; current.error = None
-            else:
-                version.state = 'superseded'
-                current.state = 'pending'
+            from alphapulse.news_risk.worker import publication_lock
+            async with publication_lock:
+                current_members = (await session.scalars(select(NewsSummary).join(EventMember, EventMember.package_id == NewsSummary.id)
+                    .where(EventMember.event_id == event_id).order_by(NewsSummary.id).with_for_update(of=NewsSummary).execution_options(populate_existing=True))).all()
+                current = await session.get(NewsEvent, event_id, populate_existing=True, with_for_update=True)
+                current_members = [p for p in current_members if not p.replacement_ids and p.state != 'withdrawn']
+                unchanged = {(p.id, p.published_revision) for p in current_members} == {(p['id'], p['revision']) for p in packages}
+                unchanged = unchanged and all(p.state == 'done' and not p.replacement_ids for p in current_members)
+                if current.revision == version.revision and unchanged:
+                    current.published_revision = version.revision
+                    current.result = version.result; current.title = result.title; current.state = 'done'; current.error = None
+                else:
+                    version.state = 'superseded'
+                    current.state = 'pending'
+                await session.commit()
         except Exception as error:
             await session.rollback()
             version = await session.get(EventVersion, version_id)

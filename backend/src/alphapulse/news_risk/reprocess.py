@@ -21,6 +21,7 @@ async def capture(session, settings):
     from alphapulse.api.risk import config_out
     value = config_out(settings)
     value.pop('start_at')
+    value.pop('max_concurrency', None)
     configurations = {}
     for stage in ('grouping', 'analysis', 'outlook'):
         provider, system, rules, fingerprint = await configuration(session, settings, stage)
@@ -39,16 +40,17 @@ async def frozen_configuration(session, frozen, stage):
     return provider, item['system'], item['rules']
 
 
-async def process_job():
+async def process_job(item_index=None):
     from alphapulse.news_risk import worker
     async with SessionLocal() as session:
         settings = await session.get(RiskSettings, 1)
         if not settings or not settings.enabled: return
-        if await session.scalar(select(ArticleAnalysis.id).where(ArticleAnalysis.state == 'pending').limit(1)): return
-        if await session.scalar(select(NewsSummary.id).where(NewsSummary.state.in_(['pending', 'processing'])).limit(1)): return
+        if item_index is None and await session.scalar(select(ArticleAnalysis.id).where(ArticleAnalysis.state == 'pending').limit(1)): return
+        if item_index is None and await session.scalar(select(NewsSummary.id).where(NewsSummary.state.in_(['pending', 'processing'])).limit(1)): return
         job = await session.scalar(select(ReprocessJob).where(ReprocessJob.state.in_(['pending', 'running'])).order_by(ReprocessJob.id).limit(1).with_for_update())
         if job is None: return
         if job.position >= len(job.items):
+            if await session.scalar(select(NewsSummary.id).where(NewsSummary.state.in_(['pending', 'processing'])).limit(1)): return
             from alphapulse.models.risk import NewsEvent
             if await session.scalar(select(NewsEvent.id).where(NewsEvent.state.in_(['pending','processing'])).limit(1)): return
             from alphapulse.models.risk import RiskSnapshot
@@ -72,7 +74,11 @@ async def process_job():
                     failures.append({'stage': 'outlook', 'id': snapshot.id, 'error': (snapshot.error or '阅读编排失败')[:1000]})
             job.failures = [*job.failures, *failures]
             job.state = 'failed' if job.failures else 'done'; await session.commit(); return
-        item = job.items[job.position]
+        index = job.position if item_index is None else item_index
+        if index < 0: return
+        item = job.items[index]
+        if item.get('state') not in (None, 'pending'): return
+        job.items = [{**entry, 'state': 'processing'} if n == index else entry for n, entry in enumerate(job.items)]
         job_id = job.id
         try:
             for stage in ('grouping', 'analysis', 'outlook'):
@@ -89,16 +95,22 @@ async def process_job():
                 session.add(row); await session.flush()
             row_id = row.id; job_id = job.id; job.state = 'running'; await session.commit()
             outcome = await worker.analyze(row_id, job.settings)
-            if outcome == 'deferred': return
+            if outcome == 'deferred':
+                job = await session.get(ReprocessJob, job_id, populate_existing=True, with_for_update=True)
+                job.items = [{**entry, 'state': 'pending'} if n == index else entry for n, entry in enumerate(job.items)]
+                await session.commit(); return
             row = await session.get(ArticleAnalysis, row_id, populate_existing=True)
             if outcome != 'done' or row.state != 'done' or row.error: raise ValueError(row.error or '原文已变化')
+            terminal = 'done'
         except Exception as error:
+            terminal = 'failed'
             await session.rollback()
-            job = await session.get(ReprocessJob, job_id, populate_existing=True)
+            job = await session.get(ReprocessJob, job_id, populate_existing=True, with_for_update=True)
             job.failures = [*job.failures, {'stage': 'grouping', 'id': item['id'], 'error': str(error)[:1000]}]
             await session.flush()
         job = await session.get(ReprocessJob, job_id, populate_existing=True, with_for_update=True)
-        job.position += 1
+        job.items = [{**entry, 'state': terminal} if n == index else entry for n, entry in enumerate(job.items)]
+        job.position = sum(entry.get('state') in ('done', 'failed') for entry in job.items)
         await session.commit()
 
 
@@ -111,7 +123,7 @@ async def start_job(session, start, end):
     if settings is None: raise ValueError('请先配置新闻AI')
     counts, items = await preview(session, start, end)
     if not items: raise ValueError('所选范围没有新闻')
-    job = ReprocessJob(state='pending', settings=await capture(session, settings), items=items, position=0, failures=[])
+    job = ReprocessJob(state='pending', settings=await capture(session, settings), items=[{**i, 'state': 'pending'} for i in items], position=0, failures=[])
     session.add(job); await session.flush()
     job.settings = {**job.settings, 'job_id': job.id}
     await session.commit()

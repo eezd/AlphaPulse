@@ -836,3 +836,49 @@ test("重整理预览的旧会话完成不能解除新操作的忙碌状态", as
   assert.equal(page.busy.value, false)
   assert.equal(page.preview.value.articles, 2)
 })
+
+test("新闻并发独立保存保留模型草稿，重复点击和旧会话响应不影响新操作", async () => {
+  const user = vue.reactive({ sessionVersion: 1 })
+  const pending: ReturnType<typeof Promise.withResolvers>[] = []
+  const values: number[] = []
+  let reloads = 0
+  const load = moduleLoader({
+    "@@/apis/skills": { listSkillTreeApi: async () => [] },
+    "@/common/apis/settings": {},
+    "@/pinia/stores/user": { useUserStore: () => user },
+    "@/common/apis/risk": {
+      saveRiskConcurrencyApi: (value: number) => {
+        values.push(value)
+        const request = Promise.withResolvers()
+        pending.push(request)
+        return request.promise
+      },
+      getRiskOverviewApi: async () => {
+        reloads++
+        return { briefing: null }
+      },
+      listRiskEventsApi: async () => ({ items: [], total: 0 })
+    }
+  }, globals)
+  const page = load("@/pages/home/index.vue").default.setup({}, { expose() {} })
+  page.settings.value = { max_concurrency: 5, model: "unsaved-model" }
+  const first = page.saveConcurrency()
+  await page.saveConcurrency()
+  assert.deepEqual(values, [5])
+  pending[0].resolve({ max_concurrency: 5 })
+  await first
+  assert.equal(page.settings.value.model, "unsaved-model")
+  assert.equal(reloads, 1)
+  const old = page.saveConcurrency()
+  user.sessionVersion++
+  await vue.nextTick()
+  page.settings.value = { max_concurrency: 2, model: "new-session" }
+  const current = page.saveConcurrency()
+  pending[1].resolve({ max_concurrency: 5 })
+  await old
+  assert.equal(page.concurrencySaving.value, true)
+  assert.equal(page.settings.value.model, "new-session")
+  pending[2].resolve({ max_concurrency: 2 })
+  await current
+  assert.equal(page.concurrencySaving.value, false)
+})

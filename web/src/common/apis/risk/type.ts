@@ -43,6 +43,7 @@ export interface RiskEvent {
   updated_at: string
 }
 export interface Settings {
+  max_concurrency: number
   enabled: boolean
   provider_id: number | null
   model: string
@@ -79,6 +80,7 @@ export interface Briefing {
   inputs: { kind?: "package" | "event", id: number, revision: number, category: string, tags: string[], result: RiskResult & { title: string } }[]
 }
 export interface Overview {
+  concurrency: { limit: number, running: number | null, queued: number, stages: Record<string, number>, updated_at: string | null }
   briefing: Briefing | null
   stage2: Record<string, number>
   stage3?: { state: string, pending: boolean, heartbeat: string | null }

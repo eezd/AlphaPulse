@@ -48,7 +48,15 @@ def test_evidence_retains_quotes_present_in_source(risk):
 
 def mock_enable(risk, monkeypatch, valid=True, verification='reported', direction='neutral'):
     from types import SimpleNamespace
-    from unittest.mock import AsyncMock
+    from unittest.mock import AsyncMock, MagicMock
+    from alphapulse.core import db
+    gate = MagicMock()
+    gate.__aenter__ = AsyncMock(return_value=gate)
+    gate.__aexit__ = AsyncMock(return_value=None)
+    gate.scalar = AsyncMock(return_value=True)
+    gate.execute = AsyncMock()
+    gate.commit = AsyncMock()
+    monkeypatch.setattr(db, "engine", SimpleNamespace(connect=lambda: gate))
     from alphapulse.news_risk import pipeline, briefing
     from alphapulse.api import risk as api
     provider = SimpleNamespace(model='news-only', max_tokens=1000, context_window=200000)
@@ -101,7 +109,7 @@ def test_enable_validates_evidence_before_saving_settings(risk, monkeypatch, val
     if valid:
         saved = session.merge.call_args.args[0]
         assert saved.enabled and saved.start_at is not None
-        session.commit.assert_awaited_once()
+        assert session.commit.await_count == 4
     else:
         assert '原文引用' in response.text
         session.merge.assert_not_awaited()
@@ -233,13 +241,13 @@ def test_window_query_parameters_over_http(risk, monkeypatch, endpoint, hours, s
     import httpx
     from alphapulse.api import risk as api
 
-    session = SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(all=lambda: [])),
+    session = SimpleNamespace(get=AsyncMock(return_value=None), execute=AsyncMock(return_value=SimpleNamespace(all=lambda: [])),
         scalar=AsyncMock(return_value=None), scalars=AsyncMock(return_value=SimpleNamespace(all=lambda: [])))
     app = FastAPI()
     app.include_router(api.router)
     app.dependency_overrides[api.require_admin] = lambda: None
     app.dependency_overrides[api.get_session] = lambda: session
-    monkeypatch.setattr(api, 'coverage', AsyncMock(return_value={}))
+    monkeypatch.setattr(api, 'coverage', AsyncMock(return_value={'pending': 0}))
     monkeypatch.setattr(api.redis, 'get', AsyncMock(return_value=None))
 
     async def check():

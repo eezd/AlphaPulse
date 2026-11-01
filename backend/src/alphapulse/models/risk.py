@@ -10,6 +10,7 @@ class RiskSettings(Base):
     __tablename__ = 'risk_settings'
     id: Mapped[int] = mapped_column(primary_key=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    max_concurrency: Mapped[int] = mapped_column(Integer, default=5, server_default='5')
     provider_id: Mapped[int | None] = mapped_column(ForeignKey('ai_providers.id'))
     model: Mapped[str] = mapped_column(String(128), default='')
     second_provider_id: Mapped[int | None] = mapped_column(ForeignKey('ai_providers.id'))

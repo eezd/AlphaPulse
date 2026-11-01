@@ -4,7 +4,7 @@ from enum import IntEnum
 from typing import Annotated
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import select, func
+from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from alphapulse.ai.llm import Effort
 from alphapulse.api.response import success
@@ -43,7 +43,7 @@ class SettingsIn(BaseModel):
 
 
 def config_out(value):
-    return {**{key: getattr(value, key) for key in SettingsIn.model_fields}, 'start_at': value.start_at}
+    return {**{key: getattr(value, key) for key in SettingsIn.model_fields}, 'start_at': value.start_at, 'max_concurrency': value.max_concurrency if value.max_concurrency is not None else 5}
 
 
 @router.get('/settings')
@@ -53,12 +53,26 @@ async def settings(session: DB):
 
 @router.put('/settings')
 async def save_settings(body: SettingsIn, session: DB):
-    previous = await session.get(RiskSettings, 1)
+    previous = await session.get(RiskSettings, 1, with_for_update=True)
     if body.enabled:
         raise HTTPException(409, '请先使用测试并启用按钮验证三阶段模型和Skills')
-    value = RiskSettings(id=1, **body.model_dump(), start_at=previous.start_at if previous else None)
+    value = RiskSettings(id=1, **body.model_dump(), start_at=previous.start_at if previous else None,
+        max_concurrency=previous.max_concurrency if previous else 5)
     await session.merge(value); await session.commit()
     return success(None)
+
+
+class ConcurrencyIn(BaseModel):
+    max_concurrency: int = Field(gt=0, strict=True)
+
+
+@router.patch('/settings/concurrency')
+async def save_concurrency(body: ConcurrencyIn, session: DB):
+    value = await default_settings(session)
+    value.max_concurrency = body.max_concurrency
+    session.add(value)
+    await session.commit()
+    return success({'max_concurrency': value.max_concurrency})
 
 
 class TemplatesIn(BaseModel):
@@ -90,34 +104,56 @@ async def templates(session: DB, body: Annotated[TemplatesIn | None, Body()] = N
 
 @router.post('/enable')
 async def enable(body: SettingsIn, session: DB):
+    from alphapulse.core.db import engine
+    from alphapulse.news_risk.scheduler import GATE
+    async with engine.connect() as gate:
+        if not await gate.scalar(text('SELECT pg_try_advisory_lock(:gate, 1)'), {'gate': GATE}):
+            raise HTTPException(409, '分析仍在运行或正在验证，请暂停并等待在途任务完成')
+        await gate.commit()
+        try:
+            previous = await session.get(RiskSettings, 1, populate_existing=True)
+            if previous and previous.enabled:
+                raise HTTPException(409, '请先保存并暂停分析，再测试并启用')
+            return await validate_enable(body, session)
+        finally:
+            await gate.execute(text('SELECT pg_advisory_unlock(:gate, 1)'), {'gate': GATE})
+            await gate.commit()
+
+
+async def validate_enable(body: SettingsIn, session: DB):
     from alphapulse.news_risk.pipeline import configuration, Grouping, summarize_articles, Evidence, validate_evidence
     from alphapulse.news_risk import briefing
     before = await session.get(RiskSettings, 1)
-    before_config = config_out(before) if before else None
+    before_config = {k: v for k, v in config_out(before).items() if k != 'max_concurrency'} if before else None
     value = RiskSettings(id=1, **{**body.model_dump(), 'enabled': True})
     fingerprints = {}
     fixture = {'id': 1, 'title': '虚构示例：示例公司发布维护通知', 'summary': '示例公司计划例行维护。',
         'content': '本条为虚构测试，不是真实市场事件。示例公司计划例行维护，恢复时间尚未公布。'}
     try:
         provider, system, _, fingerprints['grouping'] = await configuration(session, value, 'grouping')
+        await session.commit()
         grouped, _ = await complete(provider, system, {'article': fixture, 'candidates': []}, Grouping)
         for event in grouped.packages:
             if event.package_id is not None: raise ValueError('测试没有已有候选事件')
             validate_evidence([Evidence(article_id=1, quote=event.evidence)], {1: fixture})
         provider, system, _, fingerprints['analysis'] = await configuration(session, value, 'analysis')
+        await session.commit()
         await summarize_articles(provider, system, [fixture], {'id': 1, 'title': fixture['title'],
             'fact': '示例公司计划例行维护', 'category': 'company', 'tags': ['维护'], 'content_kind': 'statement'})
         provider, system, _, fingerprints['outlook'] = await configuration(session, value, 'outlook')
+        await session.commit()
         await briefing.generate(provider, system, [{'id': 1, 'revision': 1, 'importance_stars': 3, 'result': {'summary': '虚构测试'}}])
     except Exception as error:
         raise HTTPException(502, f'三阶段验证失败：{error}') from error
     previous = await session.get(RiskSettings, 1, populate_existing=True, with_for_update=True)
-    if (config_out(previous) if previous else None) != before_config:
+    current_config = {k: v for k, v in config_out(previous).items() if k != 'max_concurrency'} if previous else None
+    if current_config != before_config:
         raise HTTPException(409, '验证期间设置已变化，请重新操作')
     for stage, fingerprint in fingerprints.items():
         if (await configuration(session, value, stage))[3] != fingerprint:
             raise HTTPException(409, '验证期间模型或Skill已变化，请重新验证')
     value.start_at = previous.start_at if previous and previous.start_at else datetime.now(UTC)
+    value.max_concurrency = previous.max_concurrency if previous else 5
     await session.merge(value); await session.commit()
     return success(None)
 
@@ -152,7 +188,17 @@ async def overview(session: DB, hours: RiskWindow = RiskWindow.DAY):
         'heartbeat': await redis.get('ap:risk:outlook:heartbeat')}
     from alphapulse.models.risk import NewsEvent
     event_states = dict((await session.execute(select(NewsEvent.state, func.count()).group_by(NewsEvent.state))).all())
-    return success({'event_states': event_states, 'stage2': stage2, 'stage3': stage3, 'as_of': now, 'counts': counts, 'coverage': await coverage(session), 'scenario': scenario, 'briefing': snapshot.result if snapshot else None,
+    import json
+    runtime = await redis.get('ap:risk:concurrency')
+    settings = await session.get(RiskSettings, 1)
+    concurrency = {'limit': settings.max_concurrency if settings else 5, 'running': None, 'stages': {}, 'updated_at': None}
+    if runtime: concurrency.update(json.loads(runtime))
+    from alphapulse.models.risk import ReprocessJob
+    jobs = (await session.scalars(select(ReprocessJob).where(ReprocessJob.state.in_(['pending', 'running'])))).all()
+    historical_pending = sum(i['state'] == 'pending' for job in jobs for i in job.items)
+    coverage_data = await coverage(session)
+    concurrency['queued'] = historical_pending + sum(stage2.get(k, 0) for k in ('pending',)) + event_states.get('pending', 0) + coverage_data['pending']
+    return success({'concurrency': concurrency, 'event_states': event_states, 'stage2': stage2, 'stage3': stage3, 'as_of': now, 'counts': counts, 'coverage': coverage_data, 'scenario': scenario, 'briefing': snapshot.result if snapshot else None,
         'snapshot_at': snapshot.created_at if snapshot else None, 'quotes': snapshot.quotes if snapshot else None,
         'stale': not snapshot or changed or bool(last and last.error),
         'error': last.error if last else None, 'heartbeat': await redis.get('ap:risk:heartbeat')})
@@ -390,7 +436,7 @@ async def reprocess_retry(identifier: int, session: DB):
                 row.state = 'pending'; row.due_at = datetime.now(UTC); row.error = None
     ids = {f['id'] for f in job.failures if f['stage'] == 'grouping'}
     if ids:
-        job.items = [i for i in job.items if i['id'] in ids]
+        job.items = [{**i, 'state': 'pending'} for i in job.items if i['id'] in ids]
         job.position = 0
     else:
         job.position = len(job.items)

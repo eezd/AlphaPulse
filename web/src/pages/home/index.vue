@@ -59,6 +59,7 @@ const showFailures = ref(false)
 const loading = ref(false)
 const failed = ref(false)
 const saving = ref(false)
+const concurrencySaving = ref(false)
 let sequence = 0
 let detailSequence = 0
 let modelsSequence = 0
@@ -157,6 +158,19 @@ async function createTemplates() {
   newsSkills.value = skills.filter(s => s.scope === "news" && s.kind === "skill")
   ElMessage.success("默认新闻 Skills 已准备好，请前往 Skills 页面审阅并发布")
 }
+async function saveConcurrency() {
+  if (!settings.value || concurrencySaving.value) return
+  const version = user.sessionVersion
+  concurrencySaving.value = true
+  try {
+    await api.saveRiskConcurrencyApi(settings.value.max_concurrency)
+    if (version !== user.sessionVersion) return
+    ElMessage.success("并发上限已保存；降低上限时等待在途任务完成")
+    await load()
+  } finally {
+    if (version === user.sessionVersion) concurrencySaving.value = false
+  }
+}
 async function save(enable: boolean) {
   if (!settings.value) return
   const version = user.sessionVersion
@@ -207,6 +221,7 @@ watch(taskStage, () => {
   if (showFailures.value) void openFailures()
 })
 watch(() => user.sessionVersion, () => {
+  concurrencySaving.value = false
   thirdSequence++
   secondModelsSequence++
   secondModels.value = []
@@ -283,6 +298,10 @@ onBeforeUnmount(() => {
         初筛完成 {{ overview.coverage.done }} / {{ overview.coverage.total }} 条 · 待处理 {{ overview.coverage.pending }} · 处理中 {{ overview.coverage.processing }} · <el-button link type="danger" @click="openFailures">
           失败 {{ overview.coverage.failed }}
         </el-button>
+      </p>
+      <p v-if="overview.concurrency">
+        AI 并发：{{ overview.concurrency.running ?? "未知" }} / {{ overview.concurrency.limit }} · 排队 {{ overview.concurrency.queued }}
+        <span v-for="(count, stage) in overview.concurrency.stages" :key="stage" class="ml-2">{{ ({ grouping: "分包", analysis: "研判", events: "事件", outlook: "阅读", history: "历史" } as Record<string, string>)[stage] }} {{ count }}</span>
       </p>
       <p>包研判：完成 {{ overview.stage2.done ?? 0 }} · 待更新 {{ overview.stage2.pending ?? 0 }} · 处理中 {{ overview.stage2.processing ?? 0 }} · 失败 {{ overview.stage2.failed ?? 0 }}</p>
       <p v-if="overview.stage3">
@@ -441,6 +460,13 @@ onBeforeUnmount(() => {
         <router-link to="/skills">
           编辑与发布 Skills
         </router-link>
+        <el-form-item label="最大并发任务数">
+          <el-input-number v-model="settings.max_concurrency" :min="1" :precision="0" :step="1" :disabled="concurrencySaving" />
+          <el-button class="ml-2" :loading="concurrencySaving" @click="saveConcurrency">
+            保存并发上限
+          </el-button>
+        </el-form-item>
+        <p>所有新闻阶段共享名额，完成即补位；实时优先，历史使用空闲名额。测试并启用前请先暂停并等待在途任务完成。</p>
         <el-alert type="info" :closable="false" title="测试并启用会分别调用分包、中级研判和高级阅读编排模型。首次启用后仅处理新发布或源站修订的新闻；暂停后恢复沿用原起点。" />
         <p>当前状态：{{ settings.enabled ? '已启用' : '已关闭' }}</p>
         <el-button :loading="saving" @click="save(false)">

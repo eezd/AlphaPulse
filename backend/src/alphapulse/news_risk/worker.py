@@ -1,11 +1,10 @@
-"""Independent, durable grouping and event analysis loops."""
+"""Durable news AI stages dispatched through the shared concurrency pool."""
 import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 from sqlalchemy import select, update, func, exists, text, case
 from sqlalchemy.dialects.postgresql import insert
 from alphapulse.core.db import SessionLocal, engine
-from alphapulse.core.redis import redis
 from alphapulse.models import NewsItem
 from alphapulse.models.risk import RiskSettings, RiskSnapshot, ArticleAnalysis, NewsSummary, SummaryArticle, SummaryVersion, PackageEvidence, GroupingVersion
 from alphapulse.news_risk.service import complete
@@ -14,8 +13,8 @@ from alphapulse.news_risk.research import Research
 from alphapulse.news_risk import briefing
 
 logger = logging.getLogger(__name__)
-analysis_lock = asyncio.Lock()
-grouping_lock = asyncio.Lock()
+publication_lock = asyncio.Lock()
+
 
 
 def eligible(start):
@@ -44,8 +43,7 @@ async def enqueue(session, settings):
 
 
 async def analyze(target_id=None, frozen=None):
-    async with grouping_lock:
-        return await _analyze(target_id, frozen)
+    return await _analyze(target_id, frozen)
 
 
 async def _analyze(target_id=None, frozen=None):
@@ -64,6 +62,7 @@ async def _analyze(target_id=None, frozen=None):
             provider, system, rules = await frozen_configuration(session, frozen, 'grouping')
         else:
             provider, system, rules, _ = await configuration(session, settings, 'grouping')
+        catalog = await session.scalar(select(func.max(NewsSummary.id)))
         tag_score = sum((case((NewsSummary.tags.contains([tag.strip().casefold()]), 1), else_=0) for tag in row.input.get('source_tags', [])[:8] if isinstance(tag, str)), 0)
         candidates = (await session.scalars(select(NewsSummary).where(NewsSummary.replacement_ids == [], NewsSummary.state != 'withdrawn').order_by(
             (func.greatest(func.similarity(NewsSummary.title, row.input['title']), func.similarity(NewsSummary.fact, row.input['title'])) + tag_score).desc(), NewsSummary.updated_at.desc()).limit(80))).all()
@@ -88,53 +87,56 @@ async def _analyze(target_id=None, frozen=None):
                     if attempt:
                         raise
                     payload = pack_candidates(provider, system, {**payload, 'correction': str(error)}, payload['candidates'])
-            # Check the article again before changing event membership.
-            current = await session.get(NewsItem, row.news_id, populate_existing=True)
-            if current.content_hash != row.content_hash:
-                row.state = 'superseded'; await session.commit(); return 'superseded'
-            now = datetime.now(UTC)
-            old_ids = select(SummaryArticle.summary_id).join(ArticleAnalysis).where(ArticleAnalysis.news_id == row.news_id)
-            old_events = (await session.scalars(select(NewsSummary).where(NewsSummary.id.in_(old_ids))
-                .with_for_update().execution_options(populate_existing=True))).all()
-            touched = {e.id: e for e in old_events}
-            previous_ids = set(touched)
-            await session.execute(update(SummaryArticle).where(SummaryArticle.analysis_id == row.id).values(active=False))
-            groups = {}
-            changed = set()
-            for match in result.packages:
-                event = await session.get(NewsSummary, match.package_id, with_for_update=True, populate_existing=True) if match.package_id else groups.get(match.group_key)
-                if event is not None and (event.replacement_ids or event.state == 'withdrawn'):
-                    raise ValueError('候选包已被纠错或撤回，请重试初筛')
-                progress = datetime.fromisoformat(row.input['progress_at'])
-                published = datetime.fromisoformat(row.input['published_at'])
-                if event is None:
-                    event = NewsSummary(title=match.title, category=match.category, entities=match.entities,
-                        published_at=published, updated_at=progress, changed_at=now, due_at=now,
-                        revision=0, published_revision=0, state='pending')
-                    session.add(event); await session.flush(); groups[match.group_key] = event
-                event.tags = sorted(set(event.tags or []) | {t.strip().casefold() for t in match.tags if t.strip()})
-                if match.change_kind != 'repost' or not event.fact:
-                    event.content_kind = match.content_kind; event.fact = match.fact
-                event.published_at = min(event.published_at, published)
-                if match.change_kind != 'repost' or row.input['revision_no'] > 1:
-                    event.updated_at = max(event.updated_at, progress)
-                link = await session.scalar(select(SummaryArticle).where(SummaryArticle.summary_id == event.id, SummaryArticle.analysis_id == row.id))
-                if link is None:
-                    link = SummaryArticle(summary_id=event.id, analysis_id=row.id); session.add(link)
-                link.active = True; link.unit = match.model_dump()
-                if match.change_kind != 'repost' or event.result is None or row.input['revision_no'] > 1:
-                    changed.add(event.id)
-                touched[event.id] = event
-            if target_id or row.input['revision_no'] > 1:
-                changed.update(previous_ids)
-            for event in touched.values():
-                if event.id in changed:
-                    event.review_config = frozen
-                    schedule(event, now, any(m.urgent for m in result.packages))
-            session.add(GroupingVersion(analysis_id=row.id, input=row.input, result=result.model_dump(mode='json'), rules=rules, state='done'))
-            row.result = result.model_dump(mode='json'); row.usage = {'attempts': usages}; row.state = 'done'
-            row.error = None; row.finished_at = now
-            await session.commit()
+            async with publication_lock:
+                # Check the article again before changing event membership.
+                current = await session.get(NewsItem, row.news_id, populate_existing=True)
+                if current.content_hash != row.content_hash:
+                    row.state = 'superseded'; await session.commit(); return 'superseded'
+                if any(m.package_id is None for m in result.packages) and catalog != await session.scalar(select(func.max(NewsSummary.id))):
+                    row.state = 'reprocess' if frozen else 'pending'; await session.commit(); return 'deferred'
+                now = datetime.now(UTC)
+                old_ids = select(SummaryArticle.summary_id).join(ArticleAnalysis).where(ArticleAnalysis.news_id == row.news_id)
+                old_events = (await session.scalars(select(NewsSummary).where(NewsSummary.id.in_(old_ids))
+                    .order_by(NewsSummary.id).with_for_update().execution_options(populate_existing=True))).all()
+                touched = {e.id: e for e in old_events}
+                previous_ids = set(touched)
+                await session.execute(update(SummaryArticle).where(SummaryArticle.analysis_id == row.id).values(active=False))
+                groups = {}
+                changed = set()
+                for match in result.packages:
+                    event = await session.get(NewsSummary, match.package_id, with_for_update=True, populate_existing=True) if match.package_id else groups.get(match.group_key)
+                    if event is not None and (event.replacement_ids or event.state == 'withdrawn'):
+                        raise ValueError('候选包已被纠错或撤回，请重试初筛')
+                    progress = datetime.fromisoformat(row.input['progress_at'])
+                    published = datetime.fromisoformat(row.input['published_at'])
+                    if event is None:
+                        event = NewsSummary(title=match.title, category=match.category, entities=match.entities,
+                            published_at=published, updated_at=progress, changed_at=now, due_at=now,
+                            revision=0, published_revision=0, state='pending')
+                        session.add(event); await session.flush(); groups[match.group_key] = event
+                    event.tags = sorted(set(event.tags or []) | {t.strip().casefold() for t in match.tags if t.strip()})
+                    if match.change_kind != 'repost' or not event.fact:
+                        event.content_kind = match.content_kind; event.fact = match.fact
+                    event.published_at = min(event.published_at, published)
+                    if match.change_kind != 'repost' or row.input['revision_no'] > 1:
+                        event.updated_at = max(event.updated_at, progress)
+                    link = await session.scalar(select(SummaryArticle).where(SummaryArticle.summary_id == event.id, SummaryArticle.analysis_id == row.id))
+                    if link is None:
+                        link = SummaryArticle(summary_id=event.id, analysis_id=row.id); session.add(link)
+                    link.active = True; link.unit = match.model_dump()
+                    if match.change_kind != 'repost' or event.result is None or row.input['revision_no'] > 1:
+                        changed.add(event.id)
+                    touched[event.id] = event
+                if target_id or row.input['revision_no'] > 1:
+                    changed.update(previous_ids)
+                for event in touched.values():
+                    if event.id in changed:
+                        event.review_config = frozen
+                        schedule(event, now, any(m.urgent for m in result.packages))
+                session.add(GroupingVersion(analysis_id=row.id, input=row.input, result=result.model_dump(mode='json'), rules=rules, state='done'))
+                row.result = result.model_dump(mode='json'); row.usage = {'attempts': usages}; row.state = 'done'
+                row.error = None; row.finished_at = now
+                await session.commit()
             return 'done'
         except Exception as error:
             await session.rollback()
@@ -146,13 +148,14 @@ async def _analyze(target_id=None, frozen=None):
             return 'failed'
 
 
-async def summarize():
-    async with analysis_lock, SessionLocal() as session:
+async def summarize(target_id=None):
+    async with SessionLocal() as session:
         settings = await session.get(RiskSettings, 1)
         if not settings or not settings.enabled:
             return
         event = await session.scalar(select(NewsSummary).where(NewsSummary.state == 'pending',
-            NewsSummary.due_at <= datetime.now(UTC)).order_by(NewsSummary.due_at, NewsSummary.id).limit(1).with_for_update())
+            NewsSummary.due_at <= datetime.now(UTC),
+            NewsSummary.id == target_id if target_id else True).order_by(NewsSummary.due_at, NewsSummary.id).limit(1).with_for_update())
         if event is None:
             return
         config_error = None
@@ -194,45 +197,51 @@ async def summarize():
         research = Research()
         evidence_rows = (await session.scalars(select(PackageEvidence).where(PackageEvidence.version_id == identifier).order_by(PackageEvidence.id))).all()
         research.restore([r.data for r in evidence_rows])
+        await session.commit()
         try:
             if config_error: raise ValueError(config_error)
             result, usage = await summarize_articles(provider, system, articles, package, research)
-            event = await session.get(NewsSummary, event_id, populate_existing=True, with_for_update=True)
-            if result.correction is not None:
-                from alphapulse.news_risk.corrections import apply_correction
-                from alphapulse.news_risk.contracts import Correction
-                await apply_correction(session, Correction.model_validate(result.correction), event_id, research.read_package_ids, rules)
-                version.result = result.model_dump(mode='json'); version.usage = usage; version.state = 'corrected'; version.finished_at = datetime.now(UTC)
+            async with publication_lock:
+                event = await session.get(NewsSummary, event_id, populate_existing=True, with_for_update=True)
+                if event.replacement_ids or event.state == 'withdrawn':
+                    version.state = 'superseded'; await session.commit(); return
+                if result.correction is not None and event.revision != revision:
+                    version.state = 'superseded'; await session.commit(); return
+                if result.correction is not None:
+                    from alphapulse.news_risk.corrections import apply_correction
+                    from alphapulse.news_risk.contracts import Correction
+                    await apply_correction(session, Correction.model_validate(result.correction), event_id, research.read_package_ids, rules)
+                    version.result = result.model_dump(mode='json'); version.usage = usage; version.state = 'corrected'; version.finished_at = datetime.now(UTC)
+                    for record in research.records:
+                        session.add(PackageEvidence(summary_id=event_id, version_id=identifier, kind=record['tool'], reference=str(record['arguments']), data=record))
+                    await session.commit(); return
+                version.result = result.model_dump(mode='json'); version.usage = usage; version.state = 'done'; version.finished_at = datetime.now(UTC)
+                if event.revision == revision and revision > event.published_revision:
+                    event.result = result.model_dump(mode='json')
+                    event.stars = result.risk_stars; event.peak_stars = max(event.peak_stars, result.risk_stars)
+                    event.importance_stars = result.importance_stars
+                    event.published_revision = revision; event.analyzed_at = version.finished_at; event.error = None
+                event.state = 'done' if event.revision == revision else 'pending'
+                if event.state == 'done': event.dirty_since = None
                 for record in research.records:
                     session.add(PackageEvidence(summary_id=event_id, version_id=identifier, kind=record['tool'], reference=str(record['arguments']), data=record))
-                await session.commit(); return
-            version.result = result.model_dump(mode='json'); version.usage = usage; version.state = 'done'; version.finished_at = datetime.now(UTC)
-            if event.revision == revision and revision > event.published_revision:
-                event.result = result.model_dump(mode='json')
-                event.stars = result.risk_stars; event.peak_stars = max(event.peak_stars, result.risk_stars)
-                event.importance_stars = result.importance_stars
-                event.published_revision = revision; event.analyzed_at = version.finished_at; event.error = None
-            event.state = 'done' if event.revision == revision else 'pending'
-            if event.state == 'done': event.dirty_since = None
-            for record in research.records:
-                session.add(PackageEvidence(summary_id=event_id, version_id=identifier, kind=record['tool'], reference=str(record['arguments']), data=record))
-            from alphapulse.news_risk.events import associate
-            if event.revision == revision:
-                await associate(session, event, result, research.read_package_ids, research.read_event_ids)
-            await session.commit()
+                from alphapulse.news_risk.events import associate
+                if event.revision == revision:
+                    await associate(session, event, result, research.read_package_ids, research.read_event_ids)
+                await session.commit()
         except Exception as error:
             await session.rollback()
             for record in research.records:
                 session.add(PackageEvidence(summary_id=event_id, version_id=identifier, kind=record['tool'], reference=str(record['arguments']), data=record))
             await session.execute(update(SummaryVersion).where(SummaryVersion.id == identifier).values(
                 state='failed', error=str(error)[:2000], finished_at=datetime.now(UTC)))
-            await session.execute(update(NewsSummary).where(NewsSummary.id == event_id).values(
+            await session.execute(update(NewsSummary).where(NewsSummary.id == event_id, NewsSummary.replacement_ids == [], NewsSummary.state != 'withdrawn').values(
                 state=case((NewsSummary.revision > revision, 'pending'), else_='failed'), error=str(error)[:2000]))
             await session.commit(); logger.exception('事件总结失败')
 
 
 async def outlook():
-    async with analysis_lock, SessionLocal() as session:
+    async with SessionLocal() as session:
         settings = await session.get(RiskSettings, 1)
         if not settings or not settings.enabled: return
         now = datetime.now(UTC)
@@ -293,16 +302,6 @@ async def outlook():
         await session.commit()
 
 
-async def loop(action, heartbeat):
-    while True:
-        try:
-            await redis.set(heartbeat, datetime.now(UTC).isoformat(), ex=1800)
-            await action()
-        except Exception:
-            logger.exception('新闻AI处理异常')
-        await asyncio.sleep(10)
-
-
 async def main():
     async with engine.connect() as lock:
         if not await lock.scalar(text('SELECT pg_try_advisory_lock(20261030, 1)')):
@@ -319,10 +318,8 @@ async def main():
             await session.execute(update(NewsEvent).where(NewsEvent.state == 'processing').values(state='pending'))
             await session.execute(update(EventVersion).where(EventVersion.state == 'processing').values(state='failed', error='进程中断'))
             await session.commit()
-        from alphapulse.news_risk.events import organize
-        from alphapulse.news_risk.reprocess import process_job
-        await asyncio.gather(loop(organize, 'ap:risk:events:heartbeat'), loop(process_job, 'ap:risk:reprocess:heartbeat'), loop(analyze, 'ap:risk:heartbeat'), loop(summarize, 'ap:risk:analysis:heartbeat'),
-            loop(outlook, 'ap:risk:outlook:heartbeat'))
+        from alphapulse.news_risk.scheduler import run
+        await run(lock)
 
 
 if __name__ == '__main__':

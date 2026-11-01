@@ -101,3 +101,24 @@ Each complete daily response withdraws missing records only within its own day a
 Official and Jin10 observations retain separate identities and revisions. The read API merges only verified indicator IDs, definitions, units, reference periods, release stages and exact publication times. Official nonmissing fields win independently; Jin10 fills missing fields and market forecasts with explicit provenance. Unverified definitions remain distinct records. Original and revised previous values remain separate. Forecast observations captured after publication are displayed with that limitation and excluded from historical surprise judgments. Jin10's gold/USD direction flags are not BTC/ETH signals. Tentative times and all-day holidays never display an invented exact midnight time.
 
 CI acceptance runs `scripts/smoke_calendar.py` against the isolated database using public fixtures and synthetic account material. It never starts a browser collector or connects a real Jin10 account. Local unit tests likewise isolate all external I/O. The live database migration, credential import/reconnection, history collection and dev deployment are separate operator actions; ordinary local validation does not authorize them.
+
+### News AI concurrency
+
+All background news AI stages share `risk_settings.max_concurrency` (default 5).
+A slot covers one complete stage task, including its sequential model and verification
+calls. Completed tasks release their slots immediately; runnable real-time stages rotate
+before historical items use spare capacity. Pending work remains in PostgreSQL.
+
+The home settings dialog saves this operational limit independently of model settings.
+Increasing it admits more work; decreasing it drains existing tasks without cancelling
+paid requests. Pausing stops new admissions. The overview reports active slots and stage
+counts; an expired worker heartbeat shows an unknown active count.
+
+`PATCH /api/risk/settings/concurrency` accepts a positive integer `max_concurrency`.
+The limit is excluded from frozen reprocessing configurations and model fingerprints.
+“Test and enable” requires paused analysis and an idle pipeline; an exclusive PostgreSQL
+advisory gate prevents concurrent validation and background work. Historical items persist
+individual states, so completion order does not change progress or skip unfinished items.
+
+Migration `e5f701234567` adds the limit and converts legacy historical checkpoints to
+item states. Deployment and execution of this migration require separate authorization.

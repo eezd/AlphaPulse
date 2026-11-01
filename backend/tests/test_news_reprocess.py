@@ -45,7 +45,7 @@ def test_downstream_failure_does_not_mark_unrelated_news_failed(trading, monkeyp
     failed = N(id=31,error='Synthetic failure',state='failed',quotes={})
     session = session_mock()
     session.get.return_value = N(enabled=True)
-    session.scalar.side_effect = [None,None,job,None,failed]
+    session.scalar.side_effect = [None,None,job,None,None,failed]
     session.scalars.side_effect = [N(all=lambda:[failed] if stage == 'analysis' else []),
         N(all=lambda:[failed] if stage == 'events' else [])]
     monkeypatch.setattr(reprocess,'SessionLocal',lambda:session)
@@ -70,7 +70,7 @@ def test_retry_resumes_only_failed_stage(trading, stage):
     asyncio.run(reprocess_retry(job.id,session))
     assert job.state == 'running' and job.failures == []
     if stage == 'grouping':
-        assert job.items == [{'id':11}] and job.position == 0
+        assert job.items == [{'id':11, 'state':'pending'}] and job.position == 0
     else:
         assert job.items == [{'id':11},{'id':12}] and job.position == 2
         if stage == 'outlook': assert failed.quotes['retry_requested'] is True

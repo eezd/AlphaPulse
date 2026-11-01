@@ -19,3 +19,5 @@ export const startReprocessApi = (data: Risk.ReprocessRange) => request<{ id: nu
 export const listReprocessApi = () => request<Risk.ReprocessJob[]>({ url: "/risk/reprocess", method: "get" })
 export const cancelReprocessApi = (id: number) => request<null>({ url: `/risk/reprocess/${id}/cancel`, method: "post" })
 export const retryReprocessApi = (id: number) => request<null>({ url: `/risk/reprocess/${id}/retry`, method: "post" })
+
+export const saveRiskConcurrencyApi = (max_concurrency: number) => request<{ max_concurrency: number }>({ url: "/risk/settings/concurrency", method: "patch", data: { max_concurrency } })
