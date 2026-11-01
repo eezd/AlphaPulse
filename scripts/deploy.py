@@ -2,6 +2,7 @@
 """Update the one data-bearing dev instance using verified image digests."""
 
 import argparse
+import hashlib
 import secrets
 import json
 from pathlib import Path
@@ -15,6 +16,30 @@ SEARXNG_IMAGE = 'docker.io/searxng/searxng@sha256:f4aa660c54d062dedb268be84e821e
 
 INSTANCE = Path('/docker/gitea/dev/AlphaPulse')
 SERVICES = ('api', 'web', 'market', 'crawler', 'calendar', 'trader', 'news-risk', 'jin10-calendar', 'searxng')
+
+# Recognize the unmodified skill templates installed before entrypoint versioning.
+LEGACY_ENTRIES = {
+    'start.sh': 'b4709f36a66b428671a09f373f640a99259845924779dcb122f5cd9c17e85ab6',
+    'stop.sh': '83348a7781b7d738a715bde51387951041a5cfcd31796805422ef83139a21571',
+}
+
+
+def install_entrypoints(directory):
+    manifest = directory / 'entrypoints.json'
+    previous = json.loads(manifest.read_text()) if manifest.exists() else LEGACY_ENTRIES
+    sources = {name: (ROOT / 'deploy' / name).read_bytes() for name in ('instance.py', 'start.sh', 'stop.sh')}
+    for name, content in sources.items():
+        target = directory / name
+        require(not target.is_symlink(), f'拒绝覆盖符号链接：{name}')
+        require(not target.exists() or target.read_bytes() == content or
+                hashlib.sha256(target.read_bytes()).hexdigest() == previous.get(name), f'保留用户自定义脚本，请先核对：{name}')
+    for name, content in sources.items():
+        target = directory / name
+        temporary = target.with_name(name + '.tmp')
+        temporary.write_bytes(content)
+        temporary.chmod(0o755 if name.endswith('.sh') else 0o644)
+        temporary.replace(target)
+    save(manifest, {name: hashlib.sha256(content).hexdigest() for name, content in sources.items()})
 
 SCHEMA = '''
 import asyncio, json
@@ -146,6 +171,7 @@ def deploy(build, directory=INSTANCE):
         if branch_head() != build['commit']:
             print('Skipped: dev advanced while preparing deployment')
             return
+        install_entrypoints(directory)
         pending = {'build': build, 'previous': previous, 'previous_compose': old_compose,
                    'previous_running': previous_running, 'started_at': time.time(), 'phase': 'preparing'}
         save(directory / 'deployment.pending.json', pending)
@@ -251,11 +277,16 @@ asyncio.run(main())
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('update', 'recover', 'rollback', 'reset-news-ai'))
+    parser.add_argument('command', choices=('update', 'recover', 'rollback', 'reset-news-ai', 'install-entrypoints'))
     parser.add_argument('--build', type=Path, default=ROOT / 'build.json')
     parser.add_argument('--confirm-delete-old-news-ai', action='store_true')
     args = parser.parse_args()
-    if args.command == 'reset-news-ai':
+    if args.command == 'install-entrypoints':
+        with locked(INSTANCE / '.deploy.lock'):
+            require(not (INSTANCE / 'deployment.pending.json').exists(), 'Recover the pending deployment first')
+            install_entrypoints(INSTANCE)
+        print('实例启停入口已安装；未启动或停止任何服务')
+    elif args.command == 'reset-news-ai':
         reset_news_ai(json.loads(args.build.read_text()), args.confirm_delete_old_news_ai)
     elif args.command == 'update':
         deploy(json.loads(args.build.read_text()))

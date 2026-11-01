@@ -29,7 +29,7 @@ jobs:
       DOCKER_CONFIG: /tmp/alphapulse-docker-auth
     steps:
       - name: Install container tools
-        run: apk add --no-cache python3 nodejs git docker-cli-buildx docker-cli-compose
+        run: apk add --no-cache bash python3 nodejs git docker-cli-buildx docker-cli-compose
       - uses: https://github.com/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0

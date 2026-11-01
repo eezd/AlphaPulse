@@ -36,6 +36,39 @@ python3 scripts/deploy.py rollback
 
 Neither command restores database contents or resets trading orders. Schema migrations require separate authorization and are never part of CI auto-deployment. No scheduled backup is installed.
 
+### Start and stop this instance
+
+```sh
+bash /docker/gitea/dev/AlphaPulse/start.sh
+bash /docker/gitea/dev/AlphaPulse/stop.sh
+```
+
+These Bash entrypoints use the installed `instance.py` controller (host Python 3 and
+Docker Compose are required), share `.deploy.lock` with CD and fail immediately when
+the lock is occupied. Start rejects a pending deployment; stop remains available
+while pending. Both use the explicit `alphapulse-dev` identity and instance
+`images.env`, ignoring caller `COMPOSE_*` and `ALPHAPULSE_*` overrides.
+
+Start checks the verified `deployment.json` receipt, Compose image selection and all
+local image identities before changing containers. It never builds or pulls. It
+waits up to 120 seconds for services to run or become healthy, then checks the nine
+services and their running image IDs before reporting success. A failed start can
+leave some services running; inspect the reported failure before retrying. Stop
+retains containers, networks, volumes and data. Neither operation changes stored AI
+or trading settings; starting resumes workers according to those settings.
+
+Deployment installs these three versioned files and executable Bash permissions.
+For an existing instance, install only the entrypoints without starting services:
+
+```sh
+python3 scripts/deploy.py install-entrypoints
+```
+
+`entrypoints.json` records installed checksums. Installation accepts unchanged
+managed files and the original skill templates, and refuses to overwrite local
+customizations. Review such customizations before updating; no other instance or
+global skill template is changed.
+
 ## Credentials and mirroring
 
 Gitea secrets are `ALPHAPULSE_GITEA_TOKEN` (image publication) and `ALL_GITHUB_TOKEN` (the account-level GitHub PAT classic with repository write permission; no repository-level override). Ordinary checks and the deployment job do not receive publication secrets. The GitHub token is read from the task environment, never stored in Git URLs or credential files. The trusted mirror task verifies the GitHub identity and repository write permission before synchronization.
