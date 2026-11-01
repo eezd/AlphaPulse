@@ -12,7 +12,7 @@ from alphapulse.ai.skills import create_node, add_version, published_skills
 from alphapulse.api.settings import delete_provider
 from alphapulse.core.db import SessionLocal, engine
 from alphapulse.models import AiProvider, NewsItem, SkillNode, SkillVersion
-from alphapulse.models.risk import RiskSettings, RiskSnapshot, ArticleAnalysis, NewsSummary, SummaryArticle, SummaryVersion, PackageEvidence
+from alphapulse.models.risk import RiskSettings, RiskSnapshot, ArticleAnalysis, NewsSummary, SummaryArticle, SummaryVersion, PackageEvidence, GroupingVersion
 from alphapulse.news_risk import service, pipeline, worker, briefing
 
 
@@ -35,7 +35,8 @@ async def main():
         await session.flush()
         assert not await published_skills(session), 'News skills leaked into Chat or trading'
         session.add(RiskSettings(id=1, enabled=True, provider_id=provider_id, model='luna', second_provider_id=provider_id,
-            second_model='reviewer', third_provider_id=provider_id, third_model='senior', start_at=now-timedelta(minutes=2), **skill_ids))
+            second_model='reviewer', third_provider_id=provider_id, third_model='senior',
+            reasoning_effort='low', second_reasoning_effort='high', third_reasoning_effort='xhigh', start_at=now-timedelta(minutes=2), **skill_ids))
         for key, at, content in [('old', now-timedelta(days=1), 'old'), ('first', now-timedelta(minutes=1), 'original'),
                                   ('duplicate', now-timedelta(seconds=30), 'repost')]:
             session.add(NewsItem(source_code='wscn_news', external_id='ci-news-'+key, url='https://example.invalid/'+key,
@@ -47,6 +48,7 @@ async def main():
     finish_during_grouping = False
     async def stream(provider, system, messages, tools, effort):
         nonlocal inject_update, finish_during_grouping
+        assert effort == {'luna': 'low', 'reviewer': 'high', 'senior': 'xhigh'}[provider.model]
         data = json.loads(messages[0]['text']); calls.append((provider.model, data))
         if 'article' in data:
             assert provider.model == 'luna'
@@ -54,8 +56,8 @@ async def main():
                 finish_during_grouping = False
                 await worker.summarize()
             candidates = data['candidates']
-            result = pipeline.Grouping( reason='Financial event', events=[pipeline.Match(
-                event_id=candidates[0]['id'] if candidates else None, group_key=None if candidates else 'security',
+            result = pipeline.Grouping( reason='Financial event', packages=[pipeline.Match(
+                package_id=candidates[0]['id'] if candidates else None, group_key=None if candidates else 'security',
                 title='Exchange security incident', category='security', entities=['Exchange'], fact='incident',
                 evidence=data['article']['title'], urgent=True, tags=['Exchange'], content_kind='report')])
         elif data.get('task') == 'event':
@@ -71,7 +73,7 @@ async def main():
             result = pipeline.EventResult(id=data['id'], title='Exchange security incident', summary='Correction' if correction else 'Incident',
                 category='security', entities=['Exchange'], risk_stars=1 if correction else 5, importance_stars=5, direction='unknown',
                 verification='refuted' if correction else 'reported', confidence='low', reasoning='Synthetic', uncertainty='Synthetic',
-                facts='Synthetic', timeline='Synthetic',
+                timeline_points=[dict(occurred_at=None, time_precision='unknown', time_text='Unknown', reported_at=None, description='Synthetic', verification='insufficient', evidence_refs=[{'article_id':a['id'],'quote':a['title']} for a in data['articles']])], facts='Synthetic', timeline='Synthetic',
                 asset_impacts='Exchange', opinions='Uncertain', counter_evidence='Unknown', watchpoints='Updates', claims=[pipeline.Claim(statement='Synthetic', verdict='insufficient', evidence_refs=[])], related_packages=[], excluded_article_ids=[],
                 evidence_refs=[pipeline.Evidence(article_id=a['id'], quote=a['title']) for a in data['articles']])
         elif data.get('task') == 'ranking':
@@ -161,7 +163,7 @@ async def main():
         print('Three-stage packages: scope, cutoff, grouping, reposts, revisions, corrections, peak risk, retained success, outlook and provider isolation passed')
     finally:
         async with SessionLocal() as session:
-            for model in (PackageEvidence, SummaryVersion, SummaryArticle, NewsSummary, ArticleAnalysis, RiskSnapshot, RiskSettings):
+            for model in (GroupingVersion, PackageEvidence, SummaryVersion, SummaryArticle, NewsSummary, ArticleAnalysis, RiskSnapshot, RiskSettings):
                 await session.execute(delete(model))
             await session.execute(delete(NewsItem).where(NewsItem.external_id.startswith('ci-news-')))
             await session.execute(delete(AiProvider).where(AiProvider.id == provider_id))

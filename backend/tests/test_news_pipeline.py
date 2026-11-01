@@ -12,24 +12,24 @@ def pipeline(trading):
 
 
 def match(pipeline, **changes):
-    return dict(event_id=None, group_key='event', title='公告', category='macro', entities=['央行'],
+    return dict(package_id=None, group_key='event', title='公告', category='macro', entities=['央行'],
         fact='公告', evidence='公告', urgent=False, tags=['央行'], content_kind='report', **changes)
 
 
-@pytest.mark.parametrize('event_id,group_key', [(None, None), (1, 'event')])
-def test_grouping_target_is_exclusive(pipeline, event_id, group_key):
+@pytest.mark.parametrize('package_id,group_key', [(None, None), (1, 'event')])
+def test_grouping_target_is_exclusive(pipeline, package_id, group_key):
     data = match(pipeline)
-    data.update(event_id=event_id, group_key=group_key)
+    data.update(package_id=package_id, group_key=group_key)
     with pytest.raises(ValueError): pipeline.Match(**data)
 
 
 def test_all_domains_require_nonempty_distinct_packages(pipeline):
     item = pipeline.Match(**match(pipeline))
     with pytest.raises(ValueError, match='重复关联'):
-        pipeline.Grouping(reason='政治公告', events=[item, item])
+        pipeline.Grouping(reason='政治公告', packages=[item, item])
     with pytest.raises(ValueError):
-        pipeline.Grouping(reason='说明', events=[])
-    assert pipeline.Grouping(reason='文化说明', events=[item]).events
+        pipeline.Grouping(reason='说明', packages=[])
+    assert pipeline.Grouping(reason='文化说明', packages=[item]).packages
 
 
 @pytest.mark.parametrize('scope,enabled,published', [('shared', True, 1), ('news', False, 1), ('news', True, None)])
@@ -61,7 +61,7 @@ def test_old_backfill_is_not_selected_by_ingestion_time(pipeline):
 def event_result(pipeline, refs):
     return pipeline.EventResult(id=1, title='Synthetic event', summary='Synthetic summary', category='macro', entities=[],
         risk_stars=1, importance_stars=4, direction='unknown', verification='insufficient', confidence='low', reasoning='Synthetic', uncertainty='Synthetic',
-        facts='Synthetic', timeline='Synthetic', asset_impacts='Unknown', opinions='Unknown', counter_evidence='Unknown', watchpoints='Unknown', claims=[pipeline.Claim(statement='Synthetic', verdict='insufficient', evidence_refs=[])], related_packages=[], excluded_article_ids=[], evidence_refs=refs)
+        timeline_points=[dict(occurred_at=None, time_precision='unknown', time_text='Unknown', reported_at=None, description='Synthetic', verification='insufficient', evidence_refs=[pipeline.Evidence.model_validate(r).model_dump() for r in refs])], facts='Synthetic', timeline='Synthetic', asset_impacts='Unknown', opinions='Unknown', counter_evidence='Unknown', watchpoints='Unknown', claims=[pipeline.Claim(statement='Synthetic', verdict='insufficient', evidence_refs=[])], related_packages=[], excluded_article_ids=[], evidence_refs=refs)
 
 
 def test_long_event_uses_bounded_layers_and_retains_all_sources(pipeline, monkeypatch):
@@ -152,8 +152,8 @@ def test_package_scope_survives_direct_and_extracted_roundup(pipeline, monkeypat
     observed = []
     async def complete(provider, system, payload, schema):
         observed.append(payload)
-        if schema is pipeline.Extraction:
-            return pipeline.Extraction(facts=payload['package']['fact'], evidence_refs=[pipeline.Evidence(article_id=1, quote='b')]), {}
+        if payload['task'] == 'extract':
+            return schema(facts=payload['package']['fact'], evidence_refs=[pipeline.Evidence(article_id=1, quote='b')]), {}
         return event_result(pipeline, [pipeline.Evidence(article_id=1, quote='b')]).model_copy(update={'id': payload['id']}), {}
     monkeypatch.setattr(pipeline, 'complete', complete)
     for identifier, fact in [(1, '央行公布利率'), (2, '公司发布新产品')]:
@@ -188,3 +188,53 @@ def test_long_event_reserves_real_research_tools_before_extraction(pipeline, mon
     monkeypatch.setattr(research.llm, 'stream', stream)
     result, _ = asyncio.run(pipeline.summarize_articles(provider, 'rules', [article], package, review))
     assert result.id == 1 and extracted
+
+
+@pytest.mark.parametrize('has_related_fact', [True, False])
+def test_package_roundup_skips_empty_slices_but_requires_related_evidence(pipeline, monkeypatch, has_related_fact):
+    provider = SimpleNamespace(max_tokens=1000, context_window=18000)
+    article = {'id': 1, 'title': 'Roundup', 'summary': '',
+        'content': ('RATE decision. ' if has_related_fact else '')+'Unrelated product announcement. '*1500}
+    package = {'id': 1, 'fact': 'RATE decision'}
+    system = pipeline.BASE+'\n'+pipeline.TEMPLATES['analysis'][1]
+    extracted, submitted = [], []
+
+    async def complete(provider, system, payload, schema):
+        if payload['task'] == 'extract':
+            related = 'RATE' in payload['content']
+            extracted.append(related)
+            return schema.model_validate({'facts': 'RATE decision' if related else '',
+                'evidence_refs': [{'article_id': 1, 'quote': 'RATE'}] if related else []}), {'input_tokens': 1}
+        assert payload['task'] == 'event'
+        submitted.append(payload)
+        assert all(e['facts'] and e['evidence_refs'] for e in payload['extractions'])
+        return event_result(pipeline, [pipeline.Evidence(article_id=1, quote='RATE')]), {}
+
+    monkeypatch.setattr(pipeline, 'complete', complete)
+    if has_related_fact:
+        result, usage = asyncio.run(pipeline.summarize_articles(provider, system, [article], package))
+        assert result.evidence_refs[0].quote == 'RATE' and len(submitted) == 1
+        assert len(usage['parts']) == len(extracted)
+        assert len(submitted[0]['extractions']) == sum(extracted)
+    else:
+        with pytest.raises(ValueError, match='未提取到当前包相关证据'):
+            asyncio.run(pipeline.summarize_articles(provider, system, [article], package))
+        assert not submitted
+    assert len(extracted) > 1 and False in extracted
+
+
+@pytest.mark.parametrize('facts,refs', [('Unsupported fact', []), ('', [{'article_id': 1, 'quote': 'Original'}])])
+def test_package_extraction_requires_facts_and_evidence_together(pipeline, facts, refs):
+    with pytest.raises(ValueError, match='分段事实与证据必须同时为空或同时提供'):
+        pipeline.PackageExtraction(facts=facts, evidence_refs=refs)
+
+
+def test_grouping_extraction_and_final_summary_still_require_evidence(pipeline, monkeypatch):
+    async def complete(provider, system, payload, schema):
+        return schema.model_validate({'facts': '', 'evidence_refs': []}), {}
+    monkeypatch.setattr(pipeline, 'complete', complete)
+    with pytest.raises(ValueError):
+        asyncio.run(pipeline.extract_articles(SimpleNamespace(max_tokens=100, context_window=12000), 'rules',
+            [{'id': 1, 'title': 'Original', 'content': '', 'summary': ''}]))
+    with pytest.raises(ValueError):
+        event_result(pipeline, [])

@@ -131,7 +131,7 @@ async def list_news(
     items = []
     for news, excerpt, analysis in rows:
         summaries = (await session.scalars(select(NewsSummary).join(SummaryArticle).where(
-            SummaryArticle.analysis_id == analysis.id, NewsSummary.result.is_not(None)).order_by(NewsSummary.stars.desc()))).all() if analysis else []
+            SummaryArticle.analysis_id == analysis.id, SummaryArticle.active.is_(True), NewsSummary.result.is_not(None)).order_by(NewsSummary.stars.desc()))).all() if analysis else []
         risk = None
         if analysis:
             risk = {'state': 'pending' if analysis.state == 'done' else analysis.state}

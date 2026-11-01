@@ -1,10 +1,12 @@
 """Complete batched reading lists and version-bound cross-domain synthesis."""
 import hashlib
 import json
+from typing import Literal
 from pydantic import BaseModel, Field
 from alphapulse.news_risk.service import complete, fits_context, OutputTruncated
 
 class Reading(BaseModel):
+    kind: Literal['package', 'event'] = 'package'
     id: int
     revision: int
     priority: int = Field(ge=0, le=100)
@@ -41,8 +43,8 @@ def semantic_packages(inputs):
         content = {k: v for k, v in package['result'].items() if k != 'evidence_refs'}
         if 'claims' in content:
             content['claims'] = [{k: v for k, v in claim.items() if k != 'evidence_refs'} for claim in content['claims']]
-        result.append({'id': package['id'], 'importance_stars': package['importance_stars'], 'result': content})
-    return sorted(result, key=lambda p: p['id'])
+        result.append({'kind': package.get('kind', 'package'), 'id': package['id'], 'importance_stars': package['importance_stars'], 'result': content})
+    return sorted(result, key=lambda p: (p['kind'], p['id']))
 
 
 async def generate(provider, system, inputs):
@@ -65,8 +67,8 @@ async def generate(provider, system, inputs):
                 middle = len(chunk)//2
                 batches[0:0] = [chunk[:middle], chunk[middle:]]
                 continue
-            expected = {(p['id'], p['revision']) for p in chunk}
-            actual = [(r.id, r.revision) for r in ranked.reading]
+            expected = {(p.get('kind', 'package'), p['id'], p['revision']) for p in chunk}
+            actual = [(r.kind, r.id, r.revision) for r in ranked.reading]
             if len(actual) != len(set(actual)) or set(actual) != expected:
                 raise ValueError('阅读排序遗漏、重复或引用未知包版本')
             reading.extend(r.model_dump() for r in ranked.reading)
@@ -88,8 +90,8 @@ async def generate(provider, system, inputs):
         if len(json.dumps(compacted)) >= len(json.dumps(notes)): raise ValueError('议题归纳未缩减上下文')
         notes = compacted; payload['notes'] = notes
     synthesis, used = await complete(provider, system, payload, Synthesis)
-    allowed = {(p['id'], p['revision']) for p in inputs}
-    if any((r.id, r.revision) not in allowed for r in synthesis.references): raise ValueError('综合判断引用未知包版本')
+    allowed = {(p.get('kind', 'package'), p['id'], p['revision']) for p in inputs}
+    if any((r.kind, r.id, r.revision) not in allowed for r in synthesis.references): raise ValueError('综合判断引用未知包版本')
     usages.append(used)
-    reading.sort(key=lambda r: (-r['priority'], -next(p['importance_stars'] for p in inputs if p['id'] == r['id']), r['id']))
+    reading.sort(key=lambda r: (-r['priority'], -next(p['importance_stars'] for p in inputs if p['id'] == r['id'] and p.get('kind', 'package') == r['kind']), r['id']))
     return {'reading': reading, 'synthesis': synthesis.model_dump(), 'usage': usages}

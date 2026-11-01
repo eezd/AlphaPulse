@@ -78,6 +78,8 @@ TOOLS = {
     'read_news': (Read, '读取站内新闻原文'),
     'search_packages': (Search, '按关键词和标签检索其他包，AI总结仅作线索'),
     'read_package': (Read, '读取包及关联原文ID，核验应读取原文'),
+    'search_events': (Search, '检索历史事件及时间线，仅作线索'),
+    'read_event': (Read, '读取事件、成员包和时间线，原文仍须另行读取'),
     'search_calendar': (Search, '检索已有经济日历'),
     'search_web': (Search, '通过SearXNG搜索外部来源，摘要仅作线索'),
     'read_web': (ReadWeb, '读取搜索结果中的公开网页正文'),
@@ -92,6 +94,8 @@ class Research:
         self.cache = {}
         self.urls = set()
         self.package_ids = set()
+        self.read_package_ids = set()
+        self.read_event_ids = set()
 
     @staticmethod
     def tool_specs():
@@ -113,8 +117,10 @@ class Research:
                 self.sources[result['article_id']] = result
             if name == 'search_web': self.urls.update(r['url'] for r in result['results'] if r.get('url'))
             if name == 'search_calendar': self.urls.update(r['release_url'] for r in result if r.get('release_url'))
+            if name == 'read_event': self.read_event_ids.add(result['id'])
             if name == 'search_packages': self.package_ids.update(r['id'] for r in result)
-            if name == 'read_package': self.package_ids.add(result['id'])
+            if name == 'read_package':
+                self.package_ids.add(result['id']); self.read_package_ids.add(result['id'])
 
     async def tool(self, name, arguments):
         if name not in TOOLS: raise ValueError('未知研究工具')
@@ -140,11 +146,23 @@ class Research:
                 identifier = -(len(self.sources)+1)
                 self.sources[identifier] = result
                 result = {**result, 'article_id': identifier}
+            elif name in ('search_events', 'read_event'):
+                from alphapulse.models.risk import NewsEvent, EventMember
+                if name == 'search_events':
+                    rows = (await session.scalars(select(NewsEvent).where(NewsEvent.title.contains(args.query, autoescape=True), NewsEvent.state != 'retired').limit(20))).all()
+                    result = [{'id': e.id, 'title': e.title} for e in rows]
+                else:
+                    row = await session.get(NewsEvent, args.id)
+                    if row is None: raise ValueError('事件不存在')
+                    self.read_event_ids.add(row.id)
+                    members = list((await session.scalars(select(EventMember.package_id).where(EventMember.event_id == row.id))).all())
+                    result = {'id':row.id, 'title':row.title, 'result':row.result, 'package_ids':members, 'scope':'ai_summary_not_evidence'}
             elif name in ('search_news', 'search_packages'):
                 model = NewsItem if name == 'search_news' else NewsSummary
                 conditions = or_(model.title.contains(args.query, autoescape=True),
                     model.content_text.contains(args.query, autoescape=True)) if model is NewsItem else or_(
                     model.title.contains(args.query, autoescape=True), model.tags.contains([args.query]), model.fact.contains(args.query, autoescape=True))
+                if model is NewsSummary: conditions = conditions & (NewsSummary.replacement_ids == []) & (NewsSummary.state != 'withdrawn')
                 rows = (await session.scalars(select(model).where(conditions).order_by(model.published_at.desc()).limit(20))).all()
                 result = [{'id': r.id, 'title': r.title} for r in rows]
                 if model is NewsSummary: self.package_ids.update(r.id for r in rows)
@@ -156,12 +174,14 @@ class Research:
                     'summary': row.summary, 'url': row.url, 'published_at': row.published_at.isoformat()}
                 self.sources[identifier] = result
             elif name == 'read_package':
-                from alphapulse.models.risk import SummaryArticle, ArticleAnalysis
+                from alphapulse.models.risk import SummaryArticle, ArticleAnalysis, EventMember
                 row = await session.get(NewsSummary, args.id)
                 if row is None: raise ValueError('包不存在')
-                self.package_ids.add(row.id)
-                ids = (await session.scalars(select(ArticleAnalysis.news_id).join(SummaryArticle).where(SummaryArticle.summary_id == row.id))).all()
-                result = {'id': row.id, 'result': row.result, 'news_ids': ids, 'scope': 'ai_summary_not_evidence'}
+                self.package_ids.add(row.id); self.read_package_ids.add(row.id)
+                ids = (await session.scalars(select(ArticleAnalysis.news_id).join(SummaryArticle).where(SummaryArticle.summary_id == row.id, SummaryArticle.active.is_(True)))).all()
+                assignments = (await session.scalars(select(ArticleAnalysis).join(SummaryArticle).join(NewsItem).where(SummaryArticle.summary_id == row.id, SummaryArticle.active.is_(True), ArticleAnalysis.content_hash == NewsItem.content_hash))).all()
+                membership = await session.get(EventMember, row.id)
+                result = {'main_event_id': membership.event_id if membership else None, 'replacement_ids': row.replacement_ids, 'state': row.state, 'id': row.id, 'revision': row.revision, 'fact': row.fact, 'result': row.result, 'articles': [{'analysis_id': a.id, **a.input} for a in assignments], 'news_ids': ids, 'scope': 'ai_summary_not_evidence'}
             else:
                 from alphapulse.models.calendar import EconomicRelease
                 rows = (await session.scalars(select(EconomicRelease).where(EconomicRelease.title.contains(args.query, autoescape=True)).limit(20))).all()

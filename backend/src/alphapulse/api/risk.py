@@ -2,10 +2,11 @@
 from datetime import UTC, datetime, timedelta
 from enum import IntEnum
 from typing import Annotated
-from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
+from alphapulse.ai.llm import Effort
 from alphapulse.api.response import success
 from alphapulse.core.auth import require_admin
 from alphapulse.core.db import get_session
@@ -33,6 +34,9 @@ class SettingsIn(BaseModel):
     second_model: str = Field(default='', max_length=128)
     third_provider_id: int | None = Field(default=None, gt=0)
     third_model: str = Field(default='', max_length=128)
+    reasoning_effort: Effort | None = None
+    second_reasoning_effort: Effort | None = None
+    third_reasoning_effort: Effort | None = None
     grouping_skill_id: int | None = Field(default=None, gt=0)
     analysis_skill_id: int | None = Field(default=None, gt=0)
     outlook_skill_id: int | None = Field(default=None, gt=0)
@@ -57,19 +61,28 @@ async def save_settings(body: SettingsIn, session: DB):
     return success(None)
 
 
+class TemplatesIn(BaseModel):
+    refresh_existing: bool = False
+
+
 @router.post('/skill-templates')
-async def templates(session: DB):
+async def templates(session: DB, body: Annotated[TemplatesIn | None, Body()] = None):
     from alphapulse.ai.skills import create_node, add_version
     from alphapulse.news_risk.pipeline import TEMPLATES
-    from alphapulse.models import SkillNode
+    from alphapulse.models import SkillNode, SkillVersion
     result = {}
     for role, (name, content) in TEMPLATES.items():
-        node = await session.scalar(select(SkillNode).where(SkillNode.parent_id.is_(None), SkillNode.name == name))
-        if node is not None and node.scope != 'news':
-            raise HTTPException(409, f'{name}已被其他用途使用，请先重命名')
+        node = await session.scalar(select(SkillNode).where(SkillNode.parent_id.is_(None), SkillNode.name == name).with_for_update())
+        if node is not None and (node.scope != 'news' or node.kind != 'skill'):
+            raise HTTPException(409, f'{name}已被其他用途或类型使用，请先重命名')
         if node is None:
             node = await create_node(session, None, 'skill', name, scope='news')
             await add_version(session, node, content, 'user', '新闻AI默认草稿')
+        elif body is not None and body.refresh_existing:
+            latest = await session.scalar(select(SkillVersion).where(SkillVersion.skill_id == node.id)
+                .order_by(SkillVersion.version_no.desc()).limit(1))
+            if latest is None or latest.content != content:
+                await add_version(session, node, content, 'user', '更新新闻AI默认草稿')
         result[role+'_skill_id' if role != 'analysis' else 'analysis_skill_id'] = node.id
     await session.commit()
     return success(result)
@@ -88,8 +101,8 @@ async def enable(body: SettingsIn, session: DB):
     try:
         provider, system, _, fingerprints['grouping'] = await configuration(session, value, 'grouping')
         grouped, _ = await complete(provider, system, {'article': fixture, 'candidates': []}, Grouping)
-        for event in grouped.events:
-            if event.event_id is not None: raise ValueError('测试没有已有候选事件')
+        for event in grouped.packages:
+            if event.package_id is not None: raise ValueError('测试没有已有候选事件')
             validate_evidence([Evidence(article_id=1, quote=event.evidence)], {1: fixture})
         provider, system, _, fingerprints['analysis'] = await configuration(session, value, 'analysis')
         await summarize_articles(provider, system, [fixture], {'id': 1, 'title': fixture['title'],
@@ -125,18 +138,21 @@ async def coverage(session):
 async def overview(session: DB, hours: RiskWindow = RiskWindow.DAY):
     now = datetime.now(UTC); cutoff = now - timedelta(hours=hours)
     counts = dict((await session.execute(select(NewsSummary.importance_stars, func.count()).where(
-        NewsSummary.updated_at >= cutoff, NewsSummary.result.is_not(None)).group_by(NewsSummary.importance_stars))).all())
+        NewsSummary.updated_at >= cutoff, NewsSummary.result.is_not(None), NewsSummary.replacement_ids == [], NewsSummary.state != 'withdrawn').group_by(NewsSummary.importance_stars))).all())
     snapshot = await session.scalar(select(RiskSnapshot).where(RiskSnapshot.state == 'done', RiskSnapshot.result['inputs'].is_not(None)).order_by(RiskSnapshot.id.desc()).limit(1))
     last = await session.scalar(select(RiskSnapshot).order_by(RiskSnapshot.id.desc()).limit(1))
     scenario = None
     stage2 = dict((await session.execute(select(NewsSummary.state, func.count()).group_by(NewsSummary.state))).all())
-    current = (await session.scalars(select(NewsSummary).where(NewsSummary.result.is_not(None), NewsSummary.updated_at >= now-timedelta(hours=72)))).all()
+    from alphapulse.news_risk.events import reading_inputs
     from alphapulse.news_risk.briefing import semantic_packages
+    current = await reading_inputs(session, now-timedelta(hours=72))
     previous_inputs = semantic_packages(snapshot.result['inputs']) if snapshot else []
-    changed = previous_inputs != semantic_packages([{'id': p.id, 'importance_stars': p.importance_stars, 'result': p.result} for p in current])
+    changed = previous_inputs != semantic_packages(current)
     stage3 = {'state': last.state if last else 'pending', 'pending': changed,
         'heartbeat': await redis.get('ap:risk:outlook:heartbeat')}
-    return success({'stage2': stage2, 'stage3': stage3, 'as_of': now, 'counts': counts, 'coverage': await coverage(session), 'scenario': scenario, 'briefing': snapshot.result if snapshot else None,
+    from alphapulse.models.risk import NewsEvent
+    event_states = dict((await session.execute(select(NewsEvent.state, func.count()).group_by(NewsEvent.state))).all())
+    return success({'event_states': event_states, 'stage2': stage2, 'stage3': stage3, 'as_of': now, 'counts': counts, 'coverage': await coverage(session), 'scenario': scenario, 'briefing': snapshot.result if snapshot else None,
         'snapshot_at': snapshot.created_at if snapshot else None, 'quotes': snapshot.quotes if snapshot else None,
         'stale': not snapshot or changed or bool(last and last.error),
         'error': last.error if last else None, 'heartbeat': await redis.get('ap:risk:heartbeat')})
@@ -146,7 +162,7 @@ async def overview(session: DB, hours: RiskWindow = RiskWindow.DAY):
 async def events(session: DB, hours: RiskWindow | None = None, stars: int = Query(0, ge=0, le=5),
                  tag: str = '', importance: int = Query(0, ge=0, le=5), category: str = '', asset: str = '', q: str = '', start: datetime | None = None, end: datetime | None = None,
                  page: int = Query(1, ge=1), limit: int = Query(20, ge=1, le=100)):
-    conditions = [NewsSummary.stars >= stars, NewsSummary.result.is_not(None)]
+    conditions = [NewsSummary.replacement_ids == [], NewsSummary.state != 'withdrawn', NewsSummary.stars >= stars, NewsSummary.result.is_not(None)]
     if importance: conditions.append(NewsSummary.importance_stars >= importance)
     if tag: conditions.append(NewsSummary.tags.contains([tag.strip().casefold()]))
     if hours: conditions.append(NewsSummary.updated_at >= datetime.now(UTC)-timedelta(hours=hours))
@@ -162,8 +178,10 @@ async def events(session: DB, hours: RiskWindow | None = None, stars: int = Quer
 
 async def event_out(event, session):
     count = await session.scalar(select(func.count(func.distinct(ArticleAnalysis.news_id))).join(SummaryArticle).join(NewsItem).where(
-        SummaryArticle.summary_id == event.id, ArticleAnalysis.content_hash == NewsItem.content_hash))
-    return {'risk_stars': event.stars, 'article_count': count, **{key: getattr(event, key) for key in ('id', 'title', 'category', 'entities', 'tags', 'content_kind', 'importance_stars', 'peak_stars', 'result', 'published_at', 'updated_at', 'state', 'analyzed_at', 'revision', 'published_revision', 'error')}}
+        SummaryArticle.summary_id == event.id, SummaryArticle.active.is_(True), ArticleAnalysis.content_hash == NewsItem.content_hash))
+    from alphapulse.models.risk import EventMember
+    membership = await session.get(EventMember, event.id)
+    return {'main_event_id': membership.event_id if membership else None, 'replacement_ids': event.replacement_ids, 'risk_stars': event.stars, 'article_count': count, **{key: getattr(event, key) for key in ('id', 'title', 'category', 'entities', 'tags', 'content_kind', 'importance_stars', 'peak_stars', 'result', 'published_at', 'updated_at', 'state', 'analyzed_at', 'revision', 'published_revision', 'error')}}
 
 
 @router.get('/summaries/{event_id}')
@@ -176,7 +194,11 @@ async def event_detail(event_id: int, session: DB):
         .order_by(SummaryVersion.id.desc()))).all()
     from alphapulse.models.risk import PackageEvidence
     evidence = (await session.scalars(select(PackageEvidence).where(PackageEvidence.summary_id == event_id).order_by(PackageEvidence.id))).all()
-    return success({'evidence': [{'id': e.id, 'version_id': e.version_id, 'kind': e.kind, 'data': e.data, 'fetched_at': e.fetched_at} for e in evidence], 'event': await event_out(event, session), 'history': [analysis_out(r) for r in rows],
+    from alphapulse.models.risk import GroupingVersion, PackageCorrection, EventLink
+    grouping = (await session.scalars(select(GroupingVersion).where(GroupingVersion.analysis_id.in_([r.id for r in rows])).order_by(GroupingVersion.id.desc()))).all()
+    corrections = (await session.scalars(select(PackageCorrection).where(PackageCorrection.input['packages'].contains([{'id':event_id}]) | PackageCorrection.result['package_ids'].contains([event_id])))).all()
+    links = (await session.scalars(select(EventLink).where(EventLink.package_id == event_id))).all()
+    return success({'related_events':[{'id':l.event_id,'reason':l.reason} for l in links], 'corrections':[{'id':c.id,'input':c.input,'result':c.result} for c in corrections], 'grouping_versions':[{'id':g.id,'state':g.state,'result':g.result,'error':g.error} for g in grouping], 'evidence': [{'id': e.id, 'version_id': e.version_id, 'kind': e.kind, 'data': e.data, 'fetched_at': e.fetched_at} for e in evidence], 'event': await event_out(event, session), 'history': [analysis_out(r) for r in rows],
         'versions': [{'id': v.id, 'revision': v.revision, 'state': v.state, 'model': v.model,
         'rules': v.rules, 'result': v.result, 'error': v.error, 'analyzed_at': v.finished_at} for v in versions]})
 
@@ -188,7 +210,13 @@ def analysis_out(row):
 
 
 @router.get('/tasks')
-async def analyses(session: DB, stage: str = Query('grouping', pattern='^(grouping|analysis|outlook)$'), news_id: int | None = None, revision_no: int | None = Query(None, ge=1), failed: bool = False):
+async def analyses(session: DB, stage: str = Query('grouping', pattern='^(grouping|analysis|events|outlook)$'), news_id: int | None = None, revision_no: int | None = Query(None, ge=1), failed: bool = False):
+    if stage == 'events':
+        from alphapulse.models.risk import EventVersion
+        query = select(EventVersion)
+        if failed: query = query.where(EventVersion.state == 'failed')
+        rows = (await session.scalars(query.order_by(EventVersion.id.desc()).limit(100))).all()
+        return success([{'id':r.id, 'state':r.state, 'error':r.error, 'model':r.rules.get('model_config', {}).get('model'), 'input':{'title':f'事件时间线 #{r.event_id}'}, 'result':None} for r in rows])
     if stage == 'outlook':
         query = select(RiskSnapshot)
         if failed: query = query.where(RiskSnapshot.state == 'failed')
@@ -215,7 +243,16 @@ async def analyses(session: DB, stage: str = Query('grouping', pattern='^(groupi
 
 
 @router.post('/tasks/{analysis_id}/retry', status_code=202)
-async def retry(analysis_id: int, session: DB, stage: str = Query('grouping', pattern='^(grouping|analysis|outlook)$')):
+async def retry(analysis_id: int, session: DB, stage: str = Query('grouping', pattern='^(grouping|analysis|events|outlook)$')):
+    if stage == 'events':
+        from alphapulse.models.risk import NewsEvent, EventVersion
+        row = await session.get(EventVersion, analysis_id, with_for_update=True)
+        if row is None or row.state != 'failed': raise HTTPException(409, '仅可重试失败任务')
+        event = await session.get(NewsEvent, row.event_id, with_for_update=True)
+        if event.revision != row.revision or event.published_revision >= row.revision or event.state in ('pending','processing'):
+            raise HTTPException(409, '事件已有新版本或正在处理')
+        event.state = 'pending'; event.due_at = datetime.now(UTC); event.error = None
+        await session.commit(); return success(None)
     if stage == 'outlook':
         row = await session.get(RiskSnapshot, analysis_id, with_for_update=True)
         if row is None or row.state != 'failed': raise HTTPException(409, '仅可重试失败任务')
@@ -246,7 +283,7 @@ async def retry(analysis_id: int, session: DB, stage: str = Query('grouping', pa
 
 @router.get('/news/{news_id}/summaries')
 async def news_summaries(news_id: int, session: DB, revision_no: int | None = Query(None, ge=1)):
-    query = select(NewsSummary).join(SummaryArticle).join(ArticleAnalysis).where(ArticleAnalysis.news_id == news_id)
+    query = select(NewsSummary).join(SummaryArticle).join(ArticleAnalysis).where(ArticleAnalysis.news_id == news_id, SummaryArticle.active.is_(True))
     if revision_no is not None:
         query = query.where(ArticleAnalysis.input['revision_no'].as_integer() == revision_no)
     return success([await event_out(e, session) for e in (await session.scalars(query.distinct())).all()])
@@ -263,3 +300,99 @@ async def briefings(session: DB, page: int = Query(1, ge=1)):
     rows = (await session.scalars(select(RiskSnapshot).where(RiskSnapshot.result['inputs'].is_not(None))
         .order_by(RiskSnapshot.id.desc()).offset((page-1)*20).limit(20))).all()
     return success([{'id': r.id, 'state': r.state, 'result': r.result, 'error': r.error, 'created_at': r.created_at} for r in rows])
+
+
+@router.get('/events')
+async def event_list(session: DB, page: int = Query(1, ge=1), limit: int = Query(20, ge=1, le=100)):
+    from alphapulse.models.risk import NewsEvent
+    rows = (await session.scalars(select(NewsEvent).where(NewsEvent.state != 'retired')
+        .order_by(NewsEvent.updated_at.desc(), NewsEvent.id).offset((page-1)*limit).limit(limit))).all()
+    return success({'items': [{'id': r.id, 'title': r.title, 'state': r.state, 'result': r.result,
+        'revision': r.revision, 'error': r.error, 'updated_at': r.updated_at} for r in rows],
+        'total': await session.scalar(select(func.count()).select_from(NewsEvent).where(NewsEvent.state != 'retired'))})
+
+
+@router.get('/events/{identifier}')
+async def event_timeline(identifier: int, session: DB):
+    from alphapulse.models.risk import NewsEvent, EventMember, EventVersion
+    event = await session.get(NewsEvent, identifier)
+    if event is None: raise HTTPException(404, '事件不存在')
+    packages = (await session.scalars(select(NewsSummary).join(EventMember, EventMember.package_id == NewsSummary.id)
+        .where(EventMember.event_id == identifier))).all()
+    versions = (await session.scalars(select(EventVersion).where(EventVersion.event_id == identifier).order_by(EventVersion.id.desc()))).all()
+    return success({'id': event.id, 'title': event.title, 'state': event.state, 'result': event.result, 'error': event.error,
+        'packages': [await event_out(p, session) for p in packages],
+        'versions': [{'id': v.id, 'revision': v.revision, 'state': v.state, 'result': v.result, 'error': v.error, 'rules': v.rules} for v in versions]})
+
+
+class ReprocessIn(BaseModel):
+    start: datetime
+    end: datetime
+
+    @model_validator(mode='after')
+    def range_valid(self):
+        if self.start.tzinfo is None or self.end.tzinfo is None or self.start >= self.end:
+            raise ValueError('请提供带时区的有效起止时间')
+        return self
+
+
+@router.post('/reprocess/preview')
+async def reprocess_preview(body: ReprocessIn, session: DB):
+    from alphapulse.news_risk.reprocess import preview
+    counts, _ = await preview(session, body.start, body.end)
+    return success(counts)
+
+
+@router.post('/reprocess', status_code=202)
+async def reprocess_start(body: ReprocessIn, session: DB):
+    from alphapulse.news_risk.reprocess import start_job
+    try: result = await start_job(session, body.start, body.end)
+    except ValueError as error: raise HTTPException(409, str(error)) from error
+    return success(result)
+
+
+@router.get('/reprocess')
+async def reprocess_list(session: DB):
+    from alphapulse.models.risk import ReprocessJob
+    rows = (await session.scalars(select(ReprocessJob).order_by(ReprocessJob.id.desc()).limit(20))).all()
+    return success([{'id': r.id, 'state': r.state, 'total': len(r.items), 'completed': r.position, 'failures': r.failures,
+        'created_at': r.created_at} for r in rows])
+
+
+@router.post('/reprocess/{identifier}/cancel')
+async def reprocess_cancel(identifier: int, session: DB):
+    from alphapulse.models.risk import ReprocessJob
+    job = await session.get(ReprocessJob, identifier, with_for_update=True)
+    if job is None: raise HTTPException(404, '任务不存在')
+    if job.state not in ('pending', 'running'): raise HTTPException(409, '任务已经结束')
+    job.state = 'cancelled'; await session.commit(); return success(None)
+
+
+@router.post('/reprocess/{identifier}/retry', status_code=202)
+async def reprocess_retry(identifier: int, session: DB):
+    from sqlalchemy import text
+    from alphapulse.models.risk import ReprocessJob
+    await session.execute(text('SELECT pg_advisory_xact_lock(20261101, 2)'))
+    job = await session.get(ReprocessJob, identifier, with_for_update=True)
+    if job is None or job.state != 'failed': raise HTTPException(409, '仅可重试失败任务')
+    if await session.scalar(select(ReprocessJob.id).where(ReprocessJob.state.in_(['pending', 'running'])).limit(1)):
+        raise HTTPException(409, '已有重整理任务')
+    outlook_ids = {f['id'] for f in job.failures if f['stage'] == 'outlook'}
+    snapshots = (await session.scalars(select(RiskSnapshot).where(RiskSnapshot.id.in_(outlook_ids), RiskSnapshot.state == 'failed',
+        RiskSnapshot.quotes['job_id'].as_integer() == job.id))).all()
+    for snapshot in snapshots: snapshot.quotes = {**snapshot.quotes, 'retry_requested': True}
+    from alphapulse.models.risk import NewsEvent
+    for stage, model in (('analysis', NewsSummary), ('events', NewsEvent)):
+        ids = {f['id'] for f in job.failures if f['stage'] == stage}
+        rows = (await session.scalars(select(model).where(model.id.in_(ids)).order_by(model.id).with_for_update())).all()
+        for row in rows:
+            if row.state == 'failed':
+                row.state = 'pending'; row.due_at = datetime.now(UTC); row.error = None
+    ids = {f['id'] for f in job.failures if f['stage'] == 'grouping'}
+    if ids:
+        job.items = [i for i in job.items if i['id'] in ids]
+        job.position = 0
+    else:
+        job.position = len(job.items)
+    job.failures = []; job.state = 'running'
+    await session.commit(); return success(None)

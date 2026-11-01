@@ -182,6 +182,8 @@ def smoke(build, label):
         print(run('docker', 'exec', '-i', names['api'], 'python', '-',
                   input=(ROOT / 'scripts/smoke_risk.py').read_text()), flush=True)
         print(run('docker', 'exec', '-i', names['api'], 'python', '-',
+                  input=(ROOT / 'scripts/smoke_events.py').read_text()), flush=True)
+        print(run('docker', 'exec', '-i', names['api'], 'python', '-',
                   input=(ROOT / 'scripts/smoke_calendar.py').read_text()), flush=True)
         output = run('docker', 'exec', '-i', '-e', 'SMOKE_WEB=' + names['web'], names['api'], 'python', '-',
                      input=(ROOT / 'scripts/smoke_app.py').read_text())

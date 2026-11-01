@@ -56,7 +56,7 @@ def mock_enable(risk, monkeypatch, valid=True, verification='reported', directio
     monkeypatch.setattr(pipeline, 'configuration', AsyncMock(return_value=(provider, 'rules', {}, 'fingerprint')))
     async def complete(provider, system, payload, schema):
         if schema is pipeline.Grouping:
-            return pipeline.Grouping( reason='财经维护通知', events=[pipeline.Match(event_id=None,
+            return pipeline.Grouping( reason='财经维护通知', packages=[pipeline.Match(package_id=None,
                 group_key='maintenance', title='维护', category='company', entities=['示例公司'], fact='维护',
                 evidence=payload['article']['summary'] if valid else '捏造损失', urgent=False, tags=['维护'], content_kind='statement')]), {}
         if schema is risk.Outlook:
@@ -64,7 +64,7 @@ def mock_enable(risk, monkeypatch, valid=True, verification='reported', directio
                 counter_factors='不足', uncertainty='不足', event_ids=[]) for h in (24, 48, 168)]), {}
         article = payload['articles'][0]
         result = pipeline.EventResult(**{**label(risk).model_dump(exclude={'event_id', 'same_event_as', 'evidence', 'stars'}), 'verification': verification,
-            'direction': direction}, facts='维护', timeline='维护',
+            'direction': direction}, timeline_points=[dict(occurred_at=None, time_precision='unknown', time_text='Unknown', reported_at=None, description='Synthetic', verification='insufficient', evidence_refs=[{'article_id':1,'quote':article['summary']}])], facts='维护', timeline='维护',
             asset_impacts='未知', risk_stars=0, importance_stars=3, opinions='待观察', counter_evidence='不足', watchpoints='恢复', claims=[pipeline.Claim(statement='维护', verdict='insufficient', evidence_refs=[])], related_packages=[], excluded_article_ids=[],
             evidence_refs=[pipeline.Evidence(article_id=1, quote=article['summary'])])
         return result, {}
@@ -207,10 +207,10 @@ def test_long_sources_are_split_without_losing_text(risk, monkeypatch):
     article = {'id': 1, 'title': '安全事件', 'summary': '', 'content': '安'*16000}
     seen = []
     async def complete(provider, system, payload, schema):
-        if schema is pipeline.Extraction:
+        if payload['task'] == 'extract':
             seen.append(payload['content'])
-            return pipeline.Extraction(facts='事实', evidence_refs=[pipeline.Evidence(article_id=1, quote=payload['content'][:1])]), {}
-        return pipeline.EventResult(**label(risk).model_dump(exclude={'event_id', 'same_event_as', 'evidence', 'stars'}), facts='事实', timeline='时间', asset_impacts='资产',
+            return schema(facts='事实', evidence_refs=[pipeline.Evidence(article_id=1, quote=payload['content'][:1])]), {}
+        return pipeline.EventResult(**label(risk).model_dump(exclude={'event_id', 'same_event_as', 'evidence', 'stars'}), timeline_points=[dict(occurred_at=None, time_precision='unknown', time_text='Unknown', reported_at=None, description='Synthetic', verification='insufficient', evidence_refs=[{'article_id':1,'quote':'安全事件'}])], facts='事实', timeline='时间', asset_impacts='资产',
             risk_stars=5, importance_stars=5, opinions='待观察', counter_evidence='不足', watchpoints='恢复', claims=[pipeline.Claim(statement='事件', verdict='insufficient', evidence_refs=[])], related_packages=[], excluded_article_ids=[], evidence_refs=[pipeline.Evidence(article_id=1, quote='安全事件')]), {}
     monkeypatch.setattr(pipeline, 'complete', complete)
     result, _ = asyncio.run(pipeline.summarize_articles(provider, 'rules', [article], {'id': 1, 'fact': 'Synthetic event'}))
@@ -297,7 +297,7 @@ def test_completed_version_recovers_a_previously_stuck_pending_package(risk, mon
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
     from alphapulse.news_risk import worker
-    event = SimpleNamespace(id=1, revision=3, published_revision=3, state='pending', error='Old failure',
+    event = SimpleNamespace(review_config=None, result=None, id=1, revision=3, published_revision=3, state='pending', error='Old failure',
         dirty_since=datetime.now(UTC), title='Statement', fact='Statement', category='politics', tags=['Statement'], content_kind='statement')
     session = AsyncMock()
     session.__aenter__.return_value = session

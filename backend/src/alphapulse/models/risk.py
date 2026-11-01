@@ -16,6 +16,9 @@ class RiskSettings(Base):
     second_model: Mapped[str] = mapped_column(String(128), default='')
     third_provider_id: Mapped[int | None] = mapped_column(ForeignKey('ai_providers.id'))
     third_model: Mapped[str] = mapped_column(String(128), default='')
+    reasoning_effort: Mapped[str | None] = mapped_column(String(16))
+    second_reasoning_effort: Mapped[str | None] = mapped_column(String(16))
+    third_reasoning_effort: Mapped[str | None] = mapped_column(String(16))
     grouping_skill_id: Mapped[int | None] = mapped_column(ForeignKey('skill_nodes.id'))
     analysis_skill_id: Mapped[int | None] = mapped_column(ForeignKey('skill_nodes.id'))
     outlook_skill_id: Mapped[int | None] = mapped_column(ForeignKey('skill_nodes.id'))
@@ -91,6 +94,8 @@ class NewsSummary(Base):
     tags: Mapped[list] = mapped_column(JSONB, default=list)
     content_kind: Mapped[str] = mapped_column(String(32), default='report')
     fact: Mapped[str] = mapped_column(Text, default='')
+    replacement_ids: Mapped[list] = mapped_column(JSONB, default=list)
+    review_config: Mapped[dict | None] = mapped_column(JSONB)
     stars: Mapped[int] = mapped_column(Integer, default=0)
     peak_stars: Mapped[int] = mapped_column(Integer, default=0)
     result: Mapped[dict | None] = mapped_column(JSONB)
@@ -112,6 +117,8 @@ class SummaryArticle(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     summary_id: Mapped[int] = mapped_column(ForeignKey('news_ai_summaries.id'), index=True)
     analysis_id: Mapped[int] = mapped_column(ForeignKey('news_ai_article_analyses.id'), index=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    unit: Mapped[dict | None] = mapped_column(JSONB)
 
 
 class SummaryVersion(Base):
@@ -141,3 +148,78 @@ class PackageEvidence(Base):
     reference: Mapped[str] = mapped_column(Text)
     data: Mapped[dict] = mapped_column(JSONB)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class NewsEvent(Base):
+    __tablename__ = 'news_ai_events'
+    published_revision: Mapped[int] = mapped_column(Integer, default=0)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    title: Mapped[str] = mapped_column(Text)
+    state: Mapped[str] = mapped_column(String(16), default='pending')
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    result: Mapped[dict | None] = mapped_column(JSONB)
+    error: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    review_config: Mapped[dict | None] = mapped_column(JSONB)
+
+
+class EventMember(Base):
+    __tablename__ = 'news_ai_event_members'
+    package_id: Mapped[int] = mapped_column(ForeignKey('news_ai_summaries.id'), primary_key=True)
+    event_id: Mapped[int] = mapped_column(ForeignKey('news_ai_events.id'), index=True)
+    reason: Mapped[str] = mapped_column(Text)
+
+
+class EventVersion(Base):
+    __tablename__ = 'news_ai_event_versions'
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    event_id: Mapped[int] = mapped_column(ForeignKey('news_ai_events.id'), index=True)
+    revision: Mapped[int] = mapped_column(Integer)
+    input: Mapped[dict] = mapped_column(JSONB)
+    result: Mapped[dict | None] = mapped_column(JSONB)
+    rules: Mapped[dict] = mapped_column(JSONB)
+    state: Mapped[str] = mapped_column(String(16))
+    error: Mapped[str | None] = mapped_column(Text)
+    usage: Mapped[dict | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class GroupingVersion(Base):
+    __tablename__ = 'news_ai_grouping_versions'
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    analysis_id: Mapped[int] = mapped_column(ForeignKey('news_ai_article_analyses.id'), index=True)
+    input: Mapped[dict] = mapped_column(JSONB)
+    result: Mapped[dict | None] = mapped_column(JSONB)
+    rules: Mapped[dict | None] = mapped_column(JSONB)
+    state: Mapped[str] = mapped_column(String(16))
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PackageCorrection(Base):
+    __tablename__ = 'news_ai_package_corrections'
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    fingerprint: Mapped[str] = mapped_column(String(64), unique=True)
+    input: Mapped[dict] = mapped_column(JSONB)
+    result: Mapped[dict] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ReprocessJob(Base):
+    __tablename__ = 'news_ai_reprocess_jobs'
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    state: Mapped[str] = mapped_column(String(16), default='pending', index=True)
+    settings: Mapped[dict] = mapped_column(JSONB)
+    items: Mapped[list] = mapped_column(JSONB)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    failures: Mapped[list] = mapped_column(JSONB, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class EventLink(Base):
+    __tablename__ = 'news_ai_event_links'
+    package_id: Mapped[int] = mapped_column(ForeignKey('news_ai_summaries.id'), primary_key=True)
+    event_id: Mapped[int] = mapped_column(ForeignKey('news_ai_events.id'), primary_key=True)
+    reason: Mapped[str] = mapped_column(Text)
+    package_revision: Mapped[int] = mapped_column(Integer)

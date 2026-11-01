@@ -119,19 +119,20 @@ def test_research_stops_after_eight_tool_rounds_and_retains_failures(trading, mo
 @pytest.mark.parametrize('mode,created', [('unchanged', False), ('ordinary_wait', False), ('ordinary_due', True), ('urgent_wait', False), ('urgent_due', True), ('expired', True)])
 def test_reading_updates_only_for_changes_and_respects_aggregation(trading, monkeypatch, mode, created):
     from datetime import UTC, datetime, timedelta
-    from alphapulse.news_risk import worker
+    from alphapulse.news_risk import worker, events
     now = datetime.now(UTC)
     event = SimpleNamespace(id=1, published_revision=2, importance_stars=5 if mode.startswith('urgent') else 3,
         category='politics', tags=['政策'], result={'summary': '当前说明'}, analyzed_at=now)
-    semantic = [{'id': event.id, 'importance_stars': event.importance_stars, 'result': event.result}]
+    semantic = [{'kind': 'package', 'id': event.id, 'importance_stars': event.importance_stars, 'result': event.result}]
     fingerprint = worker.briefing.fingerprint(semantic, {}) if mode == 'unchanged' else 'previous'
     latest = SimpleNamespace(created_at=now-timedelta(seconds=30 if mode == 'urgent_wait' else 120), quotes={'fingerprint': fingerprint})
     if mode in ('ordinary_due', 'expired'): latest.quotes['dirty_since'] = (now-timedelta(minutes=16)).isoformat()
     session = AsyncMock()
     session.__aenter__.return_value = session
     session.get.return_value = SimpleNamespace(enabled=True)
-    session.scalar.side_effect = [latest, None]
+    session.scalar.side_effect = [latest, None, None]
     session.scalars.return_value = SimpleNamespace(all=lambda: [] if mode == 'expired' else [event])
+    monkeypatch.setattr(events, 'reading_inputs', AsyncMock(return_value=[] if mode == 'expired' else [{'kind': 'package', 'id': event.id, 'revision': event.published_revision, 'importance_stars': event.importance_stars, 'category': event.category, 'tags': event.tags, 'result': event.result}]))
     added = []
     session.add = added.append
     monkeypatch.setattr(worker, 'SessionLocal', lambda: session)
@@ -199,9 +200,11 @@ def test_reposts_do_not_trigger_advanced_calls_but_review_changes_do(trading, mo
     if change == 'fact': updated[0]['result']['facts'] = '官方修订说明'
     assert (briefing.semantic_packages(updated) != semantic) is expected
     session = AsyncMock(); session.__aenter__.return_value = session
-    session.get.return_value = SimpleNamespace(enabled=True); session.scalar.side_effect = [latest, None]
+    session.get.return_value = SimpleNamespace(enabled=True); session.scalar.side_effect = [latest, None, None]
     session.scalars.return_value = SimpleNamespace(all=lambda: [SimpleNamespace(id=1, published_revision=2,
         importance_stars=5, category='politics', tags=[], result=updated[0]['result'], analyzed_at=now)])
+    from alphapulse.news_risk import events
+    monkeypatch.setattr(events, 'reading_inputs', AsyncMock(return_value=[{**p, 'kind': 'package', 'category': 'politics', 'tags': []} for p in updated]))
     session.add = lambda value: None
     generated = AsyncMock(return_value={'reading': [], 'synthesis': None, 'usage': []})
     monkeypatch.setattr(worker, 'SessionLocal', lambda: session)

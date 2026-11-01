@@ -3,11 +3,19 @@ import type { SkillNode } from "@@/apis/skills/type"
 import type * as Risk from "@/common/apis/risk/type"
 import type { Provider } from "@/common/apis/settings/type"
 import { listSkillTreeApi } from "@@/apis/skills"
+import { EFFORTS } from "@@/constants/ai"
 import { formatTime } from "@@/utils/text"
 import * as api from "@/common/apis/risk"
 import { listProviderModelsApi, listProvidersApi } from "@/common/apis/settings"
 import { useUserStore } from "@/pinia/stores/user"
 
+import EventResearch from "./components/EventResearch.vue"
+
+const eventResearch = ref<InstanceType<typeof EventResearch> | null>(null)
+function openReading(row: Risk.Reading) {
+  if (row.kind === "event") void eventResearch.value?.open(row.id)
+  else void openEvent(row.id)
+}
 const user = useUserStore()
 const route = useRoute()
 const hours = ref(72)
@@ -28,8 +36,8 @@ const thirdModels = ref<string[]>([])
 const thirdError = ref("")
 let thirdSequence = 0
 const readingRows = computed(() => overview.value?.briefing?.reading.slice((readingPage.value - 1) * 20, readingPage.value * 20) ?? [])
-function readingTitle(id: number) {
-  return overview.value?.briefing?.inputs.find(p => p.id === id)?.result.title ?? `包 #${id}`
+function readingTitle(id: number, kind = "package") {
+  return overview.value?.briefing?.inputs.find(p => p.id === id && (p.kind ?? "package") === kind)?.result.title ?? `包 #${id}`
 }
 const q = ref("")
 const range = ref<[Date, Date] | null>(null)
@@ -141,13 +149,13 @@ async function loadThirdModels() {
 }
 async function createTemplates() {
   const version = user.sessionVersion
-  const value = await api.createNewsSkillTemplatesApi()
+  const value = await api.createNewsSkillTemplatesApi(true)
   if (version !== user.sessionVersion || !settings.value) return
   Object.assign(settings.value, value)
   const skills = await listSkillTreeApi()
   if (version !== user.sessionVersion) return
   newsSkills.value = skills.filter(s => s.scope === "news" && s.kind === "skill")
-  ElMessage.success("已创建草稿，请前往 Skills 页面编辑并发布")
+  ElMessage.success("默认新闻 Skills 已准备好，请前往 Skills 页面审阅并发布")
 }
 async function save(enable: boolean) {
   if (!settings.value) return
@@ -268,7 +276,7 @@ onBeforeUnmount(() => {
         <div v-for="level in [5, 4, 3, 2, 1]" :key="level">
           <div class="text-amber-600">
             <span :title="levels[level]">{{ starText(level) }}</span>
-          </div><strong class="text-2xl">{{ overview.counts[String(level)] ?? 0 }}</strong><span class="ml-1 text-sm text-slate-500">事件</span>
+          </div><strong class="text-2xl">{{ overview.counts[String(level)] ?? 0 }}</strong><span class="ml-1 text-sm text-slate-500">包</span>
         </div>
       </div>
       <p class="mb-0 text-sm text-slate-500">
@@ -276,7 +284,7 @@ onBeforeUnmount(() => {
           失败 {{ overview.coverage.failed }}
         </el-button>
       </p>
-      <p>事件总结：完成 {{ overview.stage2.done ?? 0 }} · 待更新 {{ overview.stage2.pending ?? 0 }} · 处理中 {{ overview.stage2.processing ?? 0 }} · 失败 {{ overview.stage2.failed ?? 0 }}</p>
+      <p>包研判：完成 {{ overview.stage2.done ?? 0 }} · 待更新 {{ overview.stage2.pending ?? 0 }} · 处理中 {{ overview.stage2.processing ?? 0 }} · 失败 {{ overview.stage2.failed ?? 0 }}</p>
       <p v-if="overview.stage3">
         阅读编排：{{ overview.stage3.state === 'processing' ? '处理中' : overview.stage3.state === 'failed' ? '失败' : overview.stage3.pending ? '等待聚合更新' : '已更新' }}
       </p>
@@ -290,19 +298,19 @@ onBeforeUnmount(() => {
         近72小时完整阅读清单 · 按优先级排序
       </template>
       <template v-if="overview?.briefing">
-        <p>生成于 {{ formatTime(overview.briefing.as_of) }} · 共 {{ overview.briefing.reading.length }} 个重要包</p>
+        <p>生成于 {{ formatTime(overview.briefing.as_of) }} · 共 {{ overview.briefing.reading.length }} 项事件与独立包</p>
         <el-alert v-if="overview.stale" title="阅读稿可能已过期或更新失败，当前保留上次成功结果" type="warning" :closable="false" />
-        <div v-for="(row, index) in readingRows" :key="row.id" class="my-3">
-          <el-button link @click="openEvent(row.id)">
-            {{ (readingPage - 1) * 20 + index + 1 }}. {{ readingTitle(row.id) }}
+        <div v-for="(row, index) in readingRows" :key="`${row.kind}:${row.id}`" class="my-3">
+          <el-button link @click="openReading(row)">
+            {{ (readingPage - 1) * 20 + index + 1 }}. {{ readingTitle(row.id, row.kind) }}
           </el-button>
           <p>{{ row.reason }} · 优先级 {{ row.priority }} · 依据版本 {{ row.revision }}</p>
         </div>
         <el-pagination v-model:current-page="readingPage" :total="overview.briefing.reading.length" :page-size="20" layout="prev, pager, next, total" />
         <p><b>拓展阅读</b></p>
-        <div v-for="row in overview.briefing.expansion" :key="row.id">
-          <el-button link @click="openEvent(row.id)">
-            {{ readingTitle(row.id) }}
+        <div v-for="row in overview.briefing.expansion" :key="`${row.kind}:${row.id}`">
+          <el-button link @click="openReading(row)">
+            {{ readingTitle(row.id, row.kind) }}
           </el-button><p>{{ row.reason }}</p>
         </div>
         <template v-if="overview.briefing.synthesis">
@@ -317,6 +325,7 @@ onBeforeUnmount(() => {
       <el-empty v-else description="暂无阅读稿，请配置三个阶段模型并启用" />
       <el-alert v-if="overview?.error" :title="overview.error" type="warning" :closable="false" />
     </el-card>
+    <EventResearch ref="eventResearch" @package="openEvent" />
     <div class="flex flex-wrap gap-3">
       <el-switch v-model="archive" active-text="历史归档" />
       <el-select v-model="importance" class="w-40">
@@ -375,6 +384,11 @@ onBeforeUnmount(() => {
             接口未返回可选模型，可手动填写模型 ID。
           </p>
         </el-form-item>
+        <el-form-item label="第一阶段思考强度">
+          <el-select v-model="settings.reasoning_effort" class="w-full" clearable :value-on-clear="null" placeholder="跟随接入配置">
+            <el-option v-for="effort in EFFORTS" :key="effort" :value="effort" :label="effort" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="第二阶段接入配置">
           <el-select v-model="settings.second_provider_id" class="w-full">
             <el-option v-for="provider in providers" :key="provider.id" :value="provider.id" :label="provider.name" />
@@ -391,6 +405,11 @@ onBeforeUnmount(() => {
             {{ secondModelsError }}
           </p>
         </el-form-item>
+        <el-form-item label="第二阶段思考强度">
+          <el-select v-model="settings.second_reasoning_effort" class="w-full" clearable :value-on-clear="null" placeholder="跟随接入配置">
+            <el-option v-for="effort in EFFORTS" :key="effort" :value="effort" :label="effort" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="第三阶段高级模型接入配置">
           <el-select v-model="settings.third_provider_id" class="w-full">
             <el-option v-for="provider in providers" :key="provider.id" :value="provider.id" :label="provider.name" />
@@ -403,13 +422,21 @@ onBeforeUnmount(() => {
             刷新列表
           </el-button><p>{{ thirdError }}</p>
         </el-form-item>
+        <el-form-item label="第三阶段思考强度">
+          <el-select v-model="settings.third_reasoning_effort" class="w-full" clearable :value-on-clear="null" placeholder="跟随接入配置">
+            <el-option v-for="effort in EFFORTS" :key="effort" :value="effort" :label="effort" />
+          </el-select>
+        </el-form-item>
+        <p class="text-sm text-slate-500">
+          思考强度留空时跟随接入配置；接入配置也未设置时，由模型默认处理。不支持所选强度的模型会在测试启用时明确报错。
+        </p>
         <el-form-item v-for="field in (['grouping_skill_id', 'analysis_skill_id', 'outlook_skill_id'] as const)" :key="field" :label="({ grouping_skill_id: '初筛归并 Skill', analysis_skill_id: '包核验 Skill', outlook_skill_id: '高级阅读编排 Skill' })[field]">
           <el-select v-model="settings[field]" class="w-full">
             <el-option v-for="skill in newsSkills" :key="skill.id" :value="skill.id" :label="`${skill.path} · ${skill.published_version_no ? `已发布 v${skill.published_version_no}` : '未发布'}`" />
           </el-select>
         </el-form-item>
         <el-button @click="createTemplates">
-          创建默认新闻 Skills 草稿
+          生成/更新默认新闻 Skills 草稿
         </el-button>
         <router-link to="/skills">
           编辑与发布 Skills
@@ -423,11 +450,30 @@ onBeforeUnmount(() => {
         </el-button>
       </el-form>
     </el-dialog>
-    <el-drawer v-model="showDetail" title="事件证据与评级历史" size="min(760px, 100vw)">
+    <el-drawer v-model="showDetail" title="新闻包证据与评级历史" size="min(760px, 100vw)">
       <template v-if="detail">
+        <el-button v-if="detail.event.main_event_id" link @click="eventResearch?.open(detail.event.main_event_id)">
+          查看主事件时间线
+        </el-button>
+        <el-button v-for="id in detail.event.replacement_ids" :key="id" link @click="openEvent(id)">
+          查看纠正后的包 #{{ id }}
+        </el-button>
         <h2 class="text-lg">
           {{ detail.event.title }}
         </h2>
+        <div v-for="link in detail.related_events" :key="link.id">
+          <el-button link @click="eventResearch?.open(link.id)">
+            关联事件 #{{ link.id }}
+          </el-button> {{ link.reason }}
+        </div>
+        <details v-if="detail.corrections?.length">
+          <summary>分包纠正历史</summary><pre v-for="item in detail.corrections" :key="item.id" class="whitespace-pre-wrap break-all">{{ item.result }}</pre>
+        </details>
+        <details v-if="detail.grouping_versions?.length">
+          <summary>Luna 分包版本</summary><p v-for="item in detail.grouping_versions" :key="item.id">
+            #{{ item.id }} · {{ item.state }} {{ item.error }}
+          </p>
+        </details>
         <template v-if="detail.event.result">
           <p>{{ detail.event.result.summary }}</p><p><b>事实：</b>{{ detail.event.result.facts }}</p><p><b>时间线：</b>{{ detail.event.result.timeline }}</p>
           <p><b>资产影响：</b>{{ detail.event.result.asset_impacts }}</p><p><b>相关意见：</b>{{ detail.event.result.opinions }}</p>
@@ -471,7 +517,7 @@ onBeforeUnmount(() => {
     </el-drawer>
     <el-drawer v-model="showFailures" title="失败任务（最近100条）" size="min(700px, 100vw)">
       <el-select v-model="taskStage">
-        <el-option label="文章初筛" value="grouping" /><el-option label="事件总结" value="analysis" /><el-option label="市场综述" value="outlook" />
+        <el-option label="文章初筛" value="grouping" /><el-option label="包研判" value="analysis" /><el-option label="事件时间线" value="events" /><el-option label="市场综述" value="outlook" />
       </el-select>
       <div v-for="item in failures" :key="item.id" class="mb-4">
         <b>{{ item.input.title }}</b><p>{{ item.error }}</p><el-button @click="retry(item.id)">

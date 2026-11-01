@@ -739,3 +739,100 @@ test("创建新闻 Skills 后刷新列表，旧会话响应不能覆盖新会话
   assert.equal(page.newsSkills.value[0].id, 2)
   assert.equal(notifications, 0)
 })
+
+test("三阶段思考强度独立保存，重建模板显式请求新版草稿", async () => {
+  let saved: Record<string, unknown> = {}
+  let refresh: unknown
+  const config = { enabled: false, model: "luna", reasoning_effort: null, second_reasoning_effort: null, third_reasoning_effort: null }
+  const load = moduleLoader({
+    "@/common/apis/risk": {
+      saveRiskSettingsApi: async (data: Record<string, unknown>) => saved = data,
+      getRiskOverviewApi: async () => ({ coverage: {}, counts: {} }),
+      listRiskEventsApi: async () => ({ items: [], total: 0 }),
+      createNewsSkillTemplatesApi: async (value: unknown) => {
+        refresh = value
+        return { grouping_skill_id: 1, analysis_skill_id: 2, outlook_skill_id: 3 }
+      }
+    },
+    "@@/apis/skills": { listSkillTreeApi: async () => [] },
+    "@/common/apis/settings": {},
+    "@/pinia/stores/user": { useUserStore: () => ({ sessionVersion: 1 }) }
+  }, globals)
+  const page = load("@/pages/home/index.vue").default.setup({}, { expose() {} })
+  page.settings.value = { ...config, reasoning_effort: "low", second_reasoning_effort: "high", third_reasoning_effort: "xhigh" }
+  await page.save(false)
+  assert.equal(saved.reasoning_effort, "low")
+  assert.equal(saved.second_reasoning_effort, "high")
+  assert.equal(saved.third_reasoning_effort, "xhigh")
+  page.settings.value.second_reasoning_effort = null
+  await page.save(false)
+  assert.equal(saved.reasoning_effort, "low")
+  assert.equal(saved.second_reasoning_effort, null)
+  assert.equal(saved.third_reasoning_effort, "xhigh")
+  await page.createTemplates()
+  assert.equal(refresh, true)
+  assert.equal(page.settings.value.analysis_skill_id, 2)
+})
+
+test("事件详情忽略旧请求与旧会话，失败可重试", async () => {
+  const user = vue.reactive({ sessionVersion: 1 })
+  const pending: ReturnType<typeof Promise.withResolvers>[] = []
+  const load = moduleLoader({
+    "@/pinia/stores/user": { useUserStore: () => user },
+    "@/common/apis/risk": { getNewsEventApi: () => {
+      const request = Promise.withResolvers()
+      pending.push(request)
+      return request.promise
+    } },
+    "@@/utils/text": { formatTime: (value: string) => value }
+  }, globals)
+  const page = load("@/pages/home/components/EventResearch.vue").default.setup({}, { expose() {}, emit() {} })
+  const first = page.open(1)
+  const second = page.open(2)
+  pending[1].resolve({ id: 2 })
+  await second
+  pending[0].reject(new Error("Old failure"))
+  await first
+  assert.equal(page.detail.value.id, 2)
+  assert.equal(page.detailError.value, false)
+  const failed = page.open(3)
+  pending[2].reject(new Error("Failed"))
+  await failed
+  assert.equal(page.detailError.value, true)
+  const retry = page.open(3)
+  user.sessionVersion++
+  await vue.nextTick()
+  pending[3].resolve({ id: 3 })
+  await retry
+  assert.equal(page.detail.value, null)
+  assert.equal(page.opened.value, false)
+})
+
+test("重整理预览的旧会话完成不能解除新操作的忙碌状态", async () => {
+  const user = vue.reactive({ sessionVersion: 1 })
+  const pending: ReturnType<typeof Promise.withResolvers>[] = []
+  const load = moduleLoader({
+    "@/pinia/stores/user": { useUserStore: () => user },
+    "@/common/apis/risk": { previewReprocessApi: () => {
+      const request = Promise.withResolvers()
+      pending.push(request)
+      return request.promise
+    } },
+    "@@/utils/text": { formatTime: (value: string) => value }
+  }, globals)
+  const page = load("@/pages/home/components/EventResearch.vue").default.setup({}, { expose() {}, emit() {} })
+  page.range.value = [new Date("2026-11-01"), new Date("2026-11-02")]
+  await vue.nextTick()
+  const old = page.inspect()
+  user.sessionVersion++
+  await vue.nextTick()
+  const current = page.inspect()
+  pending[0].resolve({ articles: 1 })
+  await old
+  assert.equal(page.busy.value, true)
+  assert.equal(page.preview.value, null)
+  pending[1].resolve({ articles: 2 })
+  await current
+  assert.equal(page.busy.value, false)
+  assert.equal(page.preview.value.articles, 2)
+})
