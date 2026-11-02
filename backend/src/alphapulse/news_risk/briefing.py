@@ -65,7 +65,9 @@ async def generate(provider, system, inputs, ranking_only=False, rankings=None):
     pending = list(inputs) if rankings is None else []
     if rankings is not None:
         reading = rankings
-        notes = [json.dumps({'packages': inputs, 'ranking': rankings}, ensure_ascii=False, default=str)]
+        by_id = {(r.get('kind', 'package'), r['id'], r['revision']): r for r in rankings}
+        notes = [json.dumps({'package': p, 'ranking': by_id[(p.get('kind', 'package'), p['id'], p['revision'])]},
+            ensure_ascii=False, default=str) for p in inputs]
     while pending:
         batch = []
         while pending and fits_context(provider, system, {'task': 'ranking', 'packages': [*batch, pending[0]]}, Ranked):

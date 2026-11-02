@@ -116,3 +116,21 @@ def test_ranking_only_skips_synthesis_and_synthesis_reuses_priority(trading,monk
     result=asyncio.run(briefing.generate(provider,'rules',inputs,rankings=ranked['reading']))
     assert calls==['ranking','synthesis']
     assert result['synthesis']['references']==ranked['reading']
+
+
+def test_large_synthesis_compacts_package_notes_in_batches(trading,monkeypatch):
+    import json
+    from alphapulse.news_risk import briefing
+    inputs=[{'id':i,'revision':1,'importance_stars':3,'result':{'summary':'x'*800}} for i in range(3)]
+    rankings=[{'kind':'package','id':i,'revision':1,'priority':50,'reason':'Read'} for i in range(3)]
+    calls=[]
+    def fits(provider,system,payload,schema): return len(json.dumps(payload)) < 1600
+    async def complete(provider,system,payload,schema):
+        calls.append(payload['task'])
+        if schema is briefing.Notes: return schema(notes='Compacted'),{}
+        trend={'summary':'Unknown','conditions':'Unknown','counter_evidence':'Unknown','watchpoints':'Unknown'}
+        return schema(summary='Synthetic',market='Unknown',short_term=trend,medium_term=trend,references=[]),{}
+    monkeypatch.setattr(briefing,'fits_context',fits);monkeypatch.setattr(briefing,'complete',complete)
+    result=asyncio.run(briefing.generate(N(),'rules',inputs,rankings=rankings))
+    assert calls==['synthesis_notes']*3+['synthesis']
+    assert len(result['reading'])==3
