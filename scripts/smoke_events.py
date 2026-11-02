@@ -5,7 +5,9 @@ import os
 from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import urlparse
-from sqlalchemy import select, func, delete
+import httpx
+from fastapi import FastAPI
+from sqlalchemy import select, func, delete, null
 from alphapulse.core.db import SessionLocal, engine
 from alphapulse.models import AiProvider, NewsItem, SkillNode, SkillVersion
 from alphapulse.models.risk import NewsSummary, ArticleAnalysis, SummaryArticle, RiskSettings, NewsEvent, EventMember, EventVersion, ReprocessJob, PackageCorrection, GroupingVersion, SummaryVersion, PackageEvidence, RiskSnapshot, EventLink
@@ -50,6 +52,38 @@ async def main():
         session.add(withdrawn); await session.flush()
         session.add(EventMember(package_id=withdrawn.id,event_id=event_id,reason='Previous member'))
         await session.commit()
+    async with SessionLocal() as session:
+        nested = await session.begin_nested()
+        await session.execute(NewsEvent.__table__.update().where(NewsEvent.id == event_id).values(result=None))
+        await session.execute(NewsSummary.__table__.update().where(NewsSummary.id.in_(package_ids)).values(state='pending'))
+        for empty in (None, null()):
+            session.add(NewsSummary(title='Unreviewed',fact='Pending',category='security',entities=[],
+                published_at=now,updated_at=now,changed_at=now,due_at=now,state='pending',result=empty))
+            session.add(NewsEvent(title='Unreviewed',updated_at=now,due_at=now,state='pending',result=empty))
+        for empty in (None, null(), {'inputs':None}):
+            session.add(RiskSnapshot(state='done',result=empty,quotes={},model='synthetic'))
+        await session.flush()
+        inputs = await events.reading_inputs(session,now-timedelta(hours=72))
+        assert len(briefing.semantic_packages(inputs)) == 2
+        assert {(p['kind'],p['id']) for p in inputs} == {('package',i) for i in package_ids}
+        from alphapulse.api import risk as api
+        app = FastAPI()
+        app.include_router(api.router)
+        app.dependency_overrides[api.require_admin] = lambda: None
+        app.dependency_overrides[api.get_session] = lambda: session
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app),base_url='http://ci') as client:
+            for hours in (24,48,72,168):
+                response = await client.get('/api/risk/overview',params={'hours':hours})
+                assert response.status_code == 200, response.text
+                data = response.json()['data']
+                assert data['briefing'] is None and data['stale']
+                assert sum(data['counts'].values()) == 2
+            response = await client.get('/api/risk/summaries')
+            assert response.status_code == 200, response.text
+            data = response.json()['data']
+            assert data['total'] == 2 and {p['id'] for p in data['items']} == set(package_ids)
+        await nested.rollback()
+        print('Reading API: SQL NULL and JSON null results excluded; pending events preserve independent packages')
     async def complete(provider,system,payload,schema):
         points=[]
         for p in payload['packages']:

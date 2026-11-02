@@ -175,8 +175,8 @@ async def coverage(session):
 async def overview(session: DB, hours: RiskWindow = RiskWindow.DAY):
     now = datetime.now(UTC); cutoff = now - timedelta(hours=hours)
     counts = dict((await session.execute(select(NewsSummary.importance_stars, func.count()).where(
-        NewsSummary.updated_at >= cutoff, NewsSummary.result.is_not(None), NewsSummary.replacement_ids == [], NewsSummary.state != 'withdrawn').group_by(NewsSummary.importance_stars))).all())
-    snapshot = await session.scalar(select(RiskSnapshot).where(RiskSnapshot.state == 'done', RiskSnapshot.result['inputs'].is_not(None)).order_by(RiskSnapshot.id.desc()).limit(1))
+        NewsSummary.updated_at >= cutoff, func.jsonb_typeof(NewsSummary.result) == 'object', NewsSummary.replacement_ids == [], NewsSummary.state != 'withdrawn').group_by(NewsSummary.importance_stars))).all())
+    snapshot = await session.scalar(select(RiskSnapshot).where(RiskSnapshot.state == 'done', func.jsonb_typeof(RiskSnapshot.result['inputs']) == 'array').order_by(RiskSnapshot.id.desc()).limit(1))
     last = await session.scalar(select(RiskSnapshot).order_by(RiskSnapshot.id.desc()).limit(1))
     scenario = None
     stage2 = dict((await session.execute(select(NewsSummary.state, func.count()).group_by(NewsSummary.state))).all())
@@ -211,7 +211,7 @@ async def overview(session: DB, hours: RiskWindow = RiskWindow.DAY):
 async def events(session: DB, hours: RiskWindow | None = None, stars: int = Query(0, ge=0, le=5),
                  tag: str = '', importance: int = Query(0, ge=0, le=5), category: str = '', asset: str = '', q: str = '', start: datetime | None = None, end: datetime | None = None,
                  page: int = Query(1, ge=1), limit: int = Query(20, ge=1, le=100)):
-    conditions = [NewsSummary.replacement_ids == [], NewsSummary.state != 'withdrawn', NewsSummary.stars >= stars, NewsSummary.result.is_not(None)]
+    conditions = [NewsSummary.replacement_ids == [], NewsSummary.state != 'withdrawn', NewsSummary.stars >= stars, func.jsonb_typeof(NewsSummary.result) == 'object']
     if importance: conditions.append(NewsSummary.importance_stars >= importance)
     if tag: conditions.append(NewsSummary.tags.contains([tag.strip().casefold()]))
     if hours: conditions.append(NewsSummary.updated_at >= datetime.now(UTC)-timedelta(hours=hours))

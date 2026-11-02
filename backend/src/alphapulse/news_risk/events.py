@@ -1,7 +1,7 @@
 """Version-bound package relationships and evidence-backed event timelines."""
 from datetime import UTC, datetime, timedelta
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, func
 from alphapulse.models.risk import NewsSummary, NewsEvent, EventMember, EventVersion, RiskSettings, EventLink
 from alphapulse.core.db import SessionLocal
 from alphapulse.news_risk.pipeline import configuration
@@ -168,9 +168,9 @@ async def organize(target_id=None):
 
 
 async def reading_inputs(session, cutoff):
-    packages = (await session.scalars(select(NewsSummary).where(NewsSummary.result.is_not(None), NewsSummary.replacement_ids == [], NewsSummary.state != 'withdrawn'))).all()
+    packages = (await session.scalars(select(NewsSummary).where(func.jsonb_typeof(NewsSummary.result) == 'object', NewsSummary.replacement_ids == [], NewsSummary.state != 'withdrawn'))).all()
     memberships = {m.package_id: m.event_id for m in (await session.scalars(select(EventMember))).all()}
-    events = {e.id: e for e in (await session.scalars(select(NewsEvent).where(NewsEvent.result.is_not(None), NewsEvent.state != 'retired'))).all()}
+    events = {e.id: e for e in (await session.scalars(select(NewsEvent).where(func.jsonb_typeof(NewsEvent.result) == 'object', NewsEvent.state != 'retired'))).all()}
     inputs, included = [], set()
     for package in packages:
         if package.updated_at < cutoff: continue
