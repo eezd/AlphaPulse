@@ -163,8 +163,9 @@ def smoke(build, label):
         run('docker', 'run', '-d', '--name', names['db'], *common, '-e', 'POSTGRES_PASSWORD=ci-only',
             '-e', 'POSTGRES_USER=ci', '-e', 'POSTGRES_DB=ci', 'postgres:18-alpine')
         run('docker', 'run', '-d', '--name', names['redis'], *common, 'redis:8-alpine')
-        wait_command('docker', 'exec', names['db'], 'pg_isready', '-U', 'ci', '-d', 'ci')
-        run('docker', 'exec', names['db'], 'psql', '-U', 'ci', '-d', 'ci', '-v', 'ON_ERROR_STOP=1',
+        # The initialization server accepts sockets before the CI database exists.
+        wait_command('docker', 'exec', names['db'], 'pg_isready', '-h', '127.0.0.1', '-U', 'ci', '-d', 'ci')
+        run('docker', 'exec', names['db'], 'psql', '-h', '127.0.0.1', '-U', 'ci', '-d', 'ci', '-v', 'ON_ERROR_STOP=1',
             '-c', 'CREATE EXTENSION IF NOT EXISTS pg_trgm')
         image = build['images']['backend']['local']
         password_hash = run('docker', 'run', '--rm', '--network', 'none', image, 'python', '-c',
