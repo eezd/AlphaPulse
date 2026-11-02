@@ -12,6 +12,10 @@ MONTH_PATTERN = "(?:" + "|".join(MONTHS) + ")"
 MOVEMENT = r"(increased|rose|advanced|edged up|moved up|declined|decreased|fell|edged down|moved down)\s+([\d.]+)\s*percent"
 
 
+class ArchiveMissing(ValueError):
+    """A valid official index does not list a report for the requested date."""
+
+
 @dataclass(frozen=True)
 class Announcement:
     at: datetime

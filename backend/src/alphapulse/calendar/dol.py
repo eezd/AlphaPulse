@@ -6,7 +6,7 @@ from urllib.parse import urljoin, urlparse
 
 from parsel import Selector
 
-from alphapulse.calendar.archives import Announcement, publication_time
+from alphapulse.calendar.archives import Announcement, ArchiveMissing, publication_time
 from alphapulse.calendar.parsers import EASTERN, MONTHS, Scheduled, compact
 
 SCHEDULE = "https://oui.doleta.gov/unemploy/archive.asp"
@@ -61,7 +61,7 @@ def archive_links(body: str, start: date, end: date) -> list[str]:
         if start <= day <= end:
             links.append(url)
     if not links:
-        raise ValueError("DOL 归档未列出所选范围的报告，历史覆盖尚未确认")
+        raise ArchiveMissing("DOL 归档未列出所选范围的报告，历史覆盖尚未确认")
     return list(dict.fromkeys(links))
 
 

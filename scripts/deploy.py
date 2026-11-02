@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Update the one data-bearing dev instance using verified image digests."""
+"""Update the one data-bearing dev instance using verified image version tags."""
 
 import argparse
 import hashlib
@@ -12,7 +12,8 @@ import time
 
 from ci import IMAGES, ROOT, branch_head, locked, require, run, save
 
-SEARXNG_IMAGE = 'docker.io/searxng/searxng@sha256:f4aa660c54d062dedb268be84e821ea24e39f48c7a496af8dd02cc9eedb93847'
+SEARXNG_IMAGE = 'docker.io/searxng/searxng:2026.10.30-ffa88e3ba'
+SEARXNG_DIGEST = 'sha256:f4aa660c54d062dedb268be84e821ea24e39f48c7a496af8dd02cc9eedb93847'
 
 INSTANCE = Path('/docker/gitea/dev/AlphaPulse')
 SERVICES = ('api', 'web', 'market', 'crawler', 'calendar', 'trader', 'news-risk', 'jin10-calendar', 'searxng')
@@ -91,19 +92,28 @@ def validate_images(build):
     require(re.fullmatch(r'\d{8}-[0-9a-f]{8}', build['version']), 'Invalid development version')
     require(build['version'].endswith(build['commit'][:8]), 'Version does not identify this commit')
     for part, repository in IMAGES.items():
-        image = build['images'][part]['digest']
-        require(re.fullmatch(re.escape(repository) + r'@sha256:[0-9a-f]{64}', image), 'Expected a development image digest')
+        digest = build['images'][part]['digest']
+        require(re.fullmatch(re.escape(repository) + r'@sha256:[0-9a-f]{64}', digest), 'Invalid image identity in build receipt')
+        image = repository + ':' + build['version']
         run('docker', 'pull', image)
         info = json.loads(run('docker', 'image', 'inspect', image))[0]
+        require(digest in info.get('RepoDigests', []), 'Version tag differs from the accepted image')
         labels = info['Config'].get('Labels') or {}
         require(labels.get('org.opencontainers.image.revision') == build['commit'], 'Image revision mismatch')
         require(labels.get('org.opencontainers.image.version') == build['version'], 'Image version mismatch')
         require(info['Architecture'] == 'amd64' and info['Os'] == 'linux', 'Unexpected image architecture')
 
 
+def validate_search_image():
+    info = json.loads(run('docker', 'image', 'inspect', SEARXNG_IMAGE))[0]
+    require(any(ref.rsplit('@', 1)[-1] == SEARXNG_DIGEST for ref in info.get('RepoDigests', [])),
+            'Search version tag differs from the accepted image')
+    return info
+
+
 def compose(directory, release):
     images = directory / 'images.env'
-    images.write_text(''.join(f'ALPHAPULSE_{part.upper()}_IMAGE={release["images"][part]["digest"]}\n' for part in IMAGES))
+    images.write_text(''.join(f'ALPHAPULSE_{part.upper()}_IMAGE={IMAGES[part]}:{release["version"]}\n' for part in IMAGES))
     return ['docker', 'compose', '--project-name', 'alphapulse-dev', '--env-file', str(images),
             '-f', str(directory / 'compose.yml')]
 
@@ -121,10 +131,11 @@ def health(command, build, expected_services=SERVICES):
                 'Service exited, paused or restarted')
         service = container['Config']['Labels']['com.docker.compose.service']
         if service == 'searxng':
-            require(container['Config']['Image'] == SEARXNG_IMAGE, 'Unexpected search image')
+            expected = json.loads(run('docker', 'image', 'inspect', SEARXNG_IMAGE))[0]['Id']
+            require(container['Image'] == expected, 'Unexpected search image')
             continue
         part = 'web' if container['Name'] == '/AlphaPulse-dev' else 'backend'
-        expected = json.loads(run('docker', 'image', 'inspect', build['images'][part]['digest']))[0]['Id']
+        expected = json.loads(run('docker', 'image', 'inspect', IMAGES[part] + ':' + build['version']))[0]['Id']
         require(container['Image'] == expected, 'Running image differs from the accepted digest')
     payload = run('docker', 'exec', 'AlphaPulse-dev-api', 'python', '-c',
                   'import json,urllib.request; print(json.load(urllib.request.urlopen("http://web/api/health"))["data"]["commit"])')
@@ -148,9 +159,10 @@ def deploy(build, directory=INSTANCE):
             return
         validate_images(build)
         run('docker', 'pull', SEARXNG_IMAGE)
+        validate_search_image()
         # Only this read-only schema guard receives the existing application environment.
         print(run('docker', 'run', '--rm', '-i', '--network', 'dev_default', '--env-file', directory / '.env',
-                  build['images']['backend']['digest'], 'python', '-', input=SCHEMA), flush=True)
+                  IMAGES['backend'] + ':' + build['version'], 'python', '-', input=SCHEMA), flush=True)
         previous_file = directory / 'deployment.json'
         previous = json.loads(previous_file.read_text()) if previous_file.exists() else None
         old_compose = (directory / 'compose.yml').read_text() if previous else None
@@ -213,7 +225,7 @@ def deploy(build, directory=INSTANCE):
             if previous:
                 restore(directory, pending)
             raise
-        print('All application services now run the accepted development digests', flush=True)
+        print('All application services now run the accepted development version tags', flush=True)
 
 
 def restore(directory, pending):
@@ -230,7 +242,12 @@ def restore(directory, pending):
         print('Restored preparation state; existing services were retained', flush=True)
         return
     validate_images(previous)
-    (directory / 'compose.yml').write_text(pending['previous_compose'])
+    previous_compose = pending['previous_compose'].replace('docker.io/searxng/searxng@' + SEARXNG_DIGEST, SEARXNG_IMAGE)
+    require(not re.search(r'^\s*image:.*@sha256:', previous_compose, re.M),
+            'Previous Compose contains an unknown digest reference; verify its version tag before recovery')
+    if re.search(r'^  searxng:$', previous_compose, re.M):
+        validate_search_image()
+    (directory / 'compose.yml').write_text(previous_compose)
     command = compose(directory, previous)
     run(*command, 'up', '-d', '--no-build', '--pull', 'never', '--remove-orphans', '--wait', '--wait-timeout', '120', *pending['previous_running'])
     previous_services = re.findall(r'^  ([a-z][a-z0-9-]*):$', pending['previous_compose'], re.M)
@@ -248,7 +265,7 @@ def reset_news_ai(build, confirmed=False):
     with locked(INSTANCE / '.deploy.lock'):
         require(not (INSTANCE / 'deployment.pending.json').exists(), 'Recover the pending deployment first')
         command = ['docker', 'run', '--rm', '-i', '--network', 'dev_default', '--env-file', str(INSTANCE / '.env'),
-                   build['images']['backend']['digest'], 'python', '-']
+                   IMAGES['backend'] + ':' + build['version'], 'python', '-']
         run(*command, input=SCHEMA)
         if confirmed:
             current = json.loads((INSTANCE / 'deployment.json').read_text())

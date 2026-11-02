@@ -11,11 +11,13 @@ Only a `dev` push publishes the accepted images:
 - `git.134333.xyz/eezd/dev/backend/alphapulse:YYYYMMDD-xxxxxxxx`
 - `git.134333.xyz/eezd/dev/web/alphapulse:YYYYMMDD-xxxxxxxx`
 
+Deployment, migration commands, Compose interpolation and CI outputs use these version tags. Accepted digests remain internal receipt metadata: pulls and startup verify the tag's content, full commit and version before use; an overwritten tag fails validation. SearXNG uses `docker.io/searxng/searxng:2026.10.30-ffa88e3ba`, with its accepted content checked internally as well. Historical digest-only application receipts select the corresponding version tag without discarding their identity checks. Recovery converts the known historical SearXNG digest to its verified tag and rejects unknown digest references.
+
 The date comes from the commit's committer timestamp in UTC, and the suffix is the first eight characters of its full SHA. Existing versions are immutable. Images are public on Gitea only; private configuration and data are excluded. `/api/health` and `/version.json` identify the deployed API and web revision. `build.json` is the CI receipt, not a tracked source file.
 
 ## The single data-bearing instance
 
-`/docker/gitea/dev/AlphaPulse` contains the runtime Compose configuration, `.env`, digest selection, deployment receipts and `.deploy.lock`. The repository-root `.env` points to that sole private configuration. The Compose project is `alphapulse-dev`; `AlphaPulse-dev` is the web container, and the other application containers append their service name (`-api`, `-crawler`, `-market`, `-calendar`, `-trader`, or the new `-news-risk`).
+`/docker/gitea/dev/AlphaPulse` contains the runtime Compose configuration, `.env`, version-tag selection, deployment receipts (which retain accepted digests for identity checks) and `.deploy.lock`. The repository-root `.env` points to that sole private configuration. The Compose project is `alphapulse-dev`; `AlphaPulse-dev` is the web container, and the other application containers append their service name (`-api`, `-crawler`, `-market`, `-calendar`, `-trader`, or the new `-news-risk`).
 
 This project's DEV intentionally uses the existing database, Redis DB 14 (`ap:*` only), model credentials and Demo trading configuration. The user authorized restoring all six services. It is the only instance, served at `https://alpha.134333.xyz` through `127.0.0.1:21005`. CI never uses these data for testing. Do not start a second Compose project against this configuration.
 
@@ -105,7 +107,7 @@ The subsequent `d4e6f8012345` migration adds events, membership and cross-event 
 
 ### Search and subscriptions
 
-Compose includes a digest-pinned SearXNG service on the existing internal Docker network, with no host port. Deployment creates its instance-local settings from `deploy/searxng.yml`, generates its server secret once, and checks `/healthz` through the API container. Pulls, service changes and recovery continue through `scripts/deploy.py` and `.deploy.lock`. `SEARXNG_URL` can select a different internal endpoint; its default is `http://searxng:8080`. External search availability depends on upstream engines and is reported as evidence limitations. Web reads reject private/mixed DNS answers, pin the checked address, recheck redirects and bound decoded response sizes. No external research response is inserted into the original news stream.
+Compose includes a version-tagged SearXNG service on the existing internal Docker network, with no host port. Deployment creates its instance-local settings from `deploy/searxng.yml`, generates its server secret once, and checks `/healthz` through the API container. Pulls, service changes and recovery continue through `scripts/deploy.py` and `.deploy.lock`. `SEARXNG_URL` can select a different internal endpoint; its default is `http://searxng:8080`. External search availability depends on upstream engines and is reported as evidence limitations. Web reads reject private/mixed DNS answers, pin the checked address, recheck redirects and bound decoded response sizes. No external research response is inserted into the original news stream.
 
 The crawler console accepts administrator-managed public RSS/Atom subscriptions, names, intervals and enable/disable controls. New subscriptions are paused, no default feeds are added, and the manager discovers new subscriptions without a restart. Only feed-provided content is stored; a summary is labeled as a summary. Arbitrary private-network feed URLs are rejected.
 

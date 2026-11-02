@@ -104,7 +104,7 @@ def test_live_result_never_applies_another_week(trading, monkeypatch, offset, re
             worker.fetch = AsyncMock(return_value=(response, 7))
             monkeypatch.setattr(module, "pdf_text", lambda body: REPORT)
             at = datetime(2026, 10, 29, 12, 30, tzinfo=UTC) + timedelta(days=offset)
-            row = SimpleNamespace(source="dol", family="initial_claims", release_url=None, scheduled_at=at,
+            row = SimpleNamespace(source="dol", family="initial_claims", release_url="https://oui.doleta.gov/press/2026/102926.pdf", scheduled_at=at,
                                   first_received_at=at if received else None)
             if expected == "error":
                 with pytest.raises(ValueError, match="公告时间"):

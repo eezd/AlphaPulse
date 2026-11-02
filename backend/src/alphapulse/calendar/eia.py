@@ -8,7 +8,7 @@ from urllib.parse import urljoin, urlparse
 
 from parsel import Selector
 
-from alphapulse.calendar.archives import Announcement
+from alphapulse.calendar.archives import Announcement, ArchiveMissing
 from alphapulse.calendar.parsers import EASTERN, Scheduled, compact
 
 SCHEDULE = "https://www.eia.gov/petroleum/supply/weekly/schedule.php"
@@ -71,7 +71,7 @@ def archive_links(body: str, start: date, end: date) -> list[str]:
         if start <= day <= end:
             result.append(url)
     if not result:
-        raise ValueError("EIA 归档没有所选范围的已公布报告")
+        raise ArchiveMissing("EIA 归档没有所选范围的已公布报告")
     return list(dict.fromkeys(result))
 
 

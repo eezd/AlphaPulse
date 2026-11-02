@@ -13,6 +13,7 @@ from sqlalchemy import select
 
 from alphapulse.calendar.catalog import SCHEDULE_URLS, UMICH_CSV, UMICH_HISTORY, UMICH_HOME, UMICH_INFO
 from alphapulse.calendar import adp, dol, eia, europe
+from alphapulse.calendar.archives import ArchiveMissing
 from alphapulse.calendar.parsers import EASTERN, MONTHS, bea_release_link, parse_fed_calendar, parse_ics, parse_values, release_date, bls_periods, release_metadata
 from alphapulse.calendar.service import apply_bls_periods, record_revision, next_poll, save_raw, save_result, save_schedule, save_series
 from alphapulse.calendar.umich import current_result, document_links, monthly_series, parse_schedule, pdf_text
@@ -42,6 +43,12 @@ def retry_after_at(value: str | None, now: datetime) -> datetime | None:
         return None
 
 
+class SourceCooling(ValueError):
+    def __init__(self, host, retry_at):
+        self.retry_at = retry_at
+        super().__init__(f'{host} 请求冷却，下次尝试 {retry_at.isoformat()}')
+
+
 def fed_month_urls(now: datetime) -> list[str]:
     month = now.astimezone(EASTERN).replace(day=1)
     following = (month + timedelta(days=32)).replace(day=1)
@@ -59,17 +66,90 @@ class CalendarWorker:
         self.sources: dict[str, dict] = {}
         self.eia_schedule_body: str | None = None
         self.fetch_slots = asyncio.Semaphore(2)
+        self.host_locks = {}
+        self.host_ready = {}
+        self.cooldowns = {}
+        self.failures = {}
+        self.index_cache = {}
+        self.poll_cache = None
 
     async def fetch(self, source: str, url: str, *, query: dict | None = None) -> tuple[httpx.Response, int]:
+        key = (source, url, json.dumps(query, sort_keys=True))
+        if self.poll_cache is None:
+            return await self._fetch(source, url, query=query)
+        if key not in self.poll_cache:
+            self.poll_cache[key] = asyncio.create_task(self._fetch(source, url, query=query))
+        return await self.poll_cache[key]
+
+    async def index(self, source, url):
+        # Live ADP discovery must follow result polling rather than archive cache TTL.
+        if source == 'adp':
+            page = await self.fetch(source, url)
+            page[0].raise_for_status()
+            return page
+        cached = self.index_cache.get((source, url))
+        if cached and cached[0] > datetime.now(UTC):
+            return cached[1]
+        page = await self.fetch(source, url)
+        page[0].raise_for_status()
+        self.index_cache[source, url] = (datetime.now(UTC) + timedelta(hours=1), page)
+        return page
+
+    async def adp_links(self, start, end):
+        url, visited = adp.INDEX, set()
+        for _ in range(8):
+            if url in visited: raise ValueError('ADP 官方分页形成循环')
+            visited.add(url)
+            response, _ = await self.index('adp', url)
+            links, following = adp.release_links(response.text, url, start, end)
+            if links or not following: return links
+            url = following
+        raise ValueError('ADP 在线索引已扫描8页，目标月报尚未取得')
+
+    async def archive_page(self, row):
+        day = row.scheduled_at.astimezone(EASTERN).date()
+        source = row.source
+        module = dol if source == 'dol' else eia
+        index_url = dol.SCHEDULE if source == 'dol' else eia.ARCHIVE
+        response, _ = await self.index(source, index_url)
+        links = module.archive_links(response.text, day, day)
+        if len(links) != 1: raise ValueError(f'{source} 当期官方归档不唯一')
+        url = links[0]
+        if source == 'eia':
+            page, _ = await self.fetch(source, url)
+            page.raise_for_status()
+            url = eia.csv_link(page.text, url)
+        response, raw_id = await self.fetch(source, url)
+        response.raise_for_status()
+        response.extensions['calendar_url'] = url
+        return response, raw_id
+
+    async def _fetch(self, source: str, url: str, *, query: dict | None = None) -> tuple[httpx.Response, int]:
         # 链接来自公开响应，限制到对应官方域名，避免外部内容扩大访问范围。
         allowed = {"bls": {"www.bls.gov"}, "bea": {"www.bea.gov", "apps.bea.gov"}, "fed": {"www.federalreserve.gov"},
                    "umich": {"www.sca.isr.umich.edu", "data.sca.isr.umich.edu"}, "dol": {"www.dol.gov", "oui.doleta.gov"},
                    "eia": {"www.eia.gov", "ir.eia.gov"}, "adp": {"mediacenter.adp.com"}, **HOSTS}
         if urlparse(url).scheme != "https" or urlparse(url).hostname not in allowed[source]:
             raise ValueError("公告链接不是对应机构的官方 HTTPS 地址")
-        async with self.fetch_slots:
-            client = self.bls if source == "bls" else self.http
-            response = await client.post(url, json=query) if query is not None else await client.get(url)
+        host = urlparse(url).hostname
+        async with self.host_locks.setdefault(host, asyncio.Lock()):
+            now = datetime.now(UTC)
+            if self.cooldowns.get(host, now) > now:
+                raise SourceCooling(host, self.cooldowns[host])
+            delay = (self.host_ready.get(host, now) - now).total_seconds()
+            if delay > 0: await asyncio.sleep(delay)
+            async with self.fetch_slots:
+                client = self.bls if source == "bls" else self.http
+                response = await client.post(url, json=query) if query is not None else await client.get(url)
+            now = datetime.now(UTC)
+            self.host_ready[host] = now + timedelta(seconds=1)
+            if response.status_code in (403, 429, 503):
+                self.failures[host] = min(self.failures.get(host, 0) + 1, 7)
+                retry = retry_after_at(response.headers.get('Retry-After'), now)
+                seconds = 3600 if response.status_code == 403 else min(3600, 60 * 2 ** (self.failures[host] - 1))
+                self.cooldowns[host] = max(retry or now, now + timedelta(seconds=seconds))
+            elif response.is_success:
+                self.failures.pop(host, None)
         if urlparse(str(response.url)).hostname not in allowed[source] or response.url.scheme != "https":
             raise ValueError("官方响应重定向到了不受支持的地址")
         now = datetime.now(UTC)
@@ -98,10 +178,13 @@ class CalendarWorker:
                 continue
             try:
                 fetch_url = europe.eurostat_calendar_url(now) if source == "eurostat" else url
-                response, raw_id = await self.fetch(source, fetch_url, query=europe.INSEE_QUERY if source == "insee" else None)
+                if source == "adp":
+                    response, raw_id = await self.index(source, fetch_url)
+                else:
+                    response, raw_id = await self.fetch(source, fetch_url, query=europe.INSEE_QUERY if source == "insee" else None)
                 response.raise_for_status()
                 if source == "adp":
-                    links, _ = adp.release_links(response.text, url, datetime.min.date(), now.astimezone(EASTERN).date())
+                    links = await self.adp_links(datetime.min.date(), now.astimezone(EASTERN).date())
                     if not links:
                         raise ValueError("ADP 官方新闻索引缺少近期月报")
                     report, evidence = await self.fetch(source, links[0])
@@ -142,11 +225,16 @@ class CalendarWorker:
                         await session.commit()
                 self.sources[url] = {"source": source, "checked_at": datetime.now(UTC).isoformat(), "error": None}
             except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError, StopIteration) as exc:
-                self.sources[url] = {"source": source, "checked_at": datetime.now(UTC).isoformat(), "error": str(exc)}
-                if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (429, 503):
-                    retry_at = retry_after_at(exc.response.headers.get("Retry-After"), datetime.now(UTC))
-                    if retry_at is not None:
-                        self.sources[url]["retry_at"] = retry_at.isoformat()
+                state = {"source": source, "checked_at": datetime.now(UTC).isoformat(), "error": str(exc)}
+                retry_at = getattr(exc, 'retry_at', None)
+                if isinstance(exc, httpx.HTTPStatusError):
+                    retry_at = self.cooldowns.get(exc.request.url.host)
+                    if retry_at is None and exc.response.status_code in (429, 503):
+                        retry_at = retry_after_at(exc.response.headers.get('Retry-After'), datetime.now(UTC))
+                if retry_at is not None:
+                    state['retry_at'] = retry_at.isoformat()
+                    state['error'] += f"；下次尝试 {retry_at.isoformat()}"
+                self.sources[url] = state
                 logger.exception("日程采集失败：%s", url)
 
     async def umich_schedule(self, info: str, now: datetime) -> None:
@@ -194,9 +282,7 @@ class CalendarWorker:
             if row.release_url:
                 url = row.release_url
             else:
-                index, _ = await self.fetch("adp", adp.INDEX)
-                index.raise_for_status()
-                links, _ = adp.release_links(index.text, adp.INDEX, row.scheduled_at.astimezone(EASTERN).date(), row.scheduled_at.astimezone(EASTERN).date())
+                links = await self.adp_links(row.scheduled_at.astimezone(EASTERN).date(), row.scheduled_at.astimezone(EASTERN).date())
                 if not links:
                     return None
                 if len(links) != 1:
@@ -214,7 +300,16 @@ class CalendarWorker:
                 schedule.raise_for_status()
                 eia.exceptions(schedule.text)
                 self.eia_schedule_body = schedule.text
-            response, raw_id = await self.fetch("eia", row.release_url or eia.LATEST)
+            fixed_url = row.release_url if row.release_url and "/archive/" in urlparse(row.release_url).path else None
+            if row.scheduled_at.astimezone(EASTERN).date() < datetime.now(EASTERN).date() and not fixed_url:
+                try:
+                    response, raw_id = await self.archive_page(row)
+                except ArchiveMissing:
+                    response, raw_id = await self.fetch("eia", eia.LATEST)
+                    response.extensions["calendar_url"] = eia.LATEST
+            else:
+                response, raw_id = await self.fetch("eia", fixed_url or eia.LATEST)
+                response.extensions["calendar_url"] = fixed_url or eia.LATEST
             response.raise_for_status()
             announcement = eia.report(response.text, self.eia_schedule_body)
             if announcement.at < row.scheduled_at or (announcement.at > row.scheduled_at and row.first_received_at is not None):
@@ -223,7 +318,18 @@ class CalendarWorker:
                 raise ValueError("EIA 公告统计周或时间与所选日程不符，未填入其他期次的数据")
             return response, raw_id
         if row.source == "dol":
-            response, raw_id = await self.fetch("dol", row.release_url or dol.LATEST)
+            if row.scheduled_at.astimezone(EASTERN).date() < datetime.now(EASTERN).date() and (not row.release_url or "/press/" not in urlparse(row.release_url).path):
+                try:
+                    response, raw_id = await self.archive_page(row)
+                except ArchiveMissing:
+                    response, raw_id = await self.fetch("dol", dol.LATEST)
+            else:
+                try:
+                    response, raw_id = await self.fetch("dol", row.release_url or dol.LATEST)
+                    response.raise_for_status()
+                except (SourceCooling, httpx.HTTPStatusError) as error:
+                    if isinstance(error, httpx.HTTPStatusError) and error.response.status_code != 403: raise
+                    response, raw_id = await self.archive_page(row)
             response.raise_for_status()
             announcements = await asyncio.to_thread(dol.report, await asyncio.to_thread(pdf_text, response.content))
             announcement = announcements[row.family]
@@ -357,12 +463,16 @@ class CalendarWorker:
                         values = parse_values(row.family, response.text)
                         text = " ".join(Selector(text=response.text).css("h1,#bodytext").xpath("string(.)").getall())
                         period, stage = release_metadata(row.family, text)
-                    save_result(session, row, values, str(response.url), raw_id, datetime.now(UTC), period=period, stage=stage)
+                    save_result(session, row, values, response.extensions.get("calendar_url", str(response.url)), raw_id, datetime.now(UTC), period=period, stage=stage)
                 row.error = None
             except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError) as exc:
                 row.error = f"{type(exc).__name__}: {exc}"
+                retry_at = getattr(exc, 'retry_at', None)
+                if isinstance(exc, httpx.HTTPStatusError):
+                    retry_at = self.cooldowns.get(exc.request.url.host, retry_at)
+                if retry_at: row.error += f"；下次尝试 {retry_at.isoformat()}"
                 if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (429, 503):
-                    retry_at = retry_after_at(exc.response.headers.get("Retry-After"), datetime.now(UTC))
+                    retry_at = max(retry_at or datetime.now(UTC), retry_after_at(exc.response.headers.get("Retry-After"), datetime.now(UTC)) or datetime.now(UTC))
                 logger.exception("公布值采集失败：%s %s", row.family, row.scheduled_at)
             row.last_checked_at = now
             row.next_check_at = next_poll(row.scheduled_at, datetime.now(UTC), row.first_received_at is not None, bool(row.error))
@@ -379,7 +489,11 @@ class CalendarWorker:
                 EconomicRelease.scheduled_at >= now - timedelta(days=HISTORY_DAYS), EconomicRelease.next_check_at <= now,
             ).order_by(EconomicRelease.scheduled_at.desc()).limit(8)))
         # 少量同时发布的不同报告独立获取，历史修订不阻塞当期公布。
-        await asyncio.gather(*(self.poll_one(id_) for id_ in ids))
+        self.poll_cache = {}
+        try:
+            await asyncio.gather(*(self.poll_one(id_) for id_ in ids))
+        finally:
+            self.poll_cache = None
 
     async def run(self) -> None:
         async def schedules_loop() -> None:

@@ -127,6 +127,7 @@ async def organize(target_id=None):
         version = EventVersion(event_id=event.id, revision=event.revision, input={'packages': packages}, rules=rules, state='processing')
         session.add(version); event.state = 'processing'; await session.commit()
         version_id, event_id = version.id, event.id
+        usage = None
         try:
             if config_error: raise ValueError(config_error)
             step('梳理事件时间线')
@@ -153,6 +154,7 @@ async def organize(target_id=None):
             await session.rollback()
             version = await session.get(EventVersion, version_id)
             version.state = 'failed'; version.error = str(error)[:2000]
+            version.usage = getattr(error, 'usage', None) or usage
             current = await session.get(NewsEvent, event_id, with_for_update=True)
             current.state = 'pending' if current.revision > version.revision else 'failed'
             current.error = version.error

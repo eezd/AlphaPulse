@@ -80,7 +80,7 @@ def test_worker_does_not_apply_latest_values_to_another_week(trading, offset, re
             response = httpx.Response(200, text=CSV, request=httpx.Request("GET", eia.LATEST))
             worker.fetch = AsyncMock(return_value=(response, 1))
             at = datetime(2026, 10, 28, 14, 30, tzinfo=UTC) + timedelta(days=offset)
-            row = SimpleNamespace(source="eia", family="eia_stocks", period="2026-10-23", release_url=None,
+            row = SimpleNamespace(source="eia", family="eia_stocks", period="2026-10-23", release_url="https://www.eia.gov/petroleum/supply/weekly/archive/2026/2026_10_28/download/table1.csv",
                                   scheduled_at=at, first_received_at=at if received else None)
             if expected == "error":
                 with pytest.raises(ValueError, match="所选日程不符"):

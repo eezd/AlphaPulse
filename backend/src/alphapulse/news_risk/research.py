@@ -13,7 +13,7 @@ from alphapulse.ai import llm
 from alphapulse.core.db import SessionLocal
 from alphapulse.models import NewsItem
 from alphapulse.models.risk import NewsSummary
-from alphapulse.news_risk.service import fits_context
+from alphapulse.news_risk.service import fits_context, validate_submission
 
 
 async def public_address(url):
@@ -197,7 +197,7 @@ class Research:
         specs = self.tool_specs()
         submit = llm.ToolSpec('submit', '提交完整研判，引用实际读取来源', schema.model_json_schema())
         messages = [{'role': 'user', 'text': json.dumps(payload, ensure_ascii=False)}]
-        usages = []
+        usages = self.usages = []
         from alphapulse.news_risk.progress import step, current
         for round_no in range(9):
             if current.get() is not None: step('模型研判', round=round_no+1, model=provider.model, reasoning_effort=provider.reasoning_effort)
@@ -206,12 +206,13 @@ class Research:
             completion = None
             async for item in llm.stream(provider, system, messages, [*specs, submit] if round_no < 8 else [submit], provider.reasoning_effort):
                 if isinstance(item, llm.Completion): completion = item
+            if completion is not None: usages.append(completion.usage)
             if completion is None or completion.truncated: raise ValueError('研究输出未完成或被截断')
-            usages.append(completion.usage)
             calls = completion.tool_calls
             if any(c['name'] == 'submit' for c in calls):
                 if len(calls) != 1: raise ValueError('提交结果不能同时执行查询')
-                return schema.model_validate(calls[0]['arguments']), {'rounds': usages, 'tools': self.records}
+                result = await validate_submission(provider, system, messages, schema, completion, usages)
+                return result, {'rounds': usages, 'tools': self.records}
             if round_no == 8 or not calls: raise ValueError('研究模型未提交结果')
             assistant = {'role': 'assistant', 'text': completion.text, 'tool_calls': calls}
             if completion.thinking_blocks: assistant['thinking_blocks'] = completion.thinking_blocks

@@ -91,8 +91,6 @@ def normalize(body: dict, kind: str, day: date) -> list[Entry]:
         else:
             timestamp = text(raw, "pub_time" if kind == "data" else "event_time")
             at = datetime.strptime(timestamp, "%Y-%m-%d %H:%M").replace(tzinfo=LOCAL)
-            if at.date() != day:
-                raise ValueError("金十记录公布日期与请求不符")
             unix = raw.get("pub_time_unix" if kind == "data" else "event_time_unix")
             if type(unix) is not int or not int(at.timestamp()) <= unix < int(at.timestamp()) + 60:
                 raise ValueError("金十公布时间与时间戳不符")

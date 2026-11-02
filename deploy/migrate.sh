@@ -10,12 +10,12 @@ if [ -e "$instance/deployment.pending.json" ]; then
   exit 1
 fi
 if [ -z "${ALPHAPULSE_BACKEND_IMAGE:-}" ]; then
-  echo '请通过 ALPHAPULSE_BACKEND_IMAGE 明确指定已验收的候选镜像摘要；迁移须独立授权' >&2
+  echo '请通过 ALPHAPULSE_BACKEND_IMAGE 明确指定已验收的候选镜像版本标签；迁移须独立授权' >&2
   exit 1
 fi
 case "$ALPHAPULSE_BACKEND_IMAGE" in
-  git.134333.xyz/eezd/dev/backend/alphapulse@sha256:*) ;;
-  *) echo '迁移必须使用开发镜像摘要' >&2; exit 1 ;;
+  git.134333.xyz/eezd/dev/backend/alphapulse:[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+  *) echo '迁移必须使用开发镜像版本标签' >&2; exit 1 ;;
 esac
 if [ -n "$(docker ps -q --filter label=com.docker.compose.project=alphapulse-dev)" ]; then
   echo '迁移前须在维护窗口内停止应用服务；不要并发运行采集或交易' >&2

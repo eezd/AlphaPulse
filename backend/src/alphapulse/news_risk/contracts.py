@@ -30,8 +30,8 @@ class Correction(BaseModel):
 
 
 class PackageTimePoint(BaseModel):
-    occurred_at: datetime | None
-    time_precision: Literal['minute', 'day', 'month', 'unknown']
+    occurred_at: datetime | None = Field(description="发生时间；未知必须为null且time_precision=unknown，已知必须带时区，不用报道时间代替")
+    time_precision: Literal['minute', 'day', 'month', 'unknown'] = Field(description='occurred_at为null时必须unknown；非null时按原文精度选择minute/day/month')
     time_text: str
     reported_at: datetime | None
     description: str = Field(min_length=1)

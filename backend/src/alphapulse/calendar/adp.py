@@ -9,7 +9,7 @@ from parsel import Selector
 from alphapulse.calendar.archives import Announcement
 from alphapulse.calendar.parsers import EASTERN, MONTHS, Scheduled, compact
 
-INDEX = "https://mediacenter.adp.com/press-releases?keywords=National+Employment+Report"
+INDEX = "https://mediacenter.adp.com/press-releases"
 TITLE = "ADP National Employment Report"
 MONTH = "(?:" + "|".join(MONTHS) + ")"
 NUMBER = r"-?\d{1,3}(?:,\d{3})*"

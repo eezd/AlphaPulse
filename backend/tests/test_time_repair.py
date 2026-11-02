@@ -1,0 +1,137 @@
+"""Time repairs use synthetic completions and never call a provider."""
+import asyncio
+from types import SimpleNamespace
+
+import pytest
+from pydantic import BaseModel
+
+from alphapulse.news_risk.contracts import PackageTimePoint
+
+
+class Result(BaseModel):
+    timeline_points: list[PackageTimePoint]
+
+
+@pytest.mark.parametrize('outcome', ['success', 'invalid', 'query', 'truncated', 'context'])
+def test_time_repair_is_bounded_and_accounts_for_calls(trading, monkeypatch, outcome):
+    from alphapulse.news_risk import service
+    from alphapulse.ai.llm import Completion
+    payload = {'timeline_points': [{'occurred_at': None, 'time_precision': 'day', 'time_text': '',
+        'reported_at': None, 'description': 'Unknown occurrence time', 'verification': 'insufficient',
+        'evidence_refs': [{'article_id': 1, 'quote': 'Source'}]}]}
+    calls = []
+
+    async def stream(provider, system, messages, tools, effort):
+        calls.append((messages, tools, effort))
+        if len(calls) == 2 and outcome == 'success':
+            payload['timeline_points'][0]['time_precision'] = 'unknown'
+        yield Completion(tool_calls=[{'id': str(len(calls)), 'name': 'read_news' if len(calls) == 2 and outcome == 'query' else 'submit', 'arguments': payload}],
+            usage={'input_tokens': 10}, truncated=len(calls) == 2 and outcome == 'truncated')
+
+    monkeypatch.setattr(service.llm, 'stream', stream)
+    provider = SimpleNamespace(model='synthetic', reasoning_effort='low', max_tokens=100, context_window=200000)
+    if outcome == 'context':
+        fits = iter([True, False])
+        monkeypatch.setattr(service, 'fits_context', lambda *args: next(fits))
+    if outcome == 'success':
+        result, usage = asyncio.run(service.complete(provider, 'rules', {}, Result))
+        assert result.timeline_points[0].occurred_at is None
+    else:
+        with pytest.raises(service.SubmissionFailure) as error:
+            asyncio.run(service.complete(provider, 'rules', {}, Result))
+        usage = error.value.usage
+    assert len(calls) == (1 if outcome == 'context' else 2)
+    assert len(usage['rounds']) == len(calls)
+    if len(calls) == 2:
+        assert [tool.name for tool in calls[1][1]] == ['submit']
+        assert calls[1][2] == 'low'
+        assert 'timeline_points' in calls[1][0][-1]['result']
+
+
+def test_unrelated_validation_does_not_retry(trading, monkeypatch):
+    from alphapulse.news_risk import service
+    from alphapulse.ai.llm import Completion
+    calls = []
+    async def stream(*args):
+        calls.append(args)
+        yield Completion(tool_calls=[{'id': '1', 'name': 'submit', 'arguments': {}}], usage={'output_tokens': 4})
+    monkeypatch.setattr(service.llm, 'stream', stream)
+    provider = SimpleNamespace(model='synthetic', reasoning_effort='low', max_tokens=100, context_window=200000)
+    with pytest.raises(service.SubmissionFailure):
+        asyncio.run(service.complete(provider, 'rules', {}, Result))
+    assert len(calls) == 1
+
+
+def test_research_time_repair_preserves_round_budget_and_thinking(trading, monkeypatch):
+    from alphapulse.news_risk import service
+    from alphapulse.news_risk.research import Research
+    from alphapulse.ai.llm import Completion
+    calls = []
+    args = {'timeline_points': [{'occurred_at': None, 'time_precision': 'day', 'time_text': '', 'reported_at': None,
+        'description': 'Source', 'verification': 'insufficient', 'evidence_refs': [{'quote': 'Source'}]}]}
+    async def stream(provider, system, messages, tools, effort):
+        calls.append((messages, tools))
+        if len(calls) <= 8:
+            yield Completion(tool_calls=[{'id': str(len(calls)), 'name': 'unknown_tool', 'arguments': {}}], usage={'output_tokens': 1})
+        else:
+            if len(calls) == 10:
+                assert messages[-2]['thinking_blocks'] == [{'type': 'thinking', 'thinking': 'synthetic'}]
+                assert [tool.name for tool in tools] == ['submit']
+                args['timeline_points'][0]['time_precision'] = 'unknown'
+            yield Completion(tool_calls=[{'id': str(len(calls)), 'name': 'submit', 'arguments': args}],
+                usage={'output_tokens': 2}, thinking_blocks=[{'type': 'thinking', 'thinking': 'synthetic'}])
+    monkeypatch.setattr(service.llm, 'stream', stream)
+    provider = SimpleNamespace(model='synthetic', reasoning_effort='high', max_tokens=100, context_window=200000)
+    research = Research()
+    result, usage = asyncio.run(research.run(provider, 'rules', {}, Result))
+    assert result.timeline_points[0].time_precision == 'unknown'
+    assert len(calls) == len(usage['rounds']) == 10
+    assert len(research.records) == 8
+
+
+def usage_tokens(usage):
+    if isinstance(usage, dict):
+        return usage.get('input_tokens', 0) + sum(usage_tokens(v) for k, v in usage.items() if k != 'input_tokens')
+    if isinstance(usage, list):
+        return sum(usage_tokens(v) for v in usage)
+    return 0
+
+
+@pytest.mark.parametrize('failure', ['second_call', 'evidence'])
+def test_extraction_failure_keeps_completed_and_failed_call_usage(trading, monkeypatch, failure):
+    from unittest.mock import AsyncMock
+    from alphapulse.news_risk import pipeline, service
+    extract = pipeline.Extraction(facts='Source', evidence_refs=[pipeline.Evidence(article_id=1, quote='Source')])
+    complete = AsyncMock(side_effect=[(extract, {'input_tokens': 10}), service.SubmissionFailure('synthetic failure', {'input_tokens': 40})])
+    monkeypatch.setattr(pipeline, 'complete', complete)
+    monkeypatch.setattr(pipeline, 'fits_context', lambda *args: True)
+    articles = [{'id': 1, 'title': 'Source' if failure == 'second_call' else 'Different'}, {'id': 2, 'title': 'Source'}]
+    with pytest.raises(service.SubmissionFailure) as error:
+        asyncio.run(pipeline.extract_articles(SimpleNamespace(), 'rules', articles))
+    assert usage_tokens(error.value.usage) == (50 if failure == 'second_call' else 10)
+
+
+@pytest.mark.parametrize('failure', ['second_call', 'evidence', 'no_shrink'])
+def test_compaction_failure_keeps_every_paid_call(trading, monkeypatch, failure):
+    from unittest.mock import AsyncMock
+    from alphapulse.news_risk import pipeline, service
+    group = {'facts': 'Very long source fact ' * 50, 'evidence_refs': [{'article_id': 1, 'quote': 'Source'}]}
+    extract = pipeline.Extraction(facts='Source' if failure != 'no_shrink' else 'Longer' * 1000,
+        evidence_refs=[pipeline.Evidence(article_id=1, quote='Changed' if failure == 'evidence' else 'Source')])
+    complete = AsyncMock(side_effect=[(extract, {'input_tokens': 10}), service.SubmissionFailure('synthetic failure', {'input_tokens': 40})])
+    monkeypatch.setattr(pipeline, 'complete', complete)
+    monkeypatch.setattr(pipeline, 'fits_context', lambda *args: True)
+    with pytest.raises(service.SubmissionFailure) as error:
+        asyncio.run(pipeline.compact_extractions(SimpleNamespace(), 'rules', {'extractions': [group]}, pipeline.EventResult, fits=lambda *args: False))
+    assert usage_tokens(error.value.usage) == (50 if failure == 'second_call' else 10)
+
+
+def test_summary_keeps_extraction_usage_when_compaction_fails(trading, monkeypatch):
+    from unittest.mock import AsyncMock
+    from alphapulse.news_risk import pipeline, service
+    monkeypatch.setattr(pipeline, 'fits_context', lambda *args: False)
+    monkeypatch.setattr(pipeline, 'extract_articles', AsyncMock(return_value=([{'facts': 'Source'}], [{'input_tokens': 123}])))
+    monkeypatch.setattr(pipeline, 'compact_extractions', AsyncMock(side_effect=service.SubmissionFailure('synthetic failure', {'input_tokens': 456})))
+    with pytest.raises(service.SubmissionFailure) as error:
+        asyncio.run(pipeline.summarize_articles(SimpleNamespace(), 'rules', [], {'id': 1}))
+    assert usage_tokens(error.value.usage) == 579

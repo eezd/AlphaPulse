@@ -137,7 +137,7 @@ def jin10_item(row: EconomicRelease, now: datetime) -> dict:
             "event_name": f"{meta['country_name']}{meta['period_label'] or ''}{meta['name']}",
             "period": None, "period_label": meta["period_label"], "stage": None, "stage_name": None,
             "title": meta["description"] or meta["name"], "source": "jin10", "scheduled_at": row.scheduled_at,
-            "calendar_date": meta["date"], "time_precision": meta["precision"], "kind": meta["kind"],
+            "calendar_date": row.scheduled_at.astimezone(LOCAL).date().isoformat(), "time_precision": meta["precision"], "kind": meta["kind"],
             "importance": meta["importance"], "importance_source": "jin10", "status": status,
             "actual": actual, "previous": revised if revised is not None else previous,
             "previous_original": previous, "previous_revised": revised, "forecast": forecast,

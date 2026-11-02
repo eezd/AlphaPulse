@@ -204,6 +204,7 @@ async def summarize(target_id=None):
         evidence_rows = (await session.scalars(select(PackageEvidence).where(PackageEvidence.version_id == identifier).order_by(PackageEvidence.id))).all()
         research.restore([r.data for r in evidence_rows])
         await session.commit()
+        usage = None
         try:
             if config_error: raise ValueError(config_error)
             result, usage = await summarize_articles(provider, system, articles, package, research)
@@ -241,7 +242,7 @@ async def summarize(target_id=None):
             for record in research.records:
                 session.add(PackageEvidence(summary_id=event_id, version_id=identifier, kind=record['tool'], reference=str(record['arguments']), data=record))
             await session.execute(update(SummaryVersion).where(SummaryVersion.id == identifier).values(
-                state='failed', error=str(error)[:2000], finished_at=datetime.now(UTC)))
+                state='failed', error=str(error)[:2000], usage=getattr(error, 'usage', None) or usage or {'rounds': getattr(research, 'usages', []), 'tools': research.records}, finished_at=datetime.now(UTC)))
             await session.execute(update(NewsSummary).where(NewsSummary.id == event_id, NewsSummary.replacement_ids == [], NewsSummary.state != 'withdrawn').values(
                 state=case((NewsSummary.revision > revision, 'pending'), else_='failed'), error=str(error)[:2000]))
             await session.commit(); logger.exception('事件总结失败')

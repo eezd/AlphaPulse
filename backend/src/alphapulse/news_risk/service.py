@@ -2,7 +2,7 @@
 import json
 from datetime import UTC, datetime
 from typing import Literal
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, ValidationError
 from sqlalchemy import select
 from alphapulse.ai import llm
 from alphapulse.models import AiProvider
@@ -75,6 +75,48 @@ class OutputTruncated(ValueError):
         self.usage = usage
 
 
+class SubmissionFailure(ValueError):
+    def __init__(self, message, usage):
+        super().__init__(message)
+        self.usage = usage
+
+
+async def validate_submission(provider, system, messages, schema, completion, usages):
+    """Repair time-contract errors once without acquiring another worker slot."""
+    calls = completion.tool_calls
+    try:
+        return schema.model_validate(calls[0]['arguments'])
+    except ValidationError as error:
+        errors = error.errors(include_input=False, include_url=False, include_context=False)
+        if not all('timeline_points' in e['loc'] and
+                   (any(f in e['loc'] for f in ('occurred_at', 'reported_at', 'time_precision'))
+                    or e['msg'] in ('Value error, 发生时间与精度不一致', 'Value error, 发生时间必须有时区', 'Value error, 报道时间必须有时区'))
+                   for e in errors):
+            raise SubmissionFailure(str(error), {'rounds': usages}) from error
+    from alphapulse.news_risk.progress import step
+    step('纠正时间字段（1/1）', model=provider.model, reasoning_effort=provider.reasoning_effort)
+    assistant = {'role': 'assistant', 'text': completion.text, 'tool_calls': calls}
+    if completion.thinking_blocks:
+        assistant['thinking_blocks'] = completion.thinking_blocks
+    messages = [*messages, assistant, {'role': 'tool', 'tool_call_id': calls[0]['id'],
+        'result': json.dumps({'errors': errors, 'instruction': '仅纠正时间字段并重新submit；未知发生时间用null和unknown，不改变原文证据，不添加查询。'}, ensure_ascii=False)}]
+    if not fits_context(provider, system, {'messages': messages}, schema):
+        raise SubmissionFailure('纠错上下文不足；证据未截断', {'rounds': usages})
+    repaired = None
+    tool = llm.ToolSpec('submit', '纠正时间字段后提交完整结果', schema.model_json_schema())
+    try:
+        async for item in llm.stream(provider, system, messages, [tool], provider.reasoning_effort):
+            if isinstance(item, llm.Completion): repaired = item
+        if repaired is not None: usages.append(repaired.usage)
+        if repaired is None or repaired.truncated:
+            raise ValueError('时间字段纠错输出未完成或被截断')
+        if len(repaired.tool_calls) != 1 or repaired.tool_calls[0]['name'] != 'submit':
+            raise ValueError('时间字段纠错必须只提交一次结果')
+        return schema.model_validate(repaired.tool_calls[0]['arguments'])
+    except Exception as error:
+        raise SubmissionFailure(str(error), {'rounds': usages}) from error
+
+
 async def complete(provider: AiProvider, system: str, payload: dict, schema: type[BaseModel]):
     from alphapulse.news_risk.progress import step, current
     if current.get() is not None: step('等待模型响应', model=provider.model, reasoning_effort=provider.reasoning_effort)
@@ -91,9 +133,11 @@ async def complete(provider: AiProvider, system: str, payload: dict, schema: typ
     if completion is None:
         raise ValueError('模型未完成输出或输出被截断')
     calls = [call for call in completion.tool_calls if call['name'] == 'submit']
-    if len(calls) != 1:
-        raise ValueError('模型必须提交一次完整结构化结果')
-    return schema.model_validate(calls[0]['arguments']), completion.usage
+    if len(calls) != 1 or len(completion.tool_calls) != 1:
+        raise SubmissionFailure('模型必须提交一次完整结构化结果', completion.usage)
+    usages = [completion.usage]
+    result = await validate_submission(provider, system, [{'role': 'user', 'text': text}], schema, completion, usages)
+    return result, completion.usage if len(usages) == 1 else {'rounds': usages}
 
 
 def fits_context(provider, system, payload, schema):

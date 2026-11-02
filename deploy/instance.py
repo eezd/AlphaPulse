@@ -8,7 +8,8 @@ import re
 import subprocess
 
 SERVICES = ('api', 'web', 'market', 'crawler', 'calendar', 'trader', 'news-risk', 'jin10-calendar', 'searxng')
-SEARCH_IMAGE = 'docker.io/searxng/searxng@sha256:f4aa660c54d062dedb268be84e821ea24e39f48c7a496af8dd02cc9eedb93847'
+SEARCH_IMAGE = 'docker.io/searxng/searxng:2026.10.30-ffa88e3ba'
+SEARCH_DIGEST = 'sha256:f4aa660c54d062dedb268be84e821ea24e39f48c7a496af8dd02cc9eedb93847'
 
 
 def require(condition, message):
@@ -28,9 +29,9 @@ def start(directory, command, env):
     require(build.get('verified') is True, '部署回执未通过验收')
     require(re.fullmatch('[0-9a-f]{40}', build['commit']), '部署回执提交无效')
     require(re.fullmatch(r'\d{8}-' + build['commit'][:8], build['version']), '部署回执版本不匹配')
-    images = {part: build['images'][part]['digest'] for part in ('backend', 'web')}
+    images = {part: 'git.134333.xyz/eezd/dev/' + part + '/alphapulse:' + build['version'] for part in ('backend', 'web')}
     for part, image in images.items():
-        require(re.fullmatch(r'git\.134333\.xyz/eezd/dev/' + part + r'/alphapulse@sha256:[0-9a-f]{64}', image), '部署镜像摘要无效')
+        require(re.fullmatch(r'git\.134333\.xyz/eezd/dev/' + part + r'/alphapulse:\d{8}-[0-9a-f]{8}', image), '部署镜像版本标签无效')
     # Inspect interpolation without reading service credentials into the controller.
     config = json.loads(run([*command, 'config', '--format', 'json', '--no-env-resolution'], env))
     require(config['name'] == 'alphapulse-dev' and set(config['services']) == set(SERVICES), 'Compose 实例或服务集合不匹配')
@@ -40,7 +41,12 @@ def start(directory, command, env):
     for image in set(expected.values()):
         info, = json.loads(run(['docker', 'image', 'inspect', image], env))
         require(info['Architecture'] == 'amd64' and info['Os'] == 'linux', '本地镜像平台不匹配')
-        if image != SEARCH_IMAGE:
+        if image == SEARCH_IMAGE:
+            require(any(ref.rsplit('@', 1)[-1] == SEARCH_DIGEST for ref in info.get('RepoDigests', [])),
+                    '本地搜索版本标签指向的镜像与验收摘要不一致')
+        else:
+            part = 'web' if image == images['web'] else 'backend'
+            require(build['images'][part]['digest'] in info.get('RepoDigests', []), '本地版本标签指向的镜像与验收摘要不一致')
             labels = info['Config'].get('Labels') or {}
             require(labels.get('org.opencontainers.image.revision') == build['commit'] and
                     labels.get('org.opencontainers.image.version') == build['version'], '本地镜像身份与部署回执不一致')

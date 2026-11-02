@@ -311,3 +311,43 @@ def test_failed_days_do_not_starve_live_or_history_and_retry_after_backoff(tradi
         for _ in range(30): await collector.step()
         assert attempted.count(yesterday) == attempted.count(first_history) == 2
     asyncio.run(verify())
+
+
+def test_cross_day_release_uses_actual_date_and_keeps_source_day():
+    from alphapulse.calendar.jin10_view import jin10_item
+    body = deepcopy(FIXTURE['2026-11-04'])
+    body['list'] = body['list'][:1]
+    raw = body['list'][0]
+    at = datetime.fromisoformat('2026-11-05T00:20:43+08:00')
+    raw.update(pub_time='2026-11-05 00:20', pub_time_unix=int(at.timestamp()))
+    entry, = normalize(body, 'data', date(2026, 11, 4))
+    assert entry.at == at
+    assert entry.values['_jin10']['date'] == '2026-11-04'
+    assert jin10_item(stored(entry), datetime(2026, 11, 6, tzinfo=UTC))['calendar_date'] == '2026-11-05'
+    raw['pub_time_unix'] += 60
+    with pytest.raises(ValueError, match='时间戳'):
+        normalize(body, 'data', date(2026, 11, 4))
+
+
+def test_cross_day_membership_does_not_withdraw_until_all_buckets_remove_it(trading):
+    from alphapulse.calendar.jin10 import Entry
+    from alphapulse.calendar.jin10_store import save_entry, withdraw_missing
+    original = entries('2026-11-04')[0]
+    row = stored(original)
+    values = deepcopy(original.values)
+    values['_jin10']['date'] = '2026-11-05'
+    moved = Entry(original.identity, original.at, original.title, values)
+    revisions = []
+    session = SimpleNamespace(scalars=AsyncMock(return_value=[row]), scalar=AsyncMock(return_value=row), add=revisions.append)
+    now = datetime(2026, 11, 6, tzinfo=UTC)
+    async def run():
+        await save_entry(session, moved, 1, now)
+        assert row.values['_jin10']['source_dates'] == ['2026-11-04', '2026-11-05']
+        await withdraw_missing(session, date(2026, 11, 4), 'data', [], 2, now)
+        assert row.schedule_status == 'scheduled'
+        assert row.values['_jin10']['source_dates'] == ['2026-11-05']
+        await withdraw_missing(session, date(2026, 11, 5), 'data', [], 3, now)
+        assert row.schedule_status == 'withdrawn'
+        await save_entry(session, original, 4, now)
+        assert row.schedule_status == 'scheduled'
+    asyncio.run(run())

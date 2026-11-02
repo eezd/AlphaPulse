@@ -58,9 +58,8 @@ class EntrypointTests(unittest.TestCase):
         self.write_receipt()
         (self.directory / 'compose.yml').write_text('name: alphapulse-dev\nservices: {}\n')
         (self.directory / 'images.env').write_text('SYNTHETIC=only\n')
-        self.expected = {name: instance.SEARCH_IMAGE if name == 'searxng' else self.receipt['images'][
-            'web' if name == 'web' else 'backend']['digest'] for name in instance.SERVICES}
-        images = {image: {'Id': 'local-' + str(i), 'Architecture': 'amd64', 'Os': 'linux', 'Config': {'Labels': {
+        self.expected = {name: instance.SEARCH_IMAGE if name == 'searxng' else deploy.IMAGES['web' if name == 'web' else 'backend'] + ':' + self.receipt['version'] for name in instance.SERVICES}
+        images = {image: {'Id': 'local-' + str(i), 'Architecture': 'amd64', 'Os': 'linux', 'RepoDigests': [self.receipt['images']['web' if image.startswith(deploy.IMAGES['web'] + ':') else 'backend']['digest']] if image != instance.SEARCH_IMAGE else ['searxng/searxng@' + instance.SEARCH_DIGEST], 'Config': {'Labels': {
             'org.opencontainers.image.revision': self.receipt['commit'],
             'org.opencontainers.image.version': self.receipt['version']}}} for i, image in enumerate(set(self.expected.values()))}
         self.fixture = {'config': {'name': 'alphapulse-dev', 'services': {s: {'image': image} for s, image in self.expected.items()}},
@@ -100,16 +99,24 @@ class EntrypointTests(unittest.TestCase):
         self.assertEqual(up[up.index('--env-file') + 1], str(self.directory / 'images.env'))
         self.assertEqual(calls[-1]['args'][0], 'inspect')
 
+    def test_replaced_search_tag_never_starts_any_service(self):
+        self.fixture['images'][instance.SEARCH_IMAGE]['RepoDigests'] = []
+        calls = self.invoke(code=1)
+        self.assertFalse(any('up' in c['args'] for c in calls))
+
     def test_missing_or_mismatched_images_never_start_any_service(self):
-        backend = self.receipt['images']['backend']['digest']
-        for case in ('missing', 'labels', 'selection'):
+        backend = deploy.IMAGES['backend'] + ':' + self.receipt['version']
+        for case in ('missing', 'labels', 'selection', 'digest'):
             with self.subTest(case=case):
                 if case == 'missing': self.fixture['missing_image'] = backend
                 if case == 'labels': self.fixture['images'][backend]['Config']['Labels']['org.opencontainers.image.revision'] = 'b' * 40
                 if case == 'selection': self.fixture['config']['services']['api']['image'] = 'unaccepted'
+                if case == 'digest': self.fixture['images'][backend]['RepoDigests'] = []
                 calls = self.invoke(code=1)
                 self.assertFalse(any('up' in c['args'] for c in calls))
+                self.fixture['config']['services']['api']['image'] = backend
                 self.fixture.pop('missing_image', None)
+                self.fixture['images'][backend]['RepoDigests'] = [self.receipt['images']['backend']['digest']]
                 self.fixture['images'][backend]['Config']['Labels']['org.opencontainers.image.revision'] = 'a' * 40
 
     def test_receipt_must_be_verified_before_docker(self):
@@ -197,6 +204,7 @@ class InstallationTests(unittest.TestCase):
     def test_installed_helper_is_self_contained_and_service_set_matches_cd(self):
         self.assertEqual(set(instance.SERVICES), set(deploy.SERVICES))
         self.assertEqual(instance.SEARCH_IMAGE, deploy.SEARXNG_IMAGE)
+        self.assertEqual(instance.SEARCH_DIGEST, deploy.SEARXNG_DIGEST)
         subprocess.run(['bash', '-n', str(deploy.ROOT / 'deploy/start.sh'), str(deploy.ROOT / 'deploy/stop.sh')], check=True)
 
     def test_install_only_does_not_use_docker_or_change_deployment_receipt(self):
@@ -213,9 +221,9 @@ class InstallationTests(unittest.TestCase):
     def test_first_deployment_installs_versioned_entries(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
-            build = {'commit': 'a' * 40, 'images': {part: {'digest': 'synthetic'} for part in deploy.IMAGES}}
+            build = {'version':'20261101-aaaaaaaa', 'commit': 'a' * 40, 'images': {part: {'digest': 'synthetic'} for part in deploy.IMAGES}}
             with patch.object(deploy, 'INSTANCE', directory), patch.object(deploy, 'branch_head', return_value=build['commit']), \
-                    patch.object(deploy, 'validate_images'), patch.object(deploy, 'run', return_value=''), \
+                    patch.object(deploy, 'validate_images'), patch.object(deploy, 'run', return_value=json.dumps([{'RepoDigests': ['searxng/searxng@' + deploy.SEARXNG_DIGEST]}])), \
                     patch.object(deploy, 'health'), patch.object(deploy.time, 'sleep'):
                 deploy.deploy(build, directory)
             for name in ('start.sh', 'stop.sh', 'instance.py'):

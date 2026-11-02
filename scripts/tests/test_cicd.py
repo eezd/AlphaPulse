@@ -2,6 +2,8 @@
 
 from datetime import UTC, datetime
 import os
+import contextlib
+import json
 import fcntl
 from pathlib import Path
 import sys
@@ -17,11 +19,60 @@ import mirror
 
 
 class BuildTests(unittest.TestCase):
+    def test_search_health_checks_image_content_across_reference_styles(self):
+        container = {'Name': '/search', 'Image': 'accepted-local-image', 'RestartCount': 0,
+                     'Config': {'Image': 'historical@sha256:' + '1' * 64,
+                                'Labels': {'com.docker.compose.service': 'searxng'}},
+                     'State': {'Running': True, 'Paused': False}}
+        with patch.object(deploy, 'inspect_services', return_value=[container]), \
+                patch.object(deploy, 'run', side_effect=[json.dumps([{'Id': 'accepted-local-image'}]), 'commit', 'commit', '200']):
+            deploy.health([], {'commit': 'commit'}, ('searxng',))
+        with patch.object(deploy, 'inspect_services', return_value=[container]), \
+                patch.object(deploy, 'run', return_value=json.dumps([{'Id': 'different-local-image'}])):
+            with self.assertRaisesRegex(RuntimeError, 'Unexpected search image'):
+                deploy.health([], {'commit': 'commit'}, ('searxng',))
+
     def test_version_is_utc_commit_identity(self):
         timestamp = datetime(2026, 10, 29, 23, 59, tzinfo=UTC).timestamp()
         self.assertEqual(ci.version('abcdef0123456789' * 2 + 'abcdef01', timestamp), '20261029-abcdef01')
         with self.assertRaises(RuntimeError):
             ci.version('abcdef0', timestamp)
+
+    def test_published_outputs_use_tags_and_receipt_keeps_digests(self):
+        build = {'verified': True, 'commit': 'a'*40, 'version': '20261101-aaaaaaaa',
+                 'images': {part: {} for part in ci.IMAGES}}
+        with tempfile.TemporaryDirectory() as temporary:
+            directory=Path(temporary)
+            (directory/'build.json').write_text(json.dumps(build))
+            output=directory/'output'
+            digests=[repository+'@sha256:'+'1'*64 for repository in ci.IMAGES.values()]
+            with patch.object(ci,'ROOT',directory), patch.object(ci,'locked',return_value=contextlib.nullcontext()), \
+                    patch.object(ci,'existing_image',side_effect=digests), \
+                    patch.dict(os.environ,{'GITEA_EVENT_NAME':'push','GITEA_REF':'refs/heads/dev',
+                                          'GITEA_SHA':build['commit'],'GITHUB_OUTPUT':str(output)}):
+                ci.publish()
+            published=json.loads((directory/'build.json').read_text())
+            for (part,repository),digest in zip(ci.IMAGES.items(),digests):
+                self.assertEqual(published['images'][part]['digest'],digest)
+                self.assertIn(part+'='+repository+':'+build['version'],output.read_text())
+            self.assertNotIn('@sha256:',output.read_text())
+
+    def test_version_tag_is_checked_against_accepted_digest(self):
+        build={'verified':True,'commit':'a'*40,'version':'20261101-aaaaaaaa',
+               'images':{part:{'digest':repository+'@sha256:'+'1'*64} for part,repository in ci.IMAGES.items()}}
+        def docker(*args):
+            if args[:2]==('docker','pull'): return ''
+            part=next(p for p,r in ci.IMAGES.items() if args[-1].startswith(r+':'))
+            return json.dumps([{'RepoDigests':[build['images'][part]['digest']],
+                'Architecture':'amd64','Os':'linux','Config':{'Labels':{
+                    'org.opencontainers.image.revision':build['commit'],
+                    'org.opencontainers.image.version':build['version']}}}])
+        with patch.object(deploy,'run',side_effect=docker) as run:
+            deploy.validate_images(build)
+            self.assertTrue(all('@sha256:' not in call.args[-1] for call in run.call_args_list))
+        with patch.object(deploy,'run',return_value=json.dumps([{'RepoDigests':[]}])):
+            with self.assertRaisesRegex(RuntimeError,'differs from the accepted image'):
+                deploy.validate_images(build)
 
     def test_existing_version_rejects_different_full_commit(self):
         commit = 'a' * 40
@@ -85,7 +136,7 @@ class NewsResetTests(unittest.TestCase):
     def test_preview_never_stops_worker_or_confirms_deletion(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
-            build = {'images': {'backend': {'digest': 'synthetic'}}}
+            build = {'version':'20261101-aaaaaaaa', 'images': {'backend': {'digest': 'synthetic'}}}
             with patch.object(deploy, 'INSTANCE', directory), patch.object(deploy, 'validate_images'), patch.object(deploy, 'run', return_value='{}') as run:
                 deploy.reset_news_ai(build)
                 self.assertEqual(run.call_count, 2)
@@ -108,9 +159,9 @@ class RecoveryTests(unittest.TestCase):
             directory = Path(temporary)
             ci.save(directory / 'deployment.pending.json', {})
             services = [name for name in deploy.SERVICES if name != 'jin10-calendar']
-            previous = {'images': {part: {'digest': 'synthetic'} for part in ci.IMAGES}}
+            previous = {'version':'20261101-aaaaaaaa', 'images': {part: {'digest': 'synthetic'} for part in ci.IMAGES}}
             compose = 'services:\n' + ''.join(f'  {name}:\n    image: synthetic\n' for name in services)
-            with patch.object(deploy, 'run', return_value='') as run, \
+            with patch.object(deploy, 'run', return_value='') as run, patch.object(deploy, 'validate_search_image'), \
                     patch.object(deploy, 'validate_images'), patch.object(deploy, 'health') as health:
                 deploy.restore(directory, {'previous': previous, 'previous_compose': compose, 'previous_running': services})
                 update = next(call.args for call in run.call_args_list if 'up' in call.args)
@@ -122,13 +173,13 @@ class RecoveryTests(unittest.TestCase):
     def test_pending_write_failure_never_pauses_trader(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
-            previous = {'images': {part: {'digest': 'synthetic'} for part in ci.IMAGES}}
+            previous = {'version':'20261101-aaaaaaaa', 'images': {part: {'digest': 'synthetic'} for part in ci.IMAGES}}
             ci.save(directory / 'deployment.json', previous)
             (directory / 'compose.yml').write_text('synthetic')
             running = [{'Config': {'Labels': {'com.docker.compose.service': 'trader'}}, 'State': {'Running': True}}]
             with patch.object(deploy, 'INSTANCE', directory), patch.object(deploy, 'branch_head', return_value='a' * 40), \
                     patch.object(deploy, 'validate_images'), patch.object(deploy, 'inspect_services', return_value=running), \
-                    patch.object(deploy, 'run', return_value='{"busy":0}') as run, \
+                    patch.object(deploy, 'run', return_value='{"busy":0}') as run, patch.object(deploy, 'validate_search_image'), \
                     patch.object(deploy, 'save', side_effect=OSError('disk failure')):
                 with self.assertRaises(OSError):
                     deploy.deploy({**previous, 'commit': 'a' * 40}, directory)
@@ -137,7 +188,7 @@ class RecoveryTests(unittest.TestCase):
     def test_busy_recheck_recovers_without_stopping_services(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
-            previous = {'images': {part: {'digest': 'synthetic'} for part in ci.IMAGES}}
+            previous = {'version':'20261101-aaaaaaaa', 'images': {part: {'digest': 'synthetic'} for part in ci.IMAGES}}
             ci.save(directory / 'deployment.json', previous)
             (directory / 'compose.yml').write_text('synthetic')
             running = [{'Config': {'Labels': {'com.docker.compose.service': 'trader'}}, 'State': {'Running': True}}]
@@ -149,6 +200,8 @@ class RecoveryTests(unittest.TestCase):
                     return '[{"State":{"Paused":true}}]'
                 if args[:2] == ('docker', 'ps'):
                     return 'trader-id'
+                if args[:3] == ('docker', 'image', 'inspect'):
+                    return json.dumps([{'RepoDigests': ['searxng/searxng@' + deploy.SEARXNG_DIGEST]}])
                 return '{}'
             with patch.object(deploy, 'INSTANCE', directory), patch.object(deploy, 'branch_head', return_value='a' * 40), \
                     patch.object(deploy, 'validate_images'), patch.object(deploy, 'inspect_services', return_value=running), \
@@ -247,6 +300,43 @@ class MirrorTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             mirror.synchronize(self.work, str(self.directory / 'missing'), str(self.target))
         self.assertEqual(before, mirror.refs(self.target))
+
+
+class TagRecoveryTests(unittest.TestCase):
+    def test_recovery_converts_known_legacy_search_reference(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            ci.save(directory / 'deployment.pending.json', {})
+            previous = {'version': '20261101-aaaaaaaa', 'images': {part: {'digest': 'synthetic'} for part in ci.IMAGES}}
+            content = 'services:\n  searxng:\n    image: docker.io/searxng/searxng@' + deploy.SEARXNG_DIGEST + '\n'
+            with patch.object(deploy, 'validate_images'), patch.object(deploy, 'validate_search_image'), \
+                    patch.object(deploy, 'health'), patch.object(deploy, 'run', return_value=''):
+                deploy.restore(directory, {'previous': previous, 'previous_compose': content, 'previous_running': ['searxng']})
+            restored = (directory / 'compose.yml').read_text()
+            self.assertIn(deploy.SEARXNG_IMAGE, restored)
+            self.assertNotIn('@sha256:', restored)
+            self.assertNotIn('@sha256:', (directory / 'images.env').read_text())
+
+    def test_unknown_legacy_reference_cannot_restart_containers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            ci.save(directory / 'deployment.pending.json', {})
+            content = 'services:\n  searxng:\n    image: docker.io/searxng/searxng@sha256:' + '0' * 64 + '\n'
+            with patch.object(deploy, 'validate_images'), patch.object(deploy, 'run', return_value='') as run:
+                with self.assertRaisesRegex(RuntimeError, 'unknown digest'):
+                    deploy.restore(directory, {'previous': {}, 'previous_compose': content, 'previous_running': ['searxng']})
+                self.assertFalse(any('up' in c.args for c in run.call_args_list))
+            self.assertTrue((directory / 'deployment.pending.json').exists())
+
+    def test_search_tag_replacement_is_rejected(self):
+        for digest in (deploy.SEARXNG_DIGEST, 'sha256:' + '0' * 64):
+            with self.subTest(digest=digest), patch.object(deploy, 'run', return_value=json.dumps([{'RepoDigests': ['searxng/searxng@' + digest]}])) as run:
+                if digest == deploy.SEARXNG_DIGEST:
+                    deploy.validate_search_image()
+                else:
+                    with self.assertRaisesRegex(RuntimeError, 'Search version tag'):
+                        deploy.validate_search_image()
+                self.assertNotIn('@sha256:', run.call_args.args[-1])
 
 
 if __name__ == '__main__':

@@ -2,7 +2,7 @@
 name: alphapulse-dev
 
 x-backend: &backend
-  image: ${ALPHAPULSE_BACKEND_IMAGE:?Set a verified backend digest}
+  image: ${ALPHAPULSE_BACKEND_IMAGE:?Set a verified backend version tag}
   env_file: .env
   restart: unless-stopped
   stop_grace_period: 60s
@@ -10,7 +10,7 @@ x-backend: &backend
 
 services:
   searxng:
-    image: docker.io/searxng/searxng@sha256:f4aa660c54d062dedb268be84e821ea24e39f48c7a496af8dd02cc9eedb93847
+    image: docker.io/searxng/searxng:2026.10.30-ffa88e3ba
     restart: unless-stopped
     volumes: [./searxng.yml:/etc/searxng/settings.yml:ro]
     networks: [dev_default]
@@ -55,7 +55,7 @@ services:
     command: [python, -m, alphapulse.calendar.jin10_worker]
 
   web:
-    image: ${ALPHAPULSE_WEB_IMAGE:?Set a verified web digest}
+    image: ${ALPHAPULSE_WEB_IMAGE:?Set a verified web version tag}
     container_name: AlphaPulse-dev
     restart: unless-stopped
     depends_on:

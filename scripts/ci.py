@@ -281,8 +281,8 @@ def publish():
         with open(output, 'a') as stream:
             stream.write(f'version={build["version"]}\ncommit={build["commit"]}\n')
             for part in IMAGES:
-                stream.write(f'{part}={build["images"][part]["digest"]}\n')
-    print('Verified development digests published', flush=True)
+                stream.write(f'{part}={IMAGES[part]}:{build["version"]}\n')
+    print('Verified development version tags published', flush=True)
 
 
 def main():

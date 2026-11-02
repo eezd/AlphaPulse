@@ -1,7 +1,7 @@
 """Keep provider identities, raw evidence, field observation times and revisions together."""
 from datetime import date, datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,6 +17,10 @@ async def save_entry(session: AsyncSession, entry: Entry, raw_id: int, now: date
     ).with_for_update())
     values = {key: dict(value) for key, value in entry.values.items()}
     meta = values["_jin10"]
+    old_meta = row.values["_jin10"] if row and row.schedule_status != "withdrawn" else {}
+    source_dates = sorted(set(old_meta.get("source_dates", [old_meta["date"]] if old_meta else [])) | {meta["date"]})
+    if "source_dates" in old_meta or len(source_dates) > 1:
+        meta["source_dates"] = source_dates
     key = meta["indicator"]
     if meta["kind"] == "data":
         current = values[key]
@@ -62,13 +66,21 @@ async def withdraw_missing(session: AsyncSession, day: date, kind: str, entries:
     seen = {entry.identity for entry in entries}
     rows = await session.scalars(select(EconomicRelease).where(
         EconomicRelease.source == "jin10",
-        EconomicRelease.values["_jin10"]["date"].as_string() == day.isoformat(),
+        or_(EconomicRelease.values["_jin10"]["source_dates"].contains([day.isoformat()]),
+            (~EconomicRelease.values["_jin10"].has_key("source_dates")) &
+            (EconomicRelease.values["_jin10"]["date"].as_string() == day.isoformat())),
         EconomicRelease.values["_jin10"]["kind"].as_string() == kind,
         EconomicRelease.schedule_status != "withdrawn",
     ).with_for_update())
     for row in rows:
         if row.external_id not in seen:
-            row.schedule_status = "withdrawn"
+            meta = dict(row.values["_jin10"])
+            remaining = [d for d in meta.get("source_dates", [meta["date"]]) if d != day.isoformat()]
+            if "source_dates" in meta:
+                meta["source_dates"] = remaining
+                row.values = {**row.values, "_jin10": meta}
+            if not remaining:
+                row.schedule_status = "withdrawn"
             row.schedule_checked_at = row.last_checked_at = now
             row.revision_no += 1
             record_revision(session, row, raw_id)
