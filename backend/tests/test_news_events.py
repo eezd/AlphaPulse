@@ -46,7 +46,7 @@ def test_members_are_aggregated_once_and_old_independent_package_expires(trading
     now=datetime.now(UTC)
     packages=[SimpleNamespace(id=i,updated_at=now if i<3 else now-timedelta(days=4),importance_stars=4,
         result={'title':str(i)},published_revision=2,category='security',tags=[]) for i in (1,2,3)]
-    event=SimpleNamespace(id=1,published_revision=2,result={'title':'Incident','importance_stars':2,'category':'security','timeline_points':[{'package_id':i} for i in (1,2)]})
+    event=SimpleNamespace(id=1,updated_at=now,published_revision=2,result={'title':'Incident','importance_stars':2,'category':'security','timeline_points':[{'package_id':i} for i in (1,2)]})
     session=AsyncMock()
     values=[packages,[SimpleNamespace(package_id=i,event_id=1) for i in (1,2)],[event]]
     session.scalars.side_effect=[SimpleNamespace(all=lambda rows=rows:rows) for rows in values]
@@ -77,7 +77,7 @@ def test_new_member_remains_readable_until_event_represents_it(trading):
     now=datetime.now(UTC)
     packages=[SimpleNamespace(id=i,updated_at=now,importance_stars=4,result={'title':str(i)},published_revision=1,
         category='security',tags=[]) for i in (1,2,3)]
-    event=SimpleNamespace(id=1,published_revision=1,result={'title':'Incident','importance_stars':4,'category':'security',
+    event=SimpleNamespace(id=1,updated_at=now,published_revision=1,result={'title':'Incident','importance_stars':4,'category':'security',
         'timeline_points':[{'package_id':1},{'package_id':2}]})
     session=AsyncMock()
     rows=[packages,[SimpleNamespace(package_id=i,event_id=1) for i in (1,2,3)],[event]]

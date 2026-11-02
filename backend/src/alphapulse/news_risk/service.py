@@ -89,8 +89,8 @@ async def validate_submission(provider, system, messages, schema, completion, us
     except ValidationError as error:
         errors = error.errors(include_input=False, include_url=False, include_context=False)
         if not all('timeline_points' in e['loc'] and
-                   (any(f in e['loc'] for f in ('occurred_at', 'reported_at', 'time_precision'))
-                    or e['msg'] in ('Value error, 发生时间与精度不一致', 'Value error, 发生时间必须有时区', 'Value error, 报道时间必须有时区'))
+                   (any(f in e['loc'] for f in ('occurred_at', 'reported_at', 'time_precision', 'planned_at', 'planned_precision'))
+                    or e['msg'] in ('Value error, 发生时间与精度不一致', 'Value error, 发生时间必须有时区', 'Value error, 报道时间必须有时区', 'Value error, 计划时间与精度不一致', 'Value error, 计划时间必须有时区'))
                    for e in errors):
             raise SubmissionFailure(str(error), {'rounds': usages}) from error
     from alphapulse.news_risk.progress import step
@@ -99,7 +99,7 @@ async def validate_submission(provider, system, messages, schema, completion, us
     if completion.thinking_blocks:
         assistant['thinking_blocks'] = completion.thinking_blocks
     messages = [*messages, assistant, {'role': 'tool', 'tool_call_id': calls[0]['id'],
-        'result': json.dumps({'errors': errors, 'instruction': '仅纠正时间字段并重新submit；未知发生时间用null和unknown，不改变原文证据，不添加查询。'}, ensure_ascii=False)}]
+        'result': json.dumps({'errors': errors, 'instruction': '仅纠正时间字段并重新submit；未知发生或计划时间用null和unknown，不改变原文证据，不添加查询。'}, ensure_ascii=False)}]
     if not fits_context(provider, system, {'messages': messages}, schema):
         raise SubmissionFailure('纠错上下文不足；证据未截断', {'rounds': usages})
     repaired = None

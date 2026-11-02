@@ -2,7 +2,7 @@
 import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
-from sqlalchemy import select, update, func, exists, text, case
+from sqlalchemy import BigInteger, select, update, func, exists, text, case
 from sqlalchemy.dialects.postgresql import insert
 from alphapulse.core.db import SessionLocal, engine
 from alphapulse.models import NewsItem
@@ -65,8 +65,10 @@ async def _analyze(target_id=None, frozen=None):
             provider, system, rules, _ = await configuration(session, settings, 'grouping')
         catalog = await session.scalar(select(func.max(NewsSummary.id)))
         tag_score = sum((case((NewsSummary.tags.contains([tag.strip().casefold()]), 1), else_=0) for tag in row.input.get('source_tags', [])[:8] if isinstance(tag, str)), 0)
+        from alphapulse.news_risk.retrieval import terms_for, matching
+        _, keyword_score = matching(NewsSummary, terms_for(row.input['title'], row.input.get('source_tags', [])[:6]))
         candidates = (await session.scalars(select(NewsSummary).where(NewsSummary.replacement_ids == [], NewsSummary.state != 'withdrawn').order_by(
-            (func.greatest(func.similarity(NewsSummary.title, row.input['title']), func.similarity(NewsSummary.fact, row.input['title'])) + tag_score).desc(), NewsSummary.updated_at.desc()).limit(80))).all()
+            (func.greatest(func.similarity(NewsSummary.title, row.input['title']), func.similarity(NewsSummary.fact, row.input['title'])) + tag_score + keyword_score).desc(), NewsSummary.updated_at.desc()).limit(80))).all()
         candidate_inputs = [{'id': e.id, 'title': e.title, 'published_at': e.published_at.isoformat(), 'entities': e.entities, 'tags': e.tags, 'fact': e.fact, 'content_kind': e.content_kind} for e in candidates]
         had_success = row.result is not None
         row.state = 'processing'; row.started_at = datetime.now(UTC); row.rules = rules; row.model = provider.model
@@ -260,14 +262,17 @@ async def outlook(prepare_only=False):
         inputs = await reading_inputs(session, now-timedelta(hours=72))
         from alphapulse.models.risk import ReprocessJob
         job = await session.scalar(select(ReprocessJob).where(ReprocessJob.state == 'running').limit(1))
-        if job and job.settings.get('request'): job = None
+        if job and job.settings.get('request', {}).get('run_mode') != 'history_only' and job.settings.get('request'): job = None
+        if job and job.settings.get('request', {}).get('run_mode') == 'history_only':
+            from alphapulse.models.risk import ReprocessItem
+            if await session.scalar(select(ReprocessItem.id).where(ReprocessItem.job_id == job.id, ReprocessItem.state.in_(['pending','processing'])).limit(1)): return
         if job and job.position < len(job.items):
             if requested and requested.quotes.get('job_id') == job.id: return
             job = None
         if job:
             from alphapulse.models.risk import NewsEvent
-            if await session.scalar(select(NewsSummary.id).where(NewsSummary.state.in_(['pending', 'processing'])).limit(1)): return
-            if await session.scalar(select(NewsEvent.id).where(NewsEvent.state.in_(['pending', 'processing'])).limit(1)): return
+            if await session.scalar(select(NewsSummary.id).where(NewsSummary.state.in_(['pending', 'processing']), NewsSummary.review_config['job_id'].astext.cast(BigInteger) == job.id).limit(1)): return
+            if await session.scalar(select(NewsEvent.id).where(NewsEvent.state.in_(['pending', 'processing']), NewsEvent.review_config['job_id'].astext.cast(BigInteger) == job.id).limit(1)): return
             from alphapulse.news_risk.reprocess import frozen_configuration
             provider, system, rules = await frozen_configuration(session, job.settings, 'outlook')
         else:
@@ -304,9 +309,9 @@ async def outlook(prepare_only=False):
         try:
             main = [p for p in inputs if p['importance_stars'] >= 3]
             low = [p for p in inputs if p['importance_stars'] < 3]
-            result = await briefing.generate(provider, system, main) if main else {'reading': [], 'synthesis': None, 'usage': []}
-            # Score all low-star candidates, then select up to three distinct domains.
-            expansion = await briefing.generate(provider, system, low) if low else {'reading': []}
+            ranked = await briefing.generate(provider, system, main, ranking_only=True) if main else {'reading': [], 'usage': []}
+            candidates = briefing.shortlist(low)
+            expansion = await briefing.generate(provider, system, candidates, ranking_only=True) if candidates else {'reading': [], 'usage': []}
             domains, extra = set(), []
             by_id = {(p.get('kind', 'package'), p['id']): p for p in inputs}
             for row in expansion['reading']:
@@ -314,8 +319,10 @@ async def outlook(prepare_only=False):
                 if category not in domains:
                     domains.add(category); extra.append(row)
                 if len(extra) == 3: break
-            snapshot.result = {**result, 'expansion': extra, 'inputs': inputs, 'rules': rules,
-                'expansion_usage': expansion.get('usage', []), 'as_of': now.isoformat()}
+            chosen = main + [by_id[(r.get('kind', 'package'), r['id'])] for r in extra]
+            result = await briefing.generate(provider, system, chosen, rankings=ranked['reading']+extra)
+            snapshot.result = {**result, 'reading': ranked['reading'], 'expansion': extra, 'inputs': inputs, 'rules': rules,
+                'usage': ranked['usage']+result['usage'], 'expansion_usage': expansion['usage'], 'as_of': now.isoformat()}
             step('保存阅读与趋势')
             snapshot.state = 'done'
         except Exception as error:

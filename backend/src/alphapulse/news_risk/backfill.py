@@ -20,7 +20,7 @@ async def classification(session, news):
     return complete, article, packages
 
 
-async def preview(session, start, end, modes):
+async def preview(session, start, end, modes, selection="range"):
     linked = select(NewsSummary.id).join(SummaryArticle).where(
         SummaryArticle.analysis_id == ArticleAnalysis.id, SummaryArticle.active.is_(True),
         NewsSummary.replacement_ids == [], NewsSummary.state != 'withdrawn')
@@ -29,15 +29,18 @@ async def preview(session, start, end, modes):
     complete = exists(select(ArticleAnalysis.id).where(ArticleAnalysis.news_id == NewsItem.id,
         ArticleAnalysis.content_hash == NewsItem.content_hash, ArticleAnalysis.result.is_not(None),
         func.jsonb_typeof(ArticleAnalysis.result) != 'null', exists(linked), ~exists(incomplete)))
+    selection_filter = exists(select(ArticleAnalysis.id).where(ArticleAnalysis.news_id == NewsItem.id,
+        or_(ArticleAnalysis.started_at.is_not(None), ArticleAnalysis.result.is_not(None)))) if selection == 'attempted' else (
+        (NewsItem.published_at >= start) & (NewsItem.published_at < end))
     rows = (await session.execute(select(NewsItem.id, NewsItem.content_hash, complete.label('complete')).where(
-        NewsItem.published_at >= start, NewsItem.published_at < end, NewsItem.published_at <= datetime.now(UTC))
+        selection_filter, NewsItem.published_at <= datetime.now(UTC))
         .order_by(NewsItem.published_at, NewsItem.id))).all()
     counts = {'total':len(rows), 'missing':0, 'review':0}
     items = []
     for row in rows:
         mode = 'review' if row.complete else 'missing'
         counts[mode] += 1
-        if mode in modes: items.append({'id':row.id, 'hash':row.content_hash, 'mode':mode})
+        if selection == 'attempted' or mode in modes: items.append({'id':row.id, 'hash':row.content_hash, 'mode':'review' if selection == 'attempted' else mode})
     packages = select(NewsSummary.id).join(SummaryArticle).join(ArticleAnalysis).join(NewsItem).where(
         NewsItem.id == any_(literal([i['id'] for i in items],type_=ARRAY(BigInteger))), ArticleAnalysis.content_hash == NewsItem.content_hash,
         SummaryArticle.active.is_(True), NewsSummary.replacement_ids == [], NewsSummary.state != 'withdrawn').distinct()
@@ -48,12 +51,12 @@ async def preview(session, start, end, modes):
     if settings is None: raise ValueError('请先配置新闻AI')
     config = await capture(session, settings)
     identifier = secrets.token_urlsafe(24)
-    value = {'items':items, 'config':config, 'request':{'start':start.isoformat(),'end':end.isoformat(),'modes':modes}}
+    value = {'items':items, 'config':config, 'request':{'start':start.isoformat() if start else None,'end':end.isoformat() if end else None,'modes':modes,'selection':selection}}
     await redis.set('ap:risk:preview:'+identifier, json.dumps(value, default=str), ex=900)
     return {**counts, 'preview_id':identifier, 'models':{k:{field:v['provider'][field] for field in ('model','reasoning_effort')} for k,v in config['configurations'].items()}}
 
 
-async def start(session, identifier):
+async def prepare_start(session, identifier):
     raw = await redis.get('ap:risk:preview:'+identifier)
     if not raw: raise ValueError('预览已过期，请重新预览')
     value = json.loads(raw)
@@ -64,9 +67,18 @@ async def start(session, identifier):
     if settings is None or await capture(session, settings) != value['config']:
         raise ValueError('模型或Skill配置已变化，请重新预览')
     if not value['items']: raise ValueError('没有符合选择条件的新闻')
+    return value
+
+
+async def start(session, identifier, run_mode="shared", validated=False):
+    value = await prepare_start(session, identifier)
+    if run_mode == 'history_only':
+        if not validated: raise ValueError('仅历史批次必须先验证三阶段配置')
+        settings = await session.get(RiskSettings, 1)
+        settings.enabled = True
     job = ReprocessJob(state='pending', items=[], position=0, failures=[], settings=value['config'])
     session.add(job); await session.flush()
-    job.settings = {**job.settings, 'job_id':job.id, 'request':value['request']}
+    job.settings = {**job.settings, 'job_id':job.id, 'request':{**value['request'], 'run_mode':run_mode}}
     session.add_all([ReprocessItem(job_id=job.id, news_id=i['id'], content_hash=i['hash'], mode=i['mode'], state='pending') for i in value['items']])
     await session.commit()
     await redis.delete('ap:risk:preview:'+identifier)
@@ -167,5 +179,20 @@ async def reconcile(session, job):
                 if not any(t.kind=='events' and t.object_id==event.id for t in targets): waiting=True
                 if event.state=='failed': failures.append({'stage':'events','id':event.id,'error':event.error})
     if waiting: await session.commit(); return
+    if not failures and job.settings.get('request', {}).get('run_mode') == 'history_only':
+        from alphapulse.models.risk import RiskSnapshot
+        from alphapulse.news_risk import briefing
+        from alphapulse.news_risk.events import reading_inputs
+        from datetime import timedelta
+        inputs = await reading_inputs(session, datetime.now(UTC)-timedelta(hours=72))
+        key = briefing.fingerprint(briefing.semantic_packages(inputs), job.settings['configurations']['outlook']['rules'])
+        snapshot = await session.scalar(select(RiskSnapshot).where(
+            RiskSnapshot.quotes['job_id'].astext.cast(BigInteger) == job.id,
+            RiskSnapshot.quotes['fingerprint'].as_string() == key).order_by(RiskSnapshot.id.desc()).limit(1))
+        if snapshot is None or snapshot.state == 'processing' or snapshot.quotes.get('retry_requested'): return
+        if snapshot.state == 'failed': failures.append({'stage':'outlook','id':snapshot.id,'error':snapshot.error})
+    if job.settings.get('request', {}).get('run_mode') == 'history_only':
+        settings = await session.get(RiskSettings, 1)
+        settings.enabled = False
     job.failures=list({(f['stage'],f['id']):f for f in failures}.values()); job.state='failed' if failures else 'done'
     await session.commit()

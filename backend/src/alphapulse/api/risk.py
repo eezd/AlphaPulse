@@ -120,7 +120,7 @@ async def enable(body: SettingsIn, session: DB):
             await gate.commit()
 
 
-async def validate_enable(body: SettingsIn, session: DB):
+async def validate_enable(body: SettingsIn, session: DB, activate=True):
     from alphapulse.news_risk.pipeline import configuration, Grouping, summarize_articles, Evidence, validate_evidence
     from alphapulse.news_risk import briefing
     before = await session.get(RiskSettings, 1)
@@ -154,7 +154,8 @@ async def validate_enable(body: SettingsIn, session: DB):
             raise HTTPException(409, '验证期间模型或Skill已变化，请重新验证')
     value.start_at = previous.start_at if previous and previous.start_at else datetime.now(UTC)
     value.max_concurrency = previous.max_concurrency if previous else 5
-    await session.merge(value); await session.commit()
+    if activate:
+        await session.merge(value); await session.commit()
     return success(None)
 
 
@@ -375,12 +376,15 @@ async def event_timeline(identifier: int, session: DB):
 
 class ReprocessIn(BaseModel):
     modes: list[Literal['missing','review']] = Field(min_length=1,max_length=2)
-    start: datetime
-    end: datetime
+    start: datetime | None = None
+    end: datetime | None = None
+    selection: Literal['range', 'attempted'] = 'range'
 
     @model_validator(mode='after')
     def range_valid(self):
         if len(set(self.modes)) != len(self.modes): raise ValueError('回补选项不能重复')
+        if self.selection == 'attempted': return self
+        if self.start is None or self.end is None: raise ValueError('时间段不能为空')
         if self.start.tzinfo is None or self.end.tzinfo is None or self.start >= self.end:
             raise ValueError('请提供带时区的有效起止时间')
         return self
@@ -389,19 +393,40 @@ class ReprocessIn(BaseModel):
 @router.post('/reprocess/preview')
 async def reprocess_preview(body: ReprocessIn, session: DB):
     from alphapulse.news_risk.backfill import preview
-    try: return success(await preview(session,body.start,body.end,body.modes))
+    try: return success(await preview(session,body.start,body.end,body.modes,body.selection))
     except ValueError as error: raise HTTPException(409,str(error)) from error
 
 
 class ReprocessStart(BaseModel):
+    run_mode: Literal['shared', 'history_only'] = 'shared'
     preview_id: str = Field(min_length=20,max_length=80,pattern='^[A-Za-z0-9_-]+$')
 
 
 @router.post('/reprocess', status_code=202)
 async def reprocess_start(body: ReprocessStart, session: DB):
-    from alphapulse.news_risk.backfill import start
-    try: result = await start(session, body.preview_id)
-    except ValueError as error: raise HTTPException(409, str(error)) from error
+    from alphapulse.news_risk.backfill import start, prepare_start
+    if body.run_mode == 'history_only':
+        from alphapulse.core.db import engine
+        from alphapulse.news_risk.scheduler import GATE
+        async with engine.connect() as gate:
+            if not await gate.scalar(text('SELECT pg_try_advisory_lock(:gate, 1)'), {'gate': GATE}):
+                raise HTTPException(409, '请先暂停AI并等待在途任务完成')
+            await gate.commit()
+            try:
+                settings = await default_settings(session)
+                if settings.enabled: raise HTTPException(409, '请先暂停AI')
+                try: await prepare_start(session, body.preview_id)
+                except ValueError as error: raise HTTPException(409, str(error)) from error
+                # Enable and job creation commit together while admission is blocked.
+                await validate_enable(SettingsIn(**config_out(settings)), session, activate=False)
+                try: result = await start(session, body.preview_id, body.run_mode, validated=True)
+                except ValueError as error: raise HTTPException(409, str(error)) from error
+            finally:
+                await gate.execute(text('SELECT pg_advisory_unlock(:gate, 1)'), {'gate': GATE})
+                await gate.commit()
+    else:
+        try: result = await start(session, body.preview_id, body.run_mode)
+        except ValueError as error: raise HTTPException(409, str(error)) from error
     return success(result)
 
 
@@ -419,7 +444,11 @@ async def reprocess_cancel(identifier: int, session: DB):
     job = await session.get(ReprocessJob, identifier, with_for_update=True)
     if job is None: raise HTTPException(404, '任务不存在')
     if job.state not in ('pending', 'running'): raise HTTPException(409, '任务已经结束')
-    job.state = 'cancelled'; await session.commit(); return success(None)
+    job.state = 'cancelled'
+    if job.settings.get('request', {}).get('run_mode') == 'history_only':
+        settings = await session.get(RiskSettings, 1)
+        settings.enabled = False
+    await session.commit(); return success(None)
 
 
 @router.post('/reprocess/{identifier}/retry', status_code=202)

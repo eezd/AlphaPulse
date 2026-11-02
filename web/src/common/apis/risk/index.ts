@@ -15,7 +15,7 @@ export const createNewsSkillTemplatesApi = (refreshExisting = false) => request<
 export const listNewsEventsApi = (page = 1) => request<{ items: Risk.NewsEvent[], total: number }>({ url: "/risk/events", method: "get", params: { page } })
 export const getNewsEventApi = (id: number) => request<Risk.EventDetail>({ url: `/risk/events/${id}`, method: "get" })
 export const previewReprocessApi = (data: Risk.ReprocessRange) => request<Risk.ReprocessPreview>({ url: "/risk/reprocess/preview", method: "post", data })
-export const startReprocessApi = (data: { preview_id: string }) => request<{ id: number }>({ url: "/risk/reprocess", method: "post", data })
+export const startReprocessApi = (data: { preview_id: string, run_mode?: "shared" | "history_only" }) => request<{ id: number }>({ url: "/risk/reprocess", method: "post", data })
 export const listReprocessApi = () => request<Risk.ReprocessJob[]>({ url: "/risk/reprocess", method: "get" })
 export const cancelReprocessApi = (id: number) => request<null>({ url: `/risk/reprocess/${id}/cancel`, method: "post" })
 export const retryReprocessApi = (id: number) => request<null>({ url: `/risk/reprocess/${id}/retry`, method: "post" })

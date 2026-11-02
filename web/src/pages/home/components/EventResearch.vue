@@ -15,6 +15,8 @@ const detailError = ref(false)
 const detailId = ref(0)
 const range = ref<[Date, Date] | null>(null)
 const modes = ref<("missing" | "review")[]>(["missing"])
+const selection = ref<"range" | "attempted">("range")
+const runMode = ref<"shared" | "history_only">("shared")
 const preview = ref<Risk.ReprocessPreview | null>(null)
 const jobs = ref<Risk.ReprocessJob[]>([])
 const batch = ref<Awaited<ReturnType<typeof api.getReprocessDetailApi>> | null>(null)
@@ -77,30 +79,30 @@ async function open(id: number) {
   }
 }
 async function inspect() {
-  if (!range.value || busy.value) return
+  if ((selection.value === "range" && !range.value) || busy.value) return
   const version = user.sessionVersion
-  const data = { start: range.value[0].toISOString(), end: range.value[1].toISOString(), modes: [...modes.value] }
+  const data = { selection: selection.value, start: range.value?.[0].toISOString(), end: range.value?.[1].toISOString(), modes: selection.value === "attempted" ? ["review" as const] : [...modes.value] }
   const op = ++operation
   busy.value = true
   try {
     const result = await api.previewReprocessApi(data)
-    if (active && version === user.sessionVersion && range.value && data.start === range.value[0].toISOString() && data.end === range.value[1].toISOString() && data.modes.join() === modes.value.join()) preview.value = result
+    if (active && version === user.sessionVersion && data.selection === selection.value && data.start === range.value?.[0].toISOString() && data.end === range.value?.[1].toISOString() && data.modes.join() === (selection.value === "attempted" ? "review" : modes.value.join())) preview.value = result
   } finally {
     if (active && op === operation && version === user.sessionVersion) busy.value = false
   }
 }
 async function start() {
-  if (!range.value || !preview.value || busy.value) return
+  if ((selection.value === "range" && !range.value) || !preview.value || busy.value) return
   const version = user.sessionVersion
-  const data = { start: range.value[0].toISOString(), end: range.value[1].toISOString(), modes: [...modes.value] }
+  const data = { selection: selection.value, start: range.value?.[0].toISOString(), end: range.value?.[1].toISOString(), modes: selection.value === "attempted" ? ["review" as const] : [...modes.value] }
   const previewId = preview.value.preview_id
   await ElMessageBox.confirm(`回补 ${preview.value.articles} 篇新闻将产生模型费用，关联包和事件也会更新。是否启动？`, "AI 历史回补")
   if (!active || version !== user.sessionVersion || busy.value) return
   const op = ++operation
   busy.value = true
   try {
-    if (!preview.value || preview.value.preview_id !== previewId || data.modes.join() !== modes.value.join() || !range.value || data.start !== range.value[0].toISOString() || data.end !== range.value[1].toISOString()) return
-    await api.startReprocessApi({ preview_id: previewId })
+    if (!preview.value || preview.value.preview_id !== previewId || data.modes.join() !== (selection.value === "attempted" ? "review" : modes.value.join()) || data.selection !== selection.value || data.start !== range.value?.[0].toISOString() || data.end !== range.value?.[1].toISOString()) return
+    await api.startReprocessApi({ preview_id: previewId, run_mode: runMode.value })
     if (active && version === user.sessionVersion) {
       preview.value = null
       await load()
@@ -180,7 +182,15 @@ defineExpose({ open })
     <details class="mt-4">
       <summary>AI 历史回补</summary>
       <p>按新闻发布时间选择范围，使用现存最新修订。不会还原历史时点；共享包和事件可能同时更新。AI 暂停时任务等待。</p>
-      <el-checkbox-group v-model="modes">
+      <el-select v-model="selection" @change="preview = null">
+        <el-option label="按时间段选择" value="range" />
+        <el-option label="全部已有AI处理记录（重新分包）" value="attempted" />
+      </el-select>
+      <el-select v-model="runMode" @change="preview = null">
+        <el-option label="与实时任务共享调度" value="shared" />
+        <el-option label="仅运行本批次，完成后暂停" value="history_only" />
+      </el-select>
+      <el-checkbox-group v-if="selection === 'range'" v-model="modes">
         <el-checkbox value="missing">
           补齐未完成研判
         </el-checkbox>
@@ -188,8 +198,11 @@ defineExpose({ open })
           已研判重新核对（重新分包及核验）
         </el-checkbox>
       </el-checkbox-group>
-      <el-date-picker v-model="range" type="datetimerange" class="!max-w-full" start-placeholder="起始时间" end-placeholder="结束时间" />
-      <el-button :loading="busy" :disabled="!range || !modes.length" @click="inspect">
+      <p v-else>
+        重新分包并核验所有曾尝试过 AI 处理的新闻，包括此前失败的新闻。
+      </p>
+      <el-date-picker v-if="selection === 'range'" v-model="range" type="datetimerange" class="!max-w-full" start-placeholder="起始时间" end-placeholder="结束时间" />
+      <el-button :loading="busy" :disabled="(selection === 'range' && !range) || (selection === 'range' && !modes.length)" @click="inspect">
         预览范围
       </el-button>
       <template v-if="preview">
@@ -204,7 +217,7 @@ defineExpose({ open })
       <div v-for="job in jobs" :key="job.id" class="my-2">
         #{{ job.id }} · {{ job.state }} · 新闻处理 {{ job.completed }}/{{ job.total }}
         <p v-if="job.request">
-          {{ formatTime(job.request.start) }} 至 {{ formatTime(job.request.end) }} · {{ job.request.modes.map(m => m === 'missing' ? '补齐未完成' : '重新核对').join('、') }}
+          {{ job.request.selection === 'attempted' ? '全部已有AI处理记录' : `${formatTime(job.request.start)} 至 ${formatTime(job.request.end)}` }} · {{ job.request.run_mode === 'history_only' ? '仅历史，结束暂停' : '共享调度' }} · {{ job.request.modes.map(m => m === 'missing' ? '补齐未完成' : '重新核对').join('、') }}
         </p>
         <p v-if="job.counts">
           成功 {{ job.counts.done ?? 0 }} · 处理中 {{ job.counts.processing ?? 0 }} · 待处理 {{ job.counts.pending ?? 0 }} · 失败 {{ job.counts.failed ?? 0 }} · 跳过 {{ job.counts.skipped ?? 0 }}
@@ -247,7 +260,7 @@ defineExpose({ open })
       <h2>{{ detail.title }}</h2><p>{{ detail.result?.summary }}</p>
       <el-alert v-if="detail.error" :title="detail.error" type="warning" :closable="false" />
       <div v-for="(point, index) in detail.result?.timeline_points" :key="index" class="my-4 border-l-2 pl-3">
-        <b>{{ point.time_text || '发生时间未知' }}</b> · {{ point.time_precision }} · {{ point.verification }}
+        <b>{{ point.time_text || '发生时间未知' }}</b><span v-if="point.planned_at"> · 计划 {{ point.planned_at }}（{{ point.planned_precision }}）</span><span v-if="point.period_text"> · 统计期 {{ point.period_text }}</span> · {{ point.time_precision }} · {{ point.verification }}
         <p>{{ point.description }}</p><p>报道时间：{{ formatTime(point.reported_at) }}</p>
         <el-button link @click="emit('package', point.package_id)">
           包 #{{ point.package_id }} · v{{ point.package_revision }}

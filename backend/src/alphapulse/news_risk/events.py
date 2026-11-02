@@ -42,6 +42,10 @@ def validate_timeline(result, packages):
             PackageTimePoint.model_validate(p).occurred_at == point.occurred_at and p.get('time_precision') == point.time_precision
             and p.get('time_text') == point.time_text for p in package['result'].get('timeline_points', [])):
             raise ValueError('事件发生时间必须来自组成包已核验时间点')
+        if point.planned_at is not None and not any(
+            PackageTimePoint.model_validate(p).planned_at == point.planned_at and p.get('planned_precision') == point.planned_precision
+            for p in package['result'].get('timeline_points', [])):
+            raise ValueError('事件计划时间必须来自组成包已核验计划')
         if any(ref not in allowed for ref in point.evidence_refs):
             raise ValueError('时间线引用必须来自已核验包的原文证据')
     result.timeline_points.sort(key=lambda p: (p.occurred_at is None, p.occurred_at or datetime.max.replace(tzinfo=UTC), p.package_id))
@@ -174,8 +178,8 @@ async def reading_inputs(session, cutoff):
             included.add(event.id)
             importance = max(event.result['importance_stars'], *(p.importance_stars for p in packages if memberships.get(p.id) == event.id and p.updated_at >= cutoff))
             inputs.append({'kind': 'event', 'id': event.id, 'revision': event.published_revision, 'importance_stars': importance,
-                'category': event.result['category'], 'tags': [], 'result': event.result})
+                'updated_at': event.updated_at.isoformat(), 'category': event.result['category'], 'tags': [], 'result': event.result})
         else:
             inputs.append({'kind': 'package', 'id': package.id, 'revision': package.published_revision, 'importance_stars': package.importance_stars,
-                'category': package.category, 'tags': package.tags, 'result': package.result})
+                'updated_at': package.updated_at.isoformat(), 'category': package.category, 'tags': package.tags, 'result': package.result})
     return inputs

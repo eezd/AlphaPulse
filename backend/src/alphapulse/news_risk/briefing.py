@@ -47,9 +47,25 @@ def semantic_packages(inputs):
     return sorted(result, key=lambda p: (p['kind'], p['id']))
 
 
-async def generate(provider, system, inputs):
+def shortlist(inputs):
+    groups = {}
+    for item in sorted(inputs, key=lambda p: (p['importance_stars'], str(p.get('updated_at', '')), -p['id']), reverse=True):
+        groups.setdefault(item['category'], []).append(item)
+    result = []
+    while groups and len(result) < 12:
+        for category in list(groups):
+            result.append(groups[category].pop(0))
+            if not groups[category]: del groups[category]
+            if len(result) == 12: break
+    return result
+
+
+async def generate(provider, system, inputs, ranking_only=False, rankings=None):
     reading, notes, usages = [], [], []
-    pending = list(inputs)
+    pending = list(inputs) if rankings is None else []
+    if rankings is not None:
+        reading = rankings
+        notes = [json.dumps({'packages': inputs, 'ranking': rankings}, ensure_ascii=False, default=str)]
     while pending:
         batch = []
         while pending and fits_context(provider, system, {'task': 'ranking', 'packages': [*batch, pending[0]]}, Ranked):
@@ -73,6 +89,8 @@ async def generate(provider, system, inputs):
                 raise ValueError('阅读排序遗漏、重复或引用未知包版本')
             reading.extend(r.model_dump() for r in ranked.reading)
             notes.append(ranked.notes); usages.append(used)
+    if ranking_only:
+        return {'reading': sorted(reading, key=lambda r: (-r['priority'], r['id'])), 'usage': usages}
     payload = {'task': 'synthesis', 'notes': notes}
     while not fits_context(provider, system, payload, Synthesis):
         compacted, group = [], []
@@ -92,6 +110,8 @@ async def generate(provider, system, inputs):
     synthesis, used = await complete(provider, system, payload, Synthesis)
     allowed = {(p.get('kind', 'package'), p['id'], p['revision']) for p in inputs}
     if any((r.kind, r.id, r.revision) not in allowed for r in synthesis.references): raise ValueError('综合判断引用未知包版本')
+    authoritative = {(r.get('kind', 'package'), r['id'], r['revision']): r for r in reading}
+    synthesis.references = [Reading.model_validate(authoritative[(r.kind, r.id, r.revision)]) for r in synthesis.references]
     usages.append(used)
     reading.sort(key=lambda r: (-r['priority'], -next(p['importance_stars'] for p in inputs if p['id'] == r['id'] and p.get('kind', 'package') == r['kind']), r['id']))
     return {'reading': reading, 'synthesis': synthesis.model_dump(), 'usage': usages}

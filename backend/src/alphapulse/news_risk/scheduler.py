@@ -4,7 +4,7 @@ import json
 import logging
 import time
 from datetime import UTC, datetime
-from sqlalchemy import select, text, func
+from sqlalchemy import select, text, func, BigInteger
 from alphapulse.core.db import SessionLocal
 from alphapulse.core.redis import redis
 from alphapulse.models.risk import RiskSettings, NewsSummary, NewsEvent, ArticleAnalysis, ReprocessJob, ReprocessItem
@@ -48,7 +48,11 @@ async def candidate(active, cursor, allow_outlook=True):
         settings = await session.get(RiskSettings, 1)
         if not settings or not settings.enabled or not settings.start_at:
             return None
-        await worker.enqueue(session, settings)
+        exclusive = await session.scalar(select(ReprocessJob).where(ReprocessJob.state.in_(['pending','running']),
+            ReprocessJob.settings['request']['run_mode'].astext == 'history_only').limit(1))
+        if not exclusive: await worker.enqueue(session, settings)
+        grouping_open = bool(exclusive and await session.scalar(select(ReprocessItem.id).where(
+            ReprocessItem.job_id == exclusive.id, ReprocessItem.state.in_(['pending','processing'])).limit(1)))
         history_news = []
         for kind, identity in active:
             if kind == 'backfill':
@@ -62,6 +66,7 @@ async def candidate(active, cursor, allow_outlook=True):
             for offset in range(len(stages)):
                 stage = stages[(cursor + offset) % len(stages)]
                 if historical and stage in ('grouping', 'outlook'): continue
+                if exclusive and (stage == 'grouping' or grouping_open or (stage in ('analysis','events') and not historical)): continue
                 busy = [key[1] for key in active if key[0] == stage]
                 if stage == 'outlook':
                     if not busy and allow_outlook:
@@ -78,6 +83,7 @@ async def candidate(active, cursor, allow_outlook=True):
                     query = query.join(NewsItem).where(model.content_hash == NewsItem.content_hash, NewsItem.id.not_in(history_news)).order_by(NewsItem.published_at.desc())
                 else:
                     realtime = model.review_config.is_(None) | (func.jsonb_typeof(model.review_config) == 'null')
+                    if exclusive: query = query.where(model.review_config['job_id'].astext.cast(BigInteger) == exclusive.id)
                     query = query.where(~realtime if historical else realtime, model.due_at <= datetime.now(UTC)).order_by(model.due_at, model.id)
                     if stage == 'events':
                         from alphapulse.models.risk import EventMember

@@ -97,6 +97,9 @@ export interface Overview {
 export interface EventQuery { tag?: string, importance?: number, hours?: number, stars?: number, q?: string, category?: string, asset?: string, start?: string, end?: string, page?: number }
 
 export interface TimelinePoint {
+  planned_at?: string | null
+  planned_precision?: string
+  period_text?: string
   occurred_at: string | null
   time_precision: string
   time_text: string
@@ -118,9 +121,9 @@ export interface EventDetail extends NewsEvent {
   packages: RiskEvent[]
   versions: { id: number, revision: number, state: string, error: string | null, result: NewsEvent["result"] }[]
 }
-export interface ReprocessRange { start: string, end: string, modes: ("missing" | "review")[] }
+export interface ReprocessRange { selection?: "range" | "attempted", start?: string, end?: string, modes: ("missing" | "review")[] }
 export interface ReprocessPreview { articles: number, packages: number, events: number, total: number, missing: number, review: number, preview_id: string, models: Record<string, { model: string, reasoning_effort: string | null }> }
-export interface ReprocessJob { request?: { start: string, end: string, modes: string[] }, counts?: Record<string, number>, stages?: Record<string, Record<string, number>>, id: number, state: string, total: number, completed: number, failures: { stage: "grouping" | "analysis" | "events" | "outlook", id: number, error: string }[] }
+export interface ReprocessJob { request?: { selection?: "range" | "attempted", run_mode?: "shared" | "history_only", start: string | null, end: string | null, modes: string[] }, counts?: Record<string, number>, stages?: Record<string, Record<string, number>>, id: number, state: string, total: number, completed: number, failures: { stage: "grouping" | "analysis" | "events" | "outlook", id: number, error: string }[] }
 
 export interface QueueItem { key: string, stage: string, object_id: number, title: string, job_id: number | null, origin: string, state: string, phase: string, model: string | null, reasoning_effort: string | null, started_at: string | null, updated_at: string | null, finished_at: string | null, url: string | null, round: number | null, tool: string | null, error: string | null }
 export interface Queue {

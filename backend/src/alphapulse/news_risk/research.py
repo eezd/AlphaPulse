@@ -67,6 +67,10 @@ async def fetch_public(url):
 class Search(BaseModel):
     query: str = Field(min_length=1, max_length=300)
 
+class LocalSearch(Search):
+    keywords: list[str] = Field(default_factory=list, max_length=6)
+
+
 class Read(BaseModel):
     id: int
 
@@ -74,13 +78,13 @@ class ReadWeb(BaseModel):
     url: str = Field(max_length=2000)
 
 TOOLS = {
-    'search_news': (Search, '按关键词检索站内新闻'),
+    'search_news': (LocalSearch, '按关键词检索站内新闻'),
     'read_news': (Read, '读取站内新闻原文'),
-    'search_packages': (Search, '按关键词和标签检索其他包，AI总结仅作线索'),
+    'search_packages': (LocalSearch, '按关键词和标签检索其他包，AI总结仅作线索'),
     'read_package': (Read, '读取包及关联原文ID，核验应读取原文'),
-    'search_events': (Search, '检索历史事件及时间线，仅作线索'),
+    'search_events': (LocalSearch, '检索历史事件及时间线，仅作线索'),
     'read_event': (Read, '读取事件、成员包和时间线，原文仍须另行读取'),
-    'search_calendar': (Search, '检索已有经济日历'),
+    'search_calendar': (LocalSearch, '检索已有经济日历'),
     'search_web': (Search, '通过SearXNG搜索外部来源，摘要仅作线索'),
     'read_web': (ReadWeb, '读取搜索结果中的公开网页正文'),
 }
@@ -141,7 +145,7 @@ class Research:
                     response.raise_for_status(); data = response.json()
                 rows = data.get('results', [])[:10]
                 self.urls.update(r['url'] for r in rows if r.get('url'))
-                result = {'results': rows, 'errors': data.get('unresponsive_engines', []), 'scope': 'search_snippets_only'}
+                result = {'results': rows, 'errors': data.get('unresponsive_engines', []), 'scope': 'search_snippets_only', 'status': 'matched' if rows else 'unavailable' if data.get('unresponsive_engines') else 'no_matches'}
             elif name == 'read_web':
                 if args.url not in self.urls: raise ValueError('只能读取本轮搜索发现的地址')
                 result = await fetch_public(args.url)
@@ -151,7 +155,7 @@ class Research:
             elif name in ('search_events', 'read_event'):
                 from alphapulse.models.risk import NewsEvent, EventMember
                 if name == 'search_events':
-                    rows = (await session.scalars(select(NewsEvent).where(NewsEvent.title.contains(args.query, autoescape=True), NewsEvent.state != 'retired').limit(20))).all()
+                    rows = (await session.scalars(select(NewsEvent).where(or_(*(NewsEvent.title.icontains(term, autoescape=True) for term in (args.keywords or args.query.split())[:6])), NewsEvent.state != 'retired').limit(20))).all()
                     result = [{'id': e.id, 'title': e.title} for e in rows]
                 else:
                     row = await session.get(NewsEvent, args.id)
@@ -161,11 +165,10 @@ class Research:
                     result = {'id':row.id, 'title':row.title, 'result':row.result, 'package_ids':members, 'scope':'ai_summary_not_evidence'}
             elif name in ('search_news', 'search_packages'):
                 model = NewsItem if name == 'search_news' else NewsSummary
-                conditions = or_(model.title.contains(args.query, autoescape=True),
-                    model.content_text.contains(args.query, autoescape=True)) if model is NewsItem else or_(
-                    model.title.contains(args.query, autoescape=True), model.tags.contains([args.query]), model.fact.contains(args.query, autoescape=True))
+                from alphapulse.news_risk.retrieval import terms_for, matching
+                conditions, score = matching(model, terms_for(args.query, args.keywords))
                 if model is NewsSummary: conditions = conditions & (NewsSummary.replacement_ids == []) & (NewsSummary.state != 'withdrawn')
-                rows = (await session.scalars(select(model).where(conditions).order_by(model.published_at.desc()).limit(20))).all()
+                rows = (await session.scalars(select(model).where(conditions).order_by(score.desc(), model.published_at.desc(), model.id).limit(20))).all()
                 result = [{'id': r.id, 'title': r.title} for r in rows]
                 if model is NewsSummary: self.package_ids.update(r.id for r in rows)
             elif name == 'read_news':
@@ -186,7 +189,7 @@ class Research:
                 result = {'main_event_id': membership.event_id if membership else None, 'replacement_ids': row.replacement_ids, 'state': row.state, 'id': row.id, 'revision': row.revision, 'fact': row.fact, 'result': row.result, 'articles': [{'analysis_id': a.id, **a.input} for a in assignments], 'news_ids': ids, 'scope': 'ai_summary_not_evidence'}
             else:
                 from alphapulse.models.calendar import EconomicRelease
-                rows = (await session.scalars(select(EconomicRelease).where(EconomicRelease.title.contains(args.query, autoescape=True)).limit(20))).all()
+                rows = (await session.scalars(select(EconomicRelease).where(or_(*(EconomicRelease.title.icontains(term, autoescape=True) for term in (args.keywords or args.query.split())[:6]))).limit(20))).all()
                 result = [{'id': r.id, 'title': r.title, 'values': r.values, 'release_url': r.release_url, 'scheduled_at': r.scheduled_at.isoformat()} for r in rows]
                 self.urls.update(r.release_url for r in rows if r.release_url)
         self.cache[key] = result

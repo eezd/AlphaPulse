@@ -199,3 +199,11 @@ retaining legacy job JSON and execution semantics. Isolated acceptance includes
 `scripts/smoke_backfill.py`; it mocks all model/Redis I/O and checks mode behavior,
 frozen previews, source changes, target completion and queue queries. Live migration,
 deployment and real backfill execution require separate authorization.
+
+### Complete news units and exclusive rechecks
+
+Grouping retains each coherent publication as a complete news unit: related metrics and background remain inside the package. Independent developments remain separate. Local research accepts up to six keywords and ranks partial matches; search outages are distinct from successful empty searches. Planned dates and statistical periods remain separate from actual occurrence timestamps.
+
+Reading ranks all important inputs, shortlists at most twelve low-star candidates across domains, selects up to three expansion entries, then synthesizes once. Saved priorities are reused by synthesis.
+
+Reprocess previews accept `selection=attempted` to freeze distinct previously attempted news IDs at their latest source hashes and force regrouping. `run_mode=history_only` requires paused, idle AI; startup uses the existing three-stage validation gate, enables only this durable batch, and pauses on completion, cancellation or failure. It does not consume realtime backlog. Grouping finishes before downstream review; completion also waits for the final reading snapshot. Existing range/shared behavior remains the default. These additions use existing JSON storage and require no schema migration.
