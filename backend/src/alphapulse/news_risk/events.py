@@ -44,6 +44,8 @@ def validate_timeline(result, packages):
             raise ValueError('事件发生时间必须来自组成包已核验时间点')
         if point.planned_at is not None and not any(
             PackageTimePoint.model_validate(p).planned_at == point.planned_at and p.get('planned_precision') == point.planned_precision
+            and p.get('time_text') == point.time_text and point.time_text.strip()
+            and any(ref in p['evidence_refs'] and point.time_text in ref.get('quote', '') for ref in point.evidence_refs)
             for p in package['result'].get('timeline_points', [])):
             raise ValueError('事件计划时间必须来自组成包已核验计划')
         if any(ref not in allowed for ref in point.evidence_refs):

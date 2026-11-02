@@ -1,5 +1,6 @@
 """Workflow tuning preserves evidence boundaries and limits expensive work."""
 import asyncio
+from datetime import UTC, datetime
 from types import SimpleNamespace as N
 from unittest.mock import AsyncMock, MagicMock
 import pytest
@@ -134,3 +135,134 @@ def test_large_synthesis_compacts_package_notes_in_batches(trading,monkeypatch):
     result=asyncio.run(briefing.generate(N(),'rules',inputs,rankings=rankings))
     assert calls==['synthesis_notes']*3+['synthesis']
     assert len(result['reading'])==3
+
+
+@pytest.mark.parametrize('original_start', [None, datetime(2026,11,1,tzinfo=UTC)])
+def test_exclusive_start_persists_dispatch_start_and_preserves_existing_boundary(trading,monkeypatch,original_start):
+    from alphapulse.news_risk import backfill,scheduler
+    settings=N(enabled=False,start_at=original_start)
+    session=MagicMock()
+    session.get=AsyncMock(return_value=settings);session.flush=AsyncMock();session.commit=AsyncMock()
+    session.add=lambda job:setattr(job,'id',7)
+    value={'items':[{'id':1,'hash':'current','mode':'review'}],'config':{},'request':{'selection':'range'}}
+    monkeypatch.setattr(backfill,'prepare_start',AsyncMock(return_value=value))
+    monkeypatch.setattr(backfill.redis,'delete',AsyncMock())
+    before=datetime.now(UTC)
+    result=asyncio.run(backfill.start(session,'preview','history_only',validated=True))
+    assert result=={'id':7} and settings.enabled
+    if original_start is None: assert before<=settings.start_at<=datetime.now(UTC)
+    else: assert settings.start_at==original_start
+    session.__aenter__=AsyncMock(return_value=session);session.__aexit__=AsyncMock(return_value=False)
+    job=N(id=7,settings={'request':{'run_mode':'history_only'}})
+    session.scalar=AsyncMock(side_effect=[job,1,job,None])
+    session.scalars=AsyncMock(return_value=N(all=lambda:[N(id=1,news_id=1,content_hash='current')]))
+    monkeypatch.setattr(scheduler,'SessionLocal',lambda:session)
+    picked=asyncio.run(scheduler.candidate(set(),0))
+    assert picked[0]==('backfill',1)
+
+
+@pytest.mark.parametrize('dependency_state', ['pending','failed','done'])
+def test_exclusive_event_enrolls_only_unfinished_dependencies_and_preserves_failures(trading,monkeypatch,dependency_state):
+    from alphapulse.news_risk import backfill
+    from alphapulse.models.risk import ReprocessJob,NewsEvent,RiskSettings
+    config={'request':{'run_mode':'history_only'}}
+    job=N(id=7,state='running',settings=config,failures=[])
+    event=N(id=9,state='pending',published_revision=0)
+    dependency=N(id=2,state=dependency_state,revision=2,published_revision=1,result=None,
+        review_config=None,error='Synthetic' if dependency_state=='failed' else None,dirty_since=None)
+    target=N(kind='events',object_id=9,revision=1)
+    settings=N(enabled=True)
+    session=MagicMock()
+    session.get=AsyncMock(side_effect=lambda model,*a,**k:{ReprocessJob:job,NewsEvent:event,RiskSettings:settings}[model])
+    session.scalar=AsyncMock(side_effect=[None,2 if dependency_state=='failed' else None])
+    session.scalars=AsyncMock(side_effect=[N(all=lambda:[]),N(all=lambda:[target]),N(all=lambda:[dependency])])
+    session.commit=AsyncMock()
+    enroll=AsyncMock();monkeypatch.setattr(backfill,'target',enroll)
+    asyncio.run(backfill.reconcile(session,job))
+    assert dependency.review_config==config
+    enroll.assert_awaited_once_with(session,7,'analysis',dependency)
+    if dependency_state=='failed':
+        assert dependency.state=='failed' and job.state=='failed' and not settings.enabled
+        assert any(f['stage']=='analysis' and f['id']==2 for f in job.failures)
+    else:
+        assert dependency.state=='pending' and job.state=='running' and settings.enabled
+        assert dependency.due_at<=datetime.now(UTC)
+        assert dependency.revision==(3 if dependency_state=='done' else 2)
+
+
+def test_exclusive_batch_finishes_after_event_dependency_is_published(trading,monkeypatch):
+    from alphapulse.news_risk import backfill,events
+    from alphapulse.models.risk import ReprocessJob,NewsEvent,NewsSummary,RiskSettings,EventMember
+    config={'request':{'run_mode':'history_only'},'configurations':{'outlook':{'rules':{}}}}
+    job=N(id=7,state='running',settings=config,failures=[])
+    event=N(id=9,state='done',published_revision=1)
+    dependency=N(id=2,state='done',revision=2,published_revision=2,replacement_ids=[])
+    targets=[N(kind='events',object_id=9,revision=1),N(kind='analysis',object_id=2,revision=2)]
+    settings=N(enabled=True)
+    session=MagicMock()
+    session.get=AsyncMock(side_effect=lambda model,*a,**k:{
+        ReprocessJob:job,NewsEvent:event,NewsSummary:dependency,RiskSettings:settings,EventMember:None}[model])
+    session.scalar=AsyncMock(side_effect=[None,None,N(id=3,state='done',quotes={})])
+    session.scalars=AsyncMock(side_effect=[N(all=lambda:[]),N(all=lambda:targets),N(all=lambda:[])])
+    session.commit=AsyncMock()
+    monkeypatch.setattr(events,'reading_inputs',AsyncMock(return_value=[]))
+    asyncio.run(backfill.reconcile(session,job))
+    assert job.state=='done' and not settings.enabled
+
+
+@pytest.mark.parametrize('failed_stage', ['grouping','analysis','events',None])
+@pytest.mark.parametrize('prepare_only', [True,False])
+def test_exclusive_outlook_never_admits_failed_batch_results(trading,monkeypatch,failed_stage,prepare_only):
+    from alphapulse.news_risk import worker,events,reprocess
+    from alphapulse.models.risk import ReprocessJob,ReprocessItem,NewsSummary,NewsEvent
+    job=N(id=7,state='running',position=0,items=[],settings={'request':{'run_mode':'history_only'}})
+    failed_model={'grouping':ReprocessItem,'analysis':NewsSummary,'events':NewsEvent}.get(failed_stage)
+    session=MagicMock()
+    session.__aenter__=AsyncMock(return_value=session);session.__aexit__=AsyncMock(return_value=False)
+    session.get=AsyncMock(return_value=N(enabled=True));session.commit=AsyncMock()
+    async def scalar(query):
+        model=query.column_descriptions[0]['entity']
+        if model is ReprocessJob: return job
+        if model is failed_model:
+            # Emulate filtering a stored failed row, without storage or model I/O.
+            return 1 if any(isinstance(value,list) and 'failed' in value for value in query.compile().params.values()) else None
+        return None
+    session.scalar=AsyncMock(side_effect=scalar)
+    inputs=[{'id':1,'kind':'package','revision':1,'importance_stars':3,'category':'company','result':{'summary':'Previous successful result'}}]
+    monkeypatch.setattr(worker,'SessionLocal',lambda:session)
+    monkeypatch.setattr(events,'reading_inputs',AsyncMock(return_value=inputs))
+    configuration=AsyncMock(return_value=(N(model='advanced'),'rules',{}))
+    monkeypatch.setattr(reprocess,'frozen_configuration',configuration)
+    generate=AsyncMock(return_value={'reading':[],'synthesis':None,'usage':[]})
+    monkeypatch.setattr(worker.briefing,'generate',generate)
+    ready=asyncio.run(worker.outlook(prepare_only=prepare_only))
+    if failed_stage:
+        assert ready is None
+        configuration.assert_not_awaited();generate.assert_not_awaited();session.add.assert_not_called()
+    elif prepare_only:
+        assert ready is True
+        generate.assert_not_awaited()
+    else:
+        assert generate.await_count==2
+        assert session.add.call_args.args[0].state=='done'
+
+
+@pytest.mark.parametrize('case', ['valid','wrong_date','wrong_text','wrong_quote','extra_evidence'])
+def test_event_plan_binds_date_precision_text_and_its_original_quote(trading,case):
+    from alphapulse.news_risk.events import EventResult,validate_timeline
+    def point(day):
+        return dict(occurred_at=None,time_precision='unknown',planned_at=f'2026-11-{day}T00:00:00Z',
+            planned_precision='day',time_text=f'11月{day}日',reported_at=None,description='Plan',verification='partial',
+            evidence_refs=[{'article_id':1,'quote':f'计划11月{day}日开始'}])
+    first,second=point('10'),point('20')
+    submitted={**first,'package_id':1,'package_revision':1}
+    if case=='wrong_date': submitted={**second,'planned_at':first['planned_at'],'package_id':1,'package_revision':1}
+    if case=='wrong_text': submitted['time_text']=second['time_text']
+    if case=='wrong_quote': submitted['evidence_refs']=second['evidence_refs']
+    if case=='extra_evidence': submitted['evidence_refs']=first['evidence_refs']+second['evidence_refs']
+    result=EventResult(title='Synthetic',summary='Synthetic',category='company',importance_stars=3,risk_stars=0,
+        uncertainty='Unknown',opinions='Unknown',counter_evidence='Unknown',watchpoints='Unknown',timeline_points=[submitted])
+    packages=[{'id':1,'revision':1,'result':{'timeline_points':[first,second]}}]
+    if case in ('valid','extra_evidence'): validate_timeline(result,packages)
+    else:
+        with pytest.raises(ValueError,match='已核验计划'): validate_timeline(result,packages)

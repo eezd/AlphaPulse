@@ -76,6 +76,7 @@ async def start(session, identifier, run_mode="shared", validated=False):
         if not validated: raise ValueError('仅历史批次必须先验证三阶段配置')
         settings = await session.get(RiskSettings, 1)
         settings.enabled = True
+        if settings.start_at is None: settings.start_at = datetime.now(UTC)
     job = ReprocessJob(state='pending', items=[], position=0, failures=[], settings=value['config'])
     session.add(job); await session.flush()
     job.settings = {**job.settings, 'job_id':job.id, 'request':{**value['request'], 'run_mode':run_mode}}
@@ -166,6 +167,23 @@ async def reconcile(session, job):
                 await session.delete(row); waiting=True
             continue
         if obj.state=='retired': continue
+        if row.kind == 'events' and job.settings.get('request', {}).get('run_mode') == 'history_only':
+            # Retry busy members next pass instead of blocking their publication.
+            dependencies = (await session.scalars(select(NewsSummary).join(EventMember).where(
+                EventMember.event_id == obj.id, NewsSummary.replacement_ids == [], NewsSummary.state != 'withdrawn',
+                or_(NewsSummary.state != 'done', NewsSummary.result.is_(None), func.jsonb_typeof(NewsSummary.result) == 'null',
+                    NewsSummary.published_revision < NewsSummary.revision)).order_by(NewsSummary.id)
+                .with_for_update(of=NewsSummary, skip_locked=True))).all()
+            for package in dependencies:
+                # Only unfinished members of this event join the frozen batch.
+                package.review_config = job.settings
+                if package.state == 'done':
+                    from alphapulse.news_risk.worker import schedule
+                    schedule(package, datetime.now(UTC), True)
+                if package.state == 'pending': package.due_at = datetime.now(UTC)
+                await target(session, job.id, 'analysis', package)
+                if package.state == 'failed': failures.append({'stage':'analysis','id':package.id,'error':package.error})
+                else: waiting = True
         if obj.state=='failed': failures.append({'stage':row.kind,'id':obj.id,'error':obj.error})
         elif row.kind == 'events' and await session.scalar(select(NewsSummary.id).join(EventMember).where(
             EventMember.event_id == obj.id, NewsSummary.state == 'failed', NewsSummary.replacement_ids == []).limit(1)):

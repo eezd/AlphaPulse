@@ -265,14 +265,14 @@ async def outlook(prepare_only=False):
         if job and job.settings.get('request', {}).get('run_mode') != 'history_only' and job.settings.get('request'): job = None
         if job and job.settings.get('request', {}).get('run_mode') == 'history_only':
             from alphapulse.models.risk import ReprocessItem
-            if await session.scalar(select(ReprocessItem.id).where(ReprocessItem.job_id == job.id, ReprocessItem.state.in_(['pending','processing'])).limit(1)): return
+            if await session.scalar(select(ReprocessItem.id).where(ReprocessItem.job_id == job.id, ReprocessItem.state.in_(['pending','processing','failed'])).limit(1)): return
         if job and job.position < len(job.items):
             if requested and requested.quotes.get('job_id') == job.id: return
             job = None
         if job:
             from alphapulse.models.risk import NewsEvent
-            if await session.scalar(select(NewsSummary.id).where(NewsSummary.state.in_(['pending', 'processing']), NewsSummary.review_config['job_id'].astext.cast(BigInteger) == job.id).limit(1)): return
-            if await session.scalar(select(NewsEvent.id).where(NewsEvent.state.in_(['pending', 'processing']), NewsEvent.review_config['job_id'].astext.cast(BigInteger) == job.id).limit(1)): return
+            if await session.scalar(select(NewsSummary.id).where(NewsSummary.state.in_(['pending', 'processing', 'failed']), NewsSummary.review_config['job_id'].astext.cast(BigInteger) == job.id).limit(1)): return
+            if await session.scalar(select(NewsEvent.id).where(NewsEvent.state.in_(['pending', 'processing', 'failed']), NewsEvent.review_config['job_id'].astext.cast(BigInteger) == job.id).limit(1)): return
             from alphapulse.news_risk.reprocess import frozen_configuration
             provider, system, rules = await frozen_configuration(session, job.settings, 'outlook')
         else:
