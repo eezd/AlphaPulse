@@ -10,6 +10,7 @@ COPY . .
 RUN uv sync --locked --no-dev
 
 FROM base AS check
+COPY --from=project-scripts . /scripts/
 RUN uv sync --locked && uv run pytest && uvx ruff==0.14.14 check --select F,E9,B src tests
 
 FROM base AS browser-download

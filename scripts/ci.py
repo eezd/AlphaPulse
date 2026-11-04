@@ -216,7 +216,8 @@ def check():
     save(ROOT / 'build.json', build)
     for part in IMAGES:
         print('Checking ' + part, flush=True)
-        run('docker', 'build', '--provenance=false', '--platform', 'linux/amd64', '--target', 'check',
+        contexts = ['--build-context', f'project-scripts={ROOT / "scripts"}'] if part == 'backend' else []
+        run('docker', 'build', *contexts, '--provenance=false', '--platform', 'linux/amd64', '--target', 'check',
             '-f', ROOT / f'deploy/Dockerfile.{part}', ROOT / part)
         reused = existing_image(part, build)
         local = reused or 'alphapulse-ci:' + label + '-' + part
