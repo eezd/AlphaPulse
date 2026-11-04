@@ -276,6 +276,22 @@ attachment text are searchable and versioned. Date-only releases are displayed a
 dates, not precise release instants. Backfilled documents describe the version
 available at capture time; they are not historical point-in-time evidence.
 
+Selection rule `us-policy-v2` uses explicit national budget, continuing/consolidated
+appropriations, discount-rate and reserve-policy phrases instead of standalone
+`budget`, `fiscal` or `quantitative`. Federal Register macro screening uses the title
+to avoid incidental references in unrelated regulations; crypto screening still
+reads the complete body and extracted attachments.
+
+Image attachments remain an explicit text-extraction gap, including when their
+format is PNG, JPEG or GIF. They do not establish completeness or irrelevance.
+Relevant documents remain `partial`; documents whose relevance is still unknown
+are kept in bounded attachment retries rather than inserted as unrelated news.
+Congress meeting attachment failures retain the same retry evidence as articles.
+The source API derives `attachment_gaps`, `attachment_retry_pending` and
+`attachment_retry_exhausted` from the persisted cursor, independently of the latest
+round's statistics. The console keeps these document counts visible across rounds;
+success clears the gap, while three failed attempts remain visible for investigation.
+
 Validation without production credentials:
 
 - `cd backend && uv run pytest && uvx ruff check --select F,E9,B src tests`

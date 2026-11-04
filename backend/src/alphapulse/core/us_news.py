@@ -23,7 +23,7 @@ SOURCES = {
     'sec': OfficialSource('SEC·证券监管', ('https://www.sec.gov/newsroom/press-releases', 'https://www.sec.gov/newsroom/speeches-statements', 'https://www.sec.gov/rules-regulations/rulemaking-activity', 'https://www.sec.gov/rules-regulations/self-regulatory-organization-rulemaking'), r'/(?:newsroom/(?:press-releases|speeches-statements)/[^/]+|rules-regulations/.*\d.*)', '.node-details-layout__main-region__content .field--name-body', ('www.sec.gov',)),
     'cftc': OfficialSource('CFTC·衍生品监管', ('https://www.cftc.gov/PressRoom/PressReleases', 'https://www.cftc.gov/PressRoom/SpeechesTestimony', 'https://www.cftc.gov/LawRegulation/CFTCStaffLetters/letters.htm'), r'/(?:PressRoom/(?:PressReleases/\d+-\d+|SpeechesTestimony/(?!index)[^/]+)|csl/)', 'article .field--name-body', ('www.cftc.gov',)),
     'treasury': OfficialSource('美国财政部', ('https://home.treasury.gov/news/press-releases',), r'/news/press-releases/[a-z]+\d+/?$', '.field--name-field-news-body', ('home.treasury.gov', 'www.treasury.gov', 'ofac.treasury.gov')),
-    'ofac': OfficialSource('OFAC·金融制裁', ('https://ofac.treasury.gov/recent-actions',), r'/recent-actions/\d{8}[^/]*$', '.field--name-body, .body-content', ('ofac.treasury.gov', 'home.treasury.gov')),
+    'ofac': OfficialSource('OFAC·金融制裁', ('https://ofac.treasury.gov/recent-actions',), r'/recent-actions/\d{8}[^/]*$', 'article.node--type-ofac-recent-action .field--name-field-body', ('ofac.treasury.gov', 'home.treasury.gov')),
     'fincen': OfficialSource('FinCEN·反洗钱', ('https://www.fincen.gov/news/press-releases', 'https://www.fincen.gov/news/enforcement-actions', 'https://www.fincen.gov/resources/advisoriesbulletinsfact-sheets'), r'/(?:news/news-releases/[^/]+|resources/advisories/[^/]+|news/enforcement-actions/[^/]+)', 'article .field--name-body', ('www.fincen.gov',)),
     'whitehouse': OfficialSource('白宫·政策', ('https://www.whitehouse.gov/presidential-actions/', 'https://www.whitehouse.gov/fact-sheets/', 'https://www.whitehouse.gov/briefings-statements/', 'https://bidenwhitehouse.archives.gov/briefing-room/'), r'/(?:presidential-actions|fact-sheets|briefings-statements|briefing-room/[^/]+)/202[5-9]/\d{2}/\d{2}/|/(?:presidential-actions|fact-sheets|briefings-statements)/202[5-9]/\d{2}/[^/]+', '.wp-block-post-content, .body-content, .entry-content', ('www.whitehouse.gov', 'bidenwhitehouse.archives.gov')),
     'congress': OfficialSource('美国国会·立法', ('https://api.congress.gov/v3/bill?format=json&limit=250', 'https://api.congress.gov/v3/committee-meeting?format=json&limit=250'), r'/bill/', '', ('api.congress.gov', 'www.congress.gov', 'www.govinfo.gov'), 900),
@@ -32,11 +32,11 @@ SOURCES = {
     'doj': OfficialSource('DOJ·加密机构执法', ('https://www.justice.gov/api/v1/press_releases.json?pagesize=50&sort=date&direction=DESC&fields=uuid,date',), r'/(?:opa|usao[^/]*|archives/opa)/(?:pr|speech)/[^/]+', '.field--name-body, .field--name-field-pr-body', ('www.justice.gov',)),
     'fed': OfficialSource('美联储·政策与讲话', tuple(f'https://www.federalreserve.gov/newsevents/{kind}/{year}-{suffix}.htm' for year in range(datetime.now(UTC).year, 2024, -1) for kind, suffix in (('pressreleases', 'press'), ('speech', 'speeches'), ('testimony', 'testimony'))) + ('https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm', 'https://www.federalreserve.gov/releases/h41/releaseDates.json'), r'/(?:newsevents/(?:pressreleases|speech|testimony)/[^/]+\.htm|monetarypolicy/(?:fomcminutes|fomcprojtabl)\d+\.htm|releases/h41/\d+/)', '#article, .col-xs-12.col-sm-8.col-md-8, #content', ('www.federalreserve.gov',), 60),
 }
-RULE_VERSION = 'us-policy-v1'
+RULE_VERSION = 'us-policy-v2'
 CRYPTO = re.compile(r'\b(?:crypto(?:currency|currencies|[ -]assets?)?|digital[ -]assets?|virtual[ -]currenc(?:y|ies)|stablecoins?|bitcoin|ethereum|blockchain|tokeniz(?:ed|ation))\b', re.I)
 POLICY = re.compile(r'\b(?:regulat\w*|rules?|guidance|legislation|acts?|sanctions?|licenses?|executive order|monetary policy|federal funds|interest rates?|balance sheet|liquidity|quantitative|refunding|borrowing|debt limit|tariffs?|fiscal|budget|appropriation|tax reform)\b', re.I)
 INSTITUTION = re.compile(r'\b(?:exchanges?|banks?|financial institutions?|payment processors?|custodians?|stablecoin issuers?|binance|coinbase|tether|circle|kraken|bybit|bitfinex)\b', re.I)
-MACRO = re.compile(r'\b(?:monetary policy|federal funds|interest rates?|fomc|balance sheet|liquidity|quantitative|refunding|borrowing estimates|debt (?:limit|ceiling)|tariffs?|fiscal|budget|appropriation|tax reform|financial sanctions)\b', re.I)
+MACRO = re.compile(r"\b(?:monetary policy|federal funds (?:rate|target)|interest rates?|discount rates?|(?:primary|secondary) credit rates?|reserve requirements?|interest on reserve balances|fomc|balance sheet|liquidity|quantitative (?:easing|tightening)|refunding|borrowing estimates|debt (?:limit|ceiling)|tariffs?|fiscal (?:policy|stimulus|outlook)|federal (?:budget|deficit)|president['’]s budget|budget of the united states|(?:continuing|consolidated|full[ -]year) appropriations?|government (?:shutdown|funding)|tax reform|financial sanctions)\b", re.I)
 
 
 def selection(source: str, title: str, text: str) -> list[str]:
@@ -44,7 +44,8 @@ def selection(source: str, title: str, text: str) -> list[str]:
     crypto = bool(CRYPTO.search(content))
     if crypto and (source not in ('doj', 'ofac', 'fincen') or POLICY.search(title) or INSTITUTION.search(content)):
         return ['crypto_policy' if POLICY.search(content) else 'crypto_institution']
-    if source not in ('doj', 'cftc', 'sec') and MACRO.search(content):
+    macro_scope = title if source == 'federal_register' else content
+    if source not in ('doj', 'cftc', 'sec') and MACRO.search(macro_scope):
         return ['us_macro_policy']
     if source == 'ofac' and INSTITUTION.search(content) and POLICY.search(content):
         return ['financial_sanctions']

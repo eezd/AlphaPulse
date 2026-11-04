@@ -316,7 +316,7 @@ class USOfficialSpider(NewsSpider):
                 for result in self.complete(lane):
                     yield result
                 return
-            parsed = {'title': data['title'], 'content_html': '<pre>' + escape(json.dumps(data, ensure_ascii=False, indent=2)) + '</pre>', 'published_at': at, 'url': response.url, 'external_id': identity(response.url), 'raw_response_id': response.meta['raw_response_id'],
+            parsed = {'title': data['title'], 'content_html': '<pre>' + escape(json.dumps(data, ensure_ascii=False, indent=2)) + '</pre>', 'published_at': at, 'url': response.url, 'external_id': identity(response.url), 'raw_response_id': response.meta['raw_response_id'], 'retry_document': doc,
                       'extra': {'content_scope': 'article', 'published_at_precision': precision, 'published_at_basis': 'official_update', 'published_date': at.date().isoformat(), 'official_meeting': data, 'rule_version': RULE_VERSION, 'attachments': [{'url': official_url(self.name, d['url']), 'title': d.get('name') or d.get('documentType', ''), 'status': 'pending'} for d in {d['url']: d for d in data.get('meetingDocuments', []) + data.get('witnessDocuments', []) if d.get('format') == 'PDF'}.values()]}}
             for result in self.attach_or_finish(parsed, lane):
                 yield result
@@ -514,7 +514,7 @@ class USOfficialSpider(NewsSpider):
             retries[parsed['url']] = {'document': retry_doc, 'attempts': previous.get('attempts', 0) + 1, 'next_at': (self.run.started_at + timedelta(hours=1)).timestamp()}
         elif not incomplete:
             retries.pop(parsed['url'], None)
-        if reasons or incomplete:
+        if reasons:
             parsed['extra']['selection_reasons'] = reasons
             parsed['extra']['content_scope'] = 'partial' if incomplete else 'article'
             self.run.stats['partial'] = self.run.stats.get('partial', 0) + int(incomplete)
@@ -523,6 +523,8 @@ class USOfficialSpider(NewsSpider):
             yield item
         else:
             self.run.stats['excluded'] = self.run.stats.get('excluded', 0) + 1
+            if incomplete:
+                self.run.stats['unclassified_attachment_gaps'] = self.run.stats.get('unclassified_attachment_gaps', 0) + 1
         yield from self.complete(lane)
 
     def parse_attachment(self, response):
@@ -532,6 +534,8 @@ class USOfficialSpider(NewsSpider):
         try:
             if response.status != 200:
                 raise ValueError(f'HTTP {response.status}')
+            if response.headers.get('Content-Type', b'').lower().startswith(b'image/') and response.body.startswith((b'\x89PNG\r\n\x1a\n', b'\xff\xd8\xff', b'GIF87a', b'GIF89a')):
+                raise ValueError('官方图片附件尚未提取文字，请核对原文')
             text = pdf_text(response.body)
             attachment['status'] = 'complete'
             parsed['content_html'] += f"<section><h2>{escape(attachment['title'])}</h2><pre>{escape(text)}</pre></section>"

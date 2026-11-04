@@ -160,8 +160,11 @@ onMounted(loadLatest)
     <div v-if="source.collection_stats?.unresolved_bills" class="text-xs text-amber-600">
       待核验法案 {{ source.collection_stats.unresolved_bills }}；官方资料尚不充分
     </div>
+    <div v-if="source.collection_stats?.attachment_gaps" class="text-xs text-amber-600">
+      附件待核验文档 {{ source.collection_stats.attachment_gaps }}；待重试 {{ source.collection_stats.attachment_retry_pending }}；重试已耗尽 {{ source.collection_stats.attachment_retry_exhausted }}，请核对原文
+    </div>
     <div v-if="source.collection_stats?.discovered" class="text-xs text-slate-500">
-      本轮发现 {{ source.collection_stats.discovered }}；筛除 {{ source.collection_stats.excluded ?? 0 }}；附件缺口 {{ source.collection_stats.partial ?? 0 }}
+      本轮发现 {{ source.collection_stats.discovered }}；筛除 {{ source.collection_stats.excluded ?? 0 }}；不完整包 {{ source.collection_stats.partial ?? 0 }}
     </div>
     <div class="flex justify-between text-xs text-slate-500">
       <span>今日新增 <b class="num text-[var(--el-color-primary)]">+{{ source.today_new }}</b></span>

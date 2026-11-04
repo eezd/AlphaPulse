@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 from scrapy import Request
-from scrapy.http import HtmlResponse
+from scrapy.http import HtmlResponse, Response
 
 from alphapulse.core.us_news import SOURCES, article, official_url, published, selection
 
@@ -39,6 +39,14 @@ def response(url, body, **meta):
     ('treasury', 'Meeting with delegation', 'Greetings and cooperation', False),
     ('ofac', 'New sanctions', 'Sanctions against a financial institution', True),
     ('sec', 'Ethernet equipment', 'Method and hardware', False),
+    ('whitehouse', "The President's Budget for Fiscal Year 2027", 'The President submitted his budget request to Congress, proposing nationwide spending and revenue changes.', True),
+    ('whitehouse', 'The President’s Budget', 'Annual spending and revenue proposals.', True),
+    ('congress', 'Continuing Appropriations Act, 2027', 'This bill provides continuing appropriation for the operations of the United States.', True),
+    ('federal_register', 'Adjustments to the Reserve Bank Discount Rates', 'The Federal Reserve increases interest rates charged on loans to depository institutions.', True),
+    ('federal_register', 'Reserve Requirements of Depository Institutions', 'The Federal Reserve adjusts reserve requirements.', True),
+    ('federal_register', 'Interest on Reserve Balances', 'The Federal Reserve adjusts interest paid on reserve balances.', True),
+    ('federal_register', 'Hospital Budget Estimates for Fiscal Year 2027', 'The budget provides funding for hospital operations.', False),
+    ('whitehouse', 'Health research funding', 'The department budget supports quantitative research during the fiscal year.', False),
 ])
 def test_selection_boundaries(source, title, text, expected):
     assert bool(selection(source, title, text)) is expected
@@ -58,12 +66,100 @@ def test_dates_do_not_fabricate_publisher_time():
 
 
 def test_ofac_original_body_and_attachment_boundaries():
-    data = article('ofac', '''<h1>Crypto sanctions</h1><main><div class="field--name-body"><p>New sanctions against a virtual currency exchange institution.</p>
-    <a href="/media/123/download">License</a><a href="https://evil.example/a.pdf">external</a></div></main>''', 'https://ofac.treasury.gov/recent-actions/20250101')
+    data = article('ofac', '''<h1>Crypto sanctions</h1><main><article class="node--type-ofac-recent-action"><div class="field--name-field-body"><p>New sanctions against a virtual currency exchange institution.</p>
+    <a href="/media/123/download">License</a><a href="https://evil.example/a.pdf">external</a></div></article></main>''', 'https://ofac.treasury.gov/recent-actions/20250101')
     assert data['published_at'] == datetime(2025, 1, 1, tzinfo=UTC)
     assert data['extra']['published_at_precision'] == 'date'
     assert len(data['extra']['attachments']) == 2
     assert data['extra']['attachments'][1]['status'] == 'unsupported_host'
+
+
+def test_live_ofac_body_and_policy_selection():
+    import gzip
+    from pathlib import Path
+    sample = json.loads(gzip.decompress((Path(__file__).parent / 'fixtures/us_news/live_selection.json.gz').read_bytes()))
+    parsed = article('ofac', sample['ofac']['body'], sample['ofac']['url'])
+    assert 'Iran General License FF-1' in parsed['content_html']
+    assert "A Part of Treasury's Office" not in parsed['content_html']
+    for case in sample['cases']:
+        assert bool(selection(case['source_code'], case['title'], case['content_text'])) is case['expected'], case['title']
+
+
+def test_unrelated_failed_attachment_is_not_news(trading):
+    obj = spider(trading, 'doj')
+    obj.run.history_deadline = time.monotonic() - 1
+    doc = {'url': 'https://www.justice.gov/api/v1/press_releases/x.json', 'kind': 'doj'}
+    obj.cursor['history']['pending'] = [doc]
+    parsed = {'url': doc['url'], 'title': 'Federal prosecutor receives national award', 'external_id': 'award', 'content_html': '<p>The department recognized superior performance in Indian Country.</p>', 'published_at': datetime(2026, 11, 4, tzinfo=UTC), 'raw_response_id': 12, 'retry_document': doc,
+              'extra': {'attachments': [{'url': 'https://www.justice.gov/media/1/dl', 'status': 'unavailable'}]}}
+    assert list(obj.attach_or_finish(parsed, 'history')) == []
+    assert obj.run.stats['unclassified_attachment_gaps'] == 1
+    assert obj.cursor['attachment_retries'][doc['url']]['attempts'] == 1
+
+
+@pytest.mark.parametrize('content_type,body', [('image/png', b'\x89PNG\r\n\x1a\n'), ('image/jpeg', b'\xff\xd8\xff'), ('image/gif', b'GIF89a')])
+@pytest.mark.parametrize('relevant', [True, False])
+def test_image_attachment_preserves_unknown_text_gap(trading, monkeypatch, content_type, body, relevant):
+    from alphapulse.crawler.spiders import us_official
+    obj = spider(trading, 'doj')
+    obj.run.history_deadline = time.monotonic() - 1
+    url = 'https://www.justice.gov/media/1/dl'
+    doc = {'url': 'https://www.justice.gov/api/v1/press_releases/x.json', 'kind': 'doj'}
+    obj.cursor['history']['pending'] = [doc]
+    parsed = {'url': doc['url'], 'title': 'Cryptocurrency exchange charged' if relevant else 'Department announces an enforcement action', 'external_id': 'case', 'content_html': '<p>The cryptocurrency exchange was charged with money laundering.</p>' if relevant else '<p>See the attached consent order for the findings and penalty.</p>', 'published_at': datetime(2026, 11, 4, tzinfo=UTC), 'raw_response_id': 12, 'retry_document': doc,
+              'extra': {'attachments': [{'url': url, 'title': 'Consent Order', 'status': 'pending'}]}}
+    monkeypatch.setattr(us_official, 'pdf_text', lambda body: pytest.fail('Images must not reach the PDF parser'))
+    res = Response(url, body=body, headers={'Content-Type': content_type}, request=Request(url, meta={'lane': 'history', 'parsed': parsed, 'raw_response_id': 13}))
+    items = list(obj.parse_attachment(res))
+    if relevant:
+        item, = items
+        assert item['extra']['content_scope'] == 'partial'
+    else:
+        assert items == []
+        assert obj.run.stats['unclassified_attachment_gaps'] == 1
+    attachment = parsed['extra']['attachments'][0]
+    assert attachment['status'] == 'unavailable'
+    assert '图片' in attachment['error']
+    assert attachment['raw_response_id'] == 13
+    assert obj.cursor['attachment_retries'][doc['url']]['attempts'] == 1
+
+
+def test_source_api_keeps_attachment_gaps_visible_across_rounds(trading, monkeypatch):
+    from unittest.mock import AsyncMock
+    from alphapulse.api import crawler
+    from alphapulse.models import Source
+
+    source = Source(code='doj', name='DOJ', list_url=SOURCES['doj'].entries[0], enabled=False, interval_seconds=300, backfill_hours=72,
+                    consecutive_failures=0, last_success_at=None, last_error=None, paused_until=None, history_cursor={'attachment_retries': {'a': {'attempts': 1}, 'b': {'attempts': 2}, 'c': {'attempts': 3}}},
+                    history_target=None, history_position=None, history_done=False)
+    latest = SimpleNamespace(source_code='doj', stats={'discovered': 2, 'attachment_gaps': 999})
+
+    class Session:
+        async def scalars(self, statement):
+            rows = [source] if statement.column_descriptions[0]['entity'] is Source else [latest]
+            return SimpleNamespace(all=lambda: rows)
+        async def execute(self, statement):
+            return SimpleNamespace(all=lambda: []) if 'news_items' in str(statement) else []
+        async def scalar(self, statement):
+            return 1234
+
+    monkeypatch.setattr(crawler.redis, 'hgetall', AsyncMock(return_value={}))
+    monkeypatch.setattr(crawler, 'calendar_sources', AsyncMock(return_value=[]))
+    for stats in ({'discovered': 2, 'attachment_gaps': 999}, {}):
+        latest.stats = stats
+        result = asyncio.run(crawler.list_sources(Session())).data.sources[0]
+        assert result.collection_stats['attachment_gaps'] == 3
+        assert result.collection_stats['attachment_retry_pending'] == 2
+        assert result.collection_stats['attachment_retry_exhausted'] == 1
+    source.history_cursor['attachment_retries'].pop('a')
+    result = asyncio.run(crawler.list_sources(Session())).data.sources[0]
+    assert result.collection_stats['attachment_gaps'] == 2
+    assert result.collection_stats['attachment_retry_pending'] == 1
+    source.history_cursor = {}
+    latest.stats = {'attachment_gaps': 999}
+    result = asyncio.run(crawler.list_sources(Session())).data.sources[0]
+    assert result.collection_stats['attachment_gaps'] == 0
+    assert result.collection_stats['attachment_retry_exhausted'] == 0
 
 
 def test_challenge_is_failure_not_empty_success(trading):
@@ -730,6 +826,11 @@ def test_congress_meeting_includes_deduplicated_witness_pdfs(trading, monkeypatc
     assert req.url == pdf['url']
     assert len(req.meta['parsed']['extra']['attachments']) == 1
     assert req.meta['parsed']['extra']['attachments'][0]['title'] == 'Witness Statement'
+    obj.run.history_deadline = time.monotonic() - 1
+    req.meta['raw_response_id'] = 13
+    item, = obj.parse_attachment(Response(req.url, status=404, request=req))
+    assert item['extra']['content_scope'] == 'partial'
+    assert obj.cursor['attachment_retries'][doc['url']]['document'] == doc
 
 
 def test_dated_but_unavailable_bill_text_remains_a_gap(trading):
