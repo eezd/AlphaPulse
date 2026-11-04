@@ -229,7 +229,7 @@ class RecoveryTests(unittest.TestCase):
                 return '{}'
             with patch.object(deploy, 'INSTANCE', directory), patch.object(deploy, 'branch_head', return_value='a' * 40), \
                     patch.object(deploy, 'validate_images'), patch.object(deploy, 'inspect_services', return_value=running), \
-                    patch.object(deploy, 'run', side_effect=command) as run:
+                    patch.object(deploy, 'run', side_effect=command) as run, patch.object(deploy.subprocess, 'run'):
                 with self.assertRaisesRegex(RuntimeError, 'Analysis became active'):
                     deploy.deploy({**previous, 'commit': 'a' * 40}, directory)
                 self.assertFalse(any('stop' in call.args for call in run.call_args_list))

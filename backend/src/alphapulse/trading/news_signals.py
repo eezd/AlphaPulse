@@ -29,7 +29,6 @@ MACRO_SOURCES = ("fed", "bls", "bea")
 SYMBOLS = ("BTCUSDT", "ETHUSDT")
 # 发布所在分钟之后第几分钟的 1m 开盘价：发布后第 5 分钟进场（抓取加分析约 1–3 分钟），持有 1h、4h
 OFFSETS = {"open": 0, "entry": 5, "1h": 65, "4h": 245}
-LOOP_SECONDS = 60
 BATCH = 40
 CATEGORIES = {"price_report", "event", "irrelevant"}
 DIRECTIONS = {"bullish", "bearish", "neutral"}
