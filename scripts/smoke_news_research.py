@@ -72,6 +72,7 @@ async def main():
                     "title": "Incident " + str(i),
                     "reason": "A related part",
                     "quote": "Original incident and response",
+                    "keyword_canonicals": ["incident"],
                     "change_kind": "new_fact",
                     "urgent": False,
                 }
@@ -334,6 +335,7 @@ async def main():
                             "title": "Test",
                             "reason": "Test",
                             "quote": quote,
+                            "keyword_canonicals": ["示例公司"],
                             "change_kind": "new_fact",
                             "urgent": False,
                         }
@@ -572,6 +574,8 @@ async def main():
     await compound_candidate_regressions()
     await vocabulary_regressions()
     await retrieval_revision_regressions()
+    await membership_tag_regressions()
+    await research_scope_regressions()
     await engine.dispose()
     print(
         "Two-stage smoke passed: indexing, membership, evidence reuse, pause cancellation, source races and dated event candidates."
@@ -704,6 +708,7 @@ async def review_regressions(config, complete, package_id, news_id):
                     "title": "Serial incident",
                     "reason": "Same incident",
                     "quote": "serialincident frozen evidence",
+                    "keyword_canonicals": ["serialincident"],
                     "change_kind": "new_fact",
                     "urgent": False,
                 }
@@ -735,6 +740,8 @@ async def review_regressions(config, complete, package_id, news_id):
 
     # Force compression, then exercise both member read tools with frozen originals.
     async def extract(provider, rules, articles):
+        assert "当前事件及各成员归属边界" in rules
+        assert '"keyword_canonicals": ["serialincident"]' in rules
         return [
             {
                 "evidence_refs": [
@@ -748,6 +755,8 @@ async def review_regressions(config, complete, package_id, news_id):
 
     async def compressed_run(self, provider, skill, payload, schema):
         assert payload["articles"] == [] and "extractions" in payload
+        assert all(p["scope_selection"] == "assignment" and p["keyword_canonicals"] == ["serialincident"]
+                   for p in payload["packages"])
         assert not self.provided_news
         refs = []
         for i, package in enumerate(payload["packages"]):
@@ -1141,6 +1150,229 @@ async def retrieval_revision_regressions():
         fresh = await api.packages(session, q="BNC-reviewed", page=1)
         assert package_id in {row["id"] for row in fresh.data["items"]}
     print("Stale TAG exclusion, current-title lookup and vocabulary retry refresh passed.")
+
+
+async def membership_tag_regressions():
+    original = "高盛公司警示美股风险。作者鲍比·莫拉维（Bobby Molavi）。民主党另有选情更新。"
+    revised = "公司英伟达发布GPU。"
+    followup = "Bobby Molavi补充材料支持原报告。"
+    package_ids = []
+    news_ids = []
+    async with SessionLocal() as session:
+        for i, content in enumerate((original, followup)):
+            news = NewsItem(
+                source_code="wscn_news", external_id=f"ci-membership-tags-{datetime.now(UTC).timestamp()}-{i}",
+                title="Risk report" if i == 0 else "Follow-up", content_text=content,
+                content_hash=str(i) * 64, published_at=datetime.now(UTC),
+                url="https://example.invalid/membership-tags",
+            )
+            session.add(news)
+            await session.flush()
+            news_ids.append(news.id)
+        await session.commit()
+        await service.enroll(session, news_ids)
+        for news_id in news_ids:
+            package_ids.append(await session.scalar(select(Package.id).where(Package.news_id == news_id)))
+
+    async def config(*args):
+        return SimpleNamespace(context_window=1000000, max_tokens=1000), "test", {}
+
+    event_id = None
+    reject_revision = True
+
+    async def complete(provider, skill, payload, schema):
+        content = payload["article"]["content"]
+        if schema is IndexResult:
+            if content == original:
+                pairs = [("高盛", ["高盛", "公司"]), ("鲍比·莫拉维", ["鲍比·莫拉维", "Bobby Molavi"]),
+                         ("美国民主党", ["民主党"])]
+            elif content == revised:
+                pairs = [("英伟达", ["英伟达", "公司"])]
+            else:
+                pairs = [("原报告", ["原报告"]), ("鲍比·莫拉维", ["Bobby Molavi"])]
+            return schema(keywords=[{"canonical": c, "aliases": a, "quote": content} for c, a in pairs]), {}
+        if content == revised and reject_revision:
+            raise ValueError("Synthetic assignment failure after reindexing")
+        existing = event_id if content == followup else None
+        return schema(targets=[{
+            "event_id": existing, "new_key": None if existing else "report",
+            "title": "高盛风险警示" if content == original else "GPU发布",
+            "reason": "Same report" if existing else "Independent matter",
+            "quote": "高盛公司警示美股风险。" if content == original else content,
+            "keyword_canonicals": ["高盛", "鲍比·莫拉维"] if content == original else ["英伟达"] if content == revised else ["原报告", "鲍比·莫拉维"],
+            "change_kind": "new_fact", "urgent": False,
+        }]), {}
+
+    with patch.object(service, "model_config", config), patch.object(service, "complete", complete):
+        await service.process_package(package_ids[0], {})
+        await service.process_package(package_ids[0], {})
+        async with SessionLocal() as session:
+            package = await session.get(Package, package_ids[0])
+            assert package.state == "done", package.error
+            event_id = await session.scalar(select(Membership.event_id).where(Membership.package_id == package.id))
+            event = await session.get(Event, event_id)
+            assert set(event.tags) == {"高盛", "公司", "鲍比·莫拉维", "bobby molavi"}
+            catalog = await service.candidates(session, [{"canonical": "鲍比·莫拉维", "aliases": ["Bobby Molavi"]}])
+            assert event_id in {e.id for e in catalog}, "Aliases outside the scope quote must recall the existing event"
+            news = await session.get(NewsItem, news_ids[0])
+            news.content_text, news.content_hash = revised, "9" * 64
+            await session.commit()
+            await service.enroll(session, [news.id])
+
+        # Another assignment rebuilds this event after the revised index was published.
+        await service.process_package(package_ids[0], {})
+        await service.process_package(package_ids[1], {})
+        await service.process_package(package_ids[1], {})
+        await service.process_package(package_ids[0], {})
+        async with SessionLocal() as session:
+            other = await session.get(Package, package_ids[1])
+            assert other.state == "done", other.error
+            package = await session.get(Package, package_ids[0])
+            assert package.state == "assign_failed" and package.keywords[0]["canonical"] == "英伟达"
+            event = await session.get(Event, event_id)
+            await service.refresh_event_tags(session, event)
+            assert "bobby molavi" in event.tags and "英伟达" not in event.tags and "民主党" not in event.tags
+            package.state = "assign_pending"
+            await session.commit()
+
+        # A failure after writing memberships must roll back snapshots and event creation.
+        reject_revision = False
+        with patch.object(service, "refresh_event_tags", side_effect=ValueError("Synthetic publication failure")):
+            await service.process_package(package_ids[0], {})
+        async with SessionLocal() as session:
+            package = await session.get(Package, package_ids[0])
+            assert package.state == "assign_failed" and package.error == "Synthetic publication failure"
+            assert await session.scalar(select(Membership.event_id).where(Membership.package_id == package.id)) == event_id
+            assert not await session.scalar(select(Event.id).where(Event.title == "GPU发布"))
+            event = await session.get(Event, event_id)
+            await service.refresh_event_tags(session, event)
+            assert "bobby molavi" in event.tags and "英伟达" not in event.tags
+            package.state = "assign_pending"
+            await session.commit()
+
+        # A successful reassignment removes only this member's old contribution.
+        await service.process_package(package_ids[0], {})
+        async with SessionLocal() as session:
+            package = await session.get(Package, package_ids[0])
+            assert package.state == "done", package.error
+            remaining_tags = ["bobby molavi", "原报告", "鲍比·莫拉维"]
+            assert (await session.get(Event, event_id)).tags == remaining_tags
+            moved_id = await session.scalar(select(Membership.event_id).where(Membership.package_id == package.id))
+            assert moved_id != event_id and set((await session.get(Event, moved_id)).tags) == {"公司", "英伟达"}
+            # Legacy records use the historical input, even when the live index changes.
+            legacy = await session.scalar(select(Attempt).where(
+                Attempt.package_id == package_ids[1], Attempt.stage == "assign", Attempt.state == "done"))
+            legacy.rules = {k: v for k, v in legacy.rules.items() if k != "membership_tags"}
+            (await session.get(Package, package_ids[1])).keywords = package.keywords
+            await session.flush()
+            event = await session.get(Event, event_id)
+            await service.refresh_event_tags(session, event)
+            assert event.tags == remaining_tags
+            await session.rollback()
+    print("Membership TAG selection, English entity recall, revision interleaving and publication rollback passed.")
+
+
+async def research_scope_regressions():
+    content = "革命卫队公告称四艘油轮触雷。作者Ali提供事故说明。另有两艘船被拦截。"
+    keywords = [
+        {"canonical": "油轮触雷", "aliases": ["油轮触雷"], "quote": "四艘油轮触雷"},
+        {"canonical": "Ali", "aliases": ["Ali"], "quote": "作者Ali提供事故说明"},
+        {"canonical": "船舶拦截", "aliases": ["船被拦截"], "quote": "两艘船被拦截"},
+    ]
+    async with SessionLocal() as session:
+        news = NewsItem(source_code="wscn_news", external_id=f"ci-research-scope-{datetime.now(UTC).timestamp()}",
+                        title="Two independent incidents", content_text=content, content_hash="8" * 64,
+                        url="https://example.invalid/research-scope", published_at=datetime.now(UTC))
+        session.add(news)
+        await session.commit()
+        news_id = news.id
+        await service.enroll(session, [news_id])
+        package_id = await session.scalar(select(Package.id).where(Package.news_id == news_id))
+        template = (await session.scalar(select(Version).where(Version.output.is_not(None)).order_by(Version.id).limit(1))).output
+
+    targets = [
+        {"event_id": None, "new_key": "mine", "title": "油轮触雷", "reason": "触雷事故",
+         "quote": "革命卫队公告称四艘油轮触雷。", "keyword_canonicals": ["油轮触雷", "Ali"],
+         "change_kind": "new_fact", "urgent": False},
+        {"event_id": None, "new_key": "interception", "title": "船舶拦截", "reason": "独立拦截行动",
+         "quote": "另有两艘船被拦截。", "keyword_canonicals": ["船舶拦截"],
+         "change_kind": "new_fact", "urgent": False},
+    ]
+
+    async def config(*args):
+        return SimpleNamespace(context_window=1000000, max_tokens=1000), "test", {}
+
+    async def complete(provider, skill, payload, schema):
+        return (schema(keywords=keywords) if schema is IndexResult else schema(targets=targets)), {}
+
+    with patch.object(service, "model_config", config), patch.object(service, "complete", complete):
+        await service.process_package(package_id, {})
+        await service.process_package(package_id, {})
+    async with SessionLocal() as session:
+        event_ids = list(await session.scalars(select(Membership.event_id).where(Membership.package_id == package_id).order_by(Membership.event_id)))
+        assert len(event_ids) == 2
+        assignment = await session.scalar(select(Attempt).where(Attempt.package_id == package_id, Attempt.stage == "assign", Attempt.state == "done"))
+        assert assignment.rules["membership_targets"] == {str(event_id): target for event_id, target in zip(event_ids, targets, strict=True)}
+        # A newer failed assignment and mutable index must not replace the snapshot.
+        session.add(Attempt(package_id=package_id, content_hash="8" * 64, stage="assign", state="failed",
+                            input={"keywords": []}, rules={}, output=None))
+        (await session.get(Package, package_id)).keywords = [{"canonical": "Unrelated", "aliases": ["Unrelated"]}]
+        await session.commit()
+
+    seen = []
+
+    async def run(self, provider, skill, payload, schema):
+        index = event_ids.index(payload["id"])
+        target, other = targets[index], targets[1-index]
+        package = payload["packages"][0]
+        assert package["keyword_canonicals"] == target["keyword_canonicals"]
+        assert package["keywords"] == [k for k in keywords if k["canonical"] in target["keyword_canonicals"]]
+        assert package["other_scopes"] == [{"title": other["title"], "scope_quote": other["quote"], "reason": other["reason"]}]
+        assert payload["articles"][0]["content"] == content
+        seen.append(deepcopy(payload))
+        refs = [{"article_id": news_id, "quote": target["quote"]}]
+        point = {**template["timeline_points"][0], "package_ids": [package_id], "evidence_refs": refs,
+                 "description": target["title"], "occurred_at": None, "time_precision": "unknown", "time_text": ""}
+        return schema(**{**template, "id": payload["id"], "title": target["title"], "summary": target["title"],
+                         "facts": target["quote"],
+                         "claims": [{"statement": target["quote"], "verdict": "supported", "evidence_refs": refs}],
+                         "evidence_refs": refs, "references": [],
+                         "timeline_points": [point]}), {}
+
+    with patch.object(service, "model_config", config), patch.object(service.Research, "run", run):
+        for event_id in event_ids:
+            await service.process_event(event_id, {}, force=True)
+    async with SessionLocal() as session:
+        for event_id, payload in zip(event_ids, seen, strict=True):
+            event = await session.get(Event, event_id)
+            assert event.state == "done", event.error
+            version = await session.scalar(select(Version).where(Version.event_id == event_id))
+            assert version.input == payload and version.state == "done"
+        assert len(seen) == 2
+        # Missing ownership fails durably before calling the model.
+        assignment = await session.get(Attempt, assignment.id)
+        assignment.state = "failed"
+        event = await session.get(Event, event_ids[0])
+        service.dirty(event)
+        await session.commit()
+    with patch.object(service, "model_config", side_effect=AssertionError("No model without snapshot")):
+        await service.process_event(event_ids[0], {}, force=True)
+    async with SessionLocal() as session:
+        event = await session.get(Event, event_ids[0])
+        assert event.state == "failed" and "快照" in event.error
+        assert event.result is not None
+        version = await session.scalar(select(Version).where(Version.event_id == event.id).order_by(Version.id.desc()).limit(1))
+        assert version.state == "failed" and "快照" in version.error
+        assignment = await session.get(Attempt, assignment.id)
+        assignment.state, assignment.content_hash = "done", "9" * 64
+        event.state = "pending"
+        await session.commit()
+    with patch.object(service, "model_config", side_effect=AssertionError("No model with stale snapshot")):
+        await service.process_event(event_ids[0], {}, force=True)
+    async with SessionLocal() as session:
+        event = await session.get(Event, event_ids[0])
+        assert event.state == "failed" and "版本不一致" in event.error
+    print("Research receives immutable event-specific TAGs, sibling boundaries and full originals; missing snapshots fail durably.")
 
 
 asyncio.run(main())

@@ -195,7 +195,7 @@ async def enable(session: DB):
             },
             Assignment,
         )
-        service.validate_assignment(assigned, fixture, set())
+        service.validate_assignment(assigned, fixture, set(), indexed.model_dump()["keywords"])
         provider, skill, _ = await service.model_config(
             session, original_config, "research"
         )
@@ -206,7 +206,19 @@ async def enable(session: DB):
                 "id": 1,
                 "event": {"id": 1, "title": fixture["title"]},
                 "articles": [fixture],
-                "packages": [{"id": 1, "news_id": 1}],
+                "packages": [{
+                    "id": 1, "news_id": 1,
+                    "scope_quote": assigned.targets[0].quote,
+                    "reason": assigned.targets[0].reason,
+                    "keywords": [k for k in indexed.model_dump()["keywords"]
+                                 if k["canonical"] in assigned.targets[0].keyword_canonicals],
+                    "keyword_canonicals": assigned.targets[0].keyword_canonicals,
+                    "scope_selection": "assignment",
+                    "other_scopes": [
+                        {"title": t.title, "scope_quote": t.quote, "reason": t.reason}
+                        for t in assigned.targets[1:]
+                    ],
+                }],
                 "package_ids": [1],
                 "previous": None,
             },

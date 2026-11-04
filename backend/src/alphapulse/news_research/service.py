@@ -75,7 +75,7 @@ def validate_keywords(result, source):
             raise ValueError("关键词别名必须实际出现在本篇原文中")
 
 
-def validate_assignment(result, source, candidate_ids):
+def validate_assignment(result, source, candidate_ids, keywords):
     for target in result.targets:
         if target.event_id is not None and target.event_id not in candidate_ids:
             raise ValueError("归属引用未知事件")
@@ -83,6 +83,89 @@ def validate_assignment(result, source, candidate_ids):
             [Evidence(article_id=source["id"], quote=target.quote)],
             {source["id"]: source},
         )
+        selected_tags(keywords, target.keyword_canonicals)
+
+
+def selected_tags(keywords, canonicals):
+    """Reuse selected keyword records, including aliases outside the scope quote."""
+    available = {keyword["canonical"] for keyword in keywords}
+    selected = set(canonicals)
+    if not selected or len(selected) != len(canonicals) or not selected <= available:
+        raise ValueError("归属TAG必须从输入canonical逐字选择，非空且不重复")
+    return {
+        term.strip().casefold()
+        for keyword in keywords
+        if keyword["canonical"] in selected
+        for term in [keyword["canonical"], *keyword["aliases"]]
+    }
+
+
+async def refresh_event_tags(session, event):
+    # Only committed assignment snapshots own TAGs; mutable indexes may be newer.
+    latest = (
+        select(func.max(Attempt.id))
+        .where(Attempt.package_id == Membership.package_id,
+               Attempt.stage == "assign", Attempt.state == "done")
+        .correlate(Membership).scalar_subquery()
+    )
+    rows = await session.execute(
+        select(Membership, Attempt).outerjoin(Attempt, Attempt.id == latest)
+        .where(Membership.event_id == event.id)
+    )
+    tags = set()
+    for member, attempt in rows:
+        if attempt is None:
+            raise ValueError(f"包{member.package_id}缺少成功归属快照，无法重建事件TAG")
+        contributions = attempt.rules.get("membership_tags")
+        if contributions is not None:
+            contribution = contributions.get(str(event.id))
+            if contribution is None:
+                raise ValueError(f"包{member.package_id}成功归属快照缺少事件{event.id}")
+            tags.update(contribution)
+        else:
+            # Legacy assignments did not select TAGs; retain their original full index.
+            keywords = attempt.input.get("keywords")
+            if not keywords:
+                raise ValueError(f"包{member.package_id}历史归属缺少关键词快照，无法重建事件TAG")
+            tags.update(selected_tags(keywords, [k["canonical"] for k in keywords]))
+    event.tags = sorted(tags)
+
+
+def research_scope(member, attempt):
+    """Read event boundaries from the owning assignment, never the mutable index."""
+    if attempt is None or not attempt.input.get("keywords"):
+        raise ValueError(f"包{member.package_id}缺少成功归属关键词快照，无法研究事件")
+    targets = attempt.rules.get("membership_targets")
+    if targets is not None:
+        target = targets.get(str(member.event_id))
+        if target is None:
+            raise ValueError(f"包{member.package_id}成功归属快照缺少事件{member.event_id}")
+        others = [t for key, t in targets.items() if key != str(member.event_id)]
+    else:
+        # Older snapshots do not resolve new_key to event IDs. Use an unambiguous
+        # persisted target, or explicitly leave the historical selection unknown.
+        candidates = (attempt.output or {}).get("targets", [])
+        matched = [t for t in candidates if t.get("event_id") == member.event_id]
+        if not matched:
+            matched = [t for t in candidates if t.get("event_id") is None
+                       and t.get("quote") == member.evidence
+                       and t.get("reason") == member.reason]
+        target = matched[0] if len(matched) == 1 else None
+        others = [t for t in candidates if t is not target] if target else []
+    keywords = attempt.input["keywords"]
+    canonicals = target.get("keyword_canonicals") if target else None
+    if canonicals is not None:
+        selected_tags(keywords, canonicals)
+        keywords = [k for k in keywords if k["canonical"] in canonicals]
+    return {
+        "keywords": keywords,
+        "keyword_canonicals": canonicals,
+        "scope_selection": "assignment" if canonicals is not None else "legacy_unscoped",
+        "other_scopes": [
+            {"title": t["title"], "scope_quote": t["quote"], "reason": t["reason"]}
+            for t in others
+        ],
+    }
 
 
 def dirty(event, urgent=False):
@@ -230,6 +313,12 @@ def package_matching(terms, vocabulary=None):
         for term in group:
             canonical = func.lower(words.c.value.op("->>")("canonical")) == term
             alias = exists(select(1).select_from(aliases).where(func.lower(aliases.c.value) == term)).correlate(words)
+            # Whole ASCII names/models recall compound TAGs without substring collisions.
+            if re.fullmatch(r"[a-z][a-z0-9]{2,}", term):
+                pattern = r"(^|[^A-Za-z0-9])" + re.escape(term) + r"([^A-Za-z0-9]|$)"
+                canonical = canonical | words.c.value.op("->>")("canonical").op("~*")(pattern)
+                alias = alias | exists(select(1).select_from(aliases).where(
+                    aliases.c.value.op("~*")(pattern))).correlate(words)
             matches.append(NewsItem.title.icontains(term, autoescape=True)
                 | ((Package.content_hash == NewsItem.content_hash)
                    & exists(select(1).select_from(words).where(canonical | alias)).correlate(Package)))
@@ -370,7 +459,7 @@ async def _process_package(identifier, config, expected_stage):
             if stage == "index":
                 validate_keywords(output, source)
             else:
-                validate_assignment(output, source, {e.id for e in catalog})
+                validate_assignment(output, source, {e.id for e in catalog}, payload["keywords"])
             async with publication_lock:
                 package = await session.get(
                     Package, identifier, populate_existing=True, with_for_update=True
@@ -402,13 +491,9 @@ async def _process_package(identifier, config, expected_stage):
                     )
                     previous_ids = {m.event_id for m in previous}
                     assigned = set()
-                    tags = sorted(
-                        {
-                            t.strip().casefold()
-                            for k in package.keywords
-                            for t in [k["canonical"], *k["aliases"]]
-                        }
-                    )
+                    affected = {}
+                    contributions = {}
+                    resolved_targets = {}
                     for target in output.targets:
                         event = (
                             await session.get(
@@ -425,10 +510,14 @@ async def _process_package(identifier, config, expected_stage):
                         ):
                             raise ValueError("候选事件已变化，请重试归属")
                         if event is None:
-                            event = Event(title=target.title, tags=tags, revision=0)
+                            event = Event(title=target.title, tags=[], revision=0)
                             session.add(event)
                             await session.flush()
                         assigned.add(event.id)
+                        affected[event.id] = event
+                        contributions[str(event.id)] = sorted(selected_tags(
+                            payload["keywords"], target.keyword_canonicals))
+                        resolved_targets[str(event.id)] = target.model_dump(mode="json")
                         existing = next(
                             (m for m in previous if m.event_id == event.id), None
                         )
@@ -446,7 +535,6 @@ async def _process_package(identifier, config, expected_stage):
                             existing.evidence = target.quote
                             existing.reason = target.reason
                             existing.change_kind = target.change_kind
-                        event.tags = sorted(set(event.tags) | set(tags))
                         if target.change_kind != "repost" or event.result is None:
                             dirty(event, target.urgent)
                     for old in previous:
@@ -456,8 +544,14 @@ async def _process_package(identifier, config, expected_stage):
                             )
                             dirty(event)
                             await session.delete(old)
+                            affected[event.id] = event
                     package.state = "done"
                     attempt.state = "done"
+                    attempt.rules = {**attempt.rules, "membership_tags": contributions,
+                                     "membership_targets": resolved_targets}
+                    await session.flush()
+                    for event in affected.values():
+                        await refresh_event_tags(session, event)
                     if not assigned and previous_ids:
                         raise ValueError("每个包至少归属一个事件")
                 package.error = None
@@ -534,11 +628,16 @@ class Research(LegacyResearch):
             if news_id in member_sources:
                 source = member_sources[news_id]
                 if news_id in self.provided_news:
-                    return {
+                    result = {
                         "article_id": source["id"],
                         "news_id": news_id,
                         "status": "already_provided",
+                        "instruction": "该成员原文已完整提供，请复用现有正文及article_id；无需再次读取其他已提供成员，独立补证查询合并同轮。无可改变判断的新线索时提交并说明缺口。",
                     }
+                    if member:
+                        result.update(id=args.id, package_id=args.id)
+                    self.records.append({"tool": name, "arguments": arguments, "result": result})
+                    return result
                 if self.counts["read"] >= 8:
                     raise ValueError("工具预算已用尽")
                 self.counts["read"] += 1
@@ -718,7 +817,6 @@ async def process_event(identifier, config, force=False):
                     "id": p.id,
                     "news_id": n.id,
                     "content_hash": p.content_hash,
-                    "keywords": p.keywords,
                     "scope_quote": m.evidence,
                     "reason": m.reason,
                 }
@@ -738,11 +836,28 @@ async def process_event(identifier, config, force=False):
         await session.commit()
         version_id, revision = version.id, event.revision
         researcher = Research(event={"id": identifier, "revision": revision})
-        researcher.register_members(payload)
         output = None
         used = None
         preparations = []
         try:
+            attempts = {a.package_id: a for a in await session.scalars(
+                select(Attempt).where(Attempt.id.in_(
+                    select(func.max(Attempt.id)).where(
+                        Attempt.package_id.in_(payload["package_ids"]),
+                        Attempt.stage == "assign", Attempt.state == "done",
+                    ).group_by(Attempt.package_id)
+                ))
+            )}
+            for p, _m, _n in members:
+                attempt = attempts.get(p.id)
+                if attempt is not None and attempt.content_hash != p.content_hash:
+                    raise ValueError(f"包{p.id}成功归属快照与当前原文版本不一致")
+            payload = {**payload, "packages": [
+                {**package, **research_scope(m, attempts.get(p.id))}
+                for package, (p, m, n) in zip(payload["packages"], members, strict=True)
+            ]}
+            version.input = payload
+            researcher.register_members(payload)
             provider, skill, rules = await model_config(session, config, "research")
             researcher.vocabulary = await vocab.snapshot(session)
             version.rules = {**rules, "vocabulary": researcher.vocabulary}
@@ -764,6 +879,8 @@ async def process_event(identifier, config, force=False):
             if not researcher.fits(provider, skill, request, ResearchResult):
                 extraction_rules = (
                     skill
+                    + "\n当前事件及各成员归属边界："
+                    + json.dumps({"event": payload["event"], "packages": payload["packages"]}, ensure_ascii=False)
                     + "\nextract只提取当前片段对本事件有用的事实与连续原文引用，不作评级。consolidate保留各来源、冲突、时间与引用，不新增事实。"
                 )
                 extracts, preparations = await extract_articles(
@@ -777,7 +894,10 @@ async def process_event(identifier, config, force=False):
                     raise ValueError("长输入提取遗漏成员原文，不能发布事件研判")
                 request = {**payload, "articles": [], "extractions": extracts}
                 request, extra = await compact_extractions(
-                    provider, extraction_rules, request, ResearchResult, researcher.fits
+                    provider, extraction_rules, request, ResearchResult,
+                    # Final research carries member boundaries in the payload only.
+                    lambda provider, _system, request, schema: researcher.fits(
+                        provider, skill, request, schema),
                 )
                 preparations.extend(extra)
                 researcher.sources.update({a["id"]: a for a in payload["articles"]})

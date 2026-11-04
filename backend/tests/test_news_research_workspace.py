@@ -53,13 +53,15 @@ def test_one_package_can_be_assigned_to_multiple_events_without_splitting(tradin
         "title": "Incident",
         "reason": "Follow-up",
         "quote": "Original",
+        "keyword_canonicals": ["Original"],
         "change_kind": "new_fact",
         "urgent": False,
     }
     result = Assignment(targets=[{**base, "event_id": 1}, {**base, "event_id": 2}])
-    validate_assignment(result, {"id": 8, "content": "Original"}, {1, 2})
+    keywords = [{"canonical": "Original", "aliases": ["Original"]}]
+    validate_assignment(result, {"id": 8, "content": "Original"}, {1, 2}, keywords)
     with pytest.raises(ValueError, match="未知事件"):
-        validate_assignment(result, {"id": 8, "content": "Original"}, {1})
+        validate_assignment(result, {"id": 8, "content": "Original"}, {1}, keywords)
     with pytest.raises(ValueError, match="重复"):
         Assignment(targets=[{**base, "event_id": 1}, {**base, "event_id": 1}])
 
@@ -354,3 +356,338 @@ def test_assignment_gate_serializes_only_assignment_and_releases_after_failure(
         assert calls[-1] == (2, "assign") and not service.assignment_lock.locked()
 
     asyncio.run(scenario())
+
+
+def test_digest_tags_are_selected_per_membership(trading):
+    from alphapulse.news_research.service import selected_tags
+
+    keywords = [
+        {"canonical": "中国人民银行", "aliases": ["央行"]},
+        {"canonical": "美国民主党", "aliases": ["民主党"]},
+        {"canonical": "股票回购增持再贷款", "aliases": ["股票回购增持再贷款"]},
+        {"canonical": "日经225指数", "aliases": ["日经225指数"]},
+    ]
+    assert selected_tags(keywords, ["中国人民银行", "股票回购增持再贷款"]) == {
+        "中国人民银行", "央行", "股票回购增持再贷款",
+    }
+    assert selected_tags(keywords, ["美国民主党"]) == {"美国民主党", "民主党"}
+    assert len(keywords) == 4
+
+
+@pytest.mark.parametrize("selection", [[], ["Invented"], ["AMD", "AMD"], ["amd"]])
+def test_assignment_rejects_empty_unknown_duplicate_or_rewritten_tags(trading, selection):
+    from alphapulse.news_research.contracts import Assignment
+    from alphapulse.news_research.service import validate_assignment
+
+    with pytest.raises(ValueError):
+        result = Assignment(targets=[{
+            "event_id": 1, "new_key": None, "title": "AMD", "reason": "Same event",
+            "quote": "AMD shipped", "keyword_canonicals": selection,
+            "change_kind": "new_fact", "urgent": False,
+        }])
+        validate_assignment(result, {"id": 1, "content": "AMD shipped"}, {1},
+                            [{"canonical": "AMD", "aliases": ["AMD"]}])
+
+
+def test_assignment_keeps_entity_aliases_outside_scope_quote(trading):
+    from alphapulse.news_research.contracts import Assignment
+    from alphapulse.news_research.service import selected_tags, validate_assignment
+
+    source = {"id": 1, "content": "高盛警示美股风险。研报作者为鲍比·莫拉维（Bobby Molavi）。"}
+    keywords = [
+        {"canonical": "高盛", "aliases": ["高盛"]},
+        {"canonical": "鲍比·莫拉维", "aliases": ["鲍比·莫拉维", "Bobby Molavi"]},
+        {"canonical": "美国民主党", "aliases": ["民主党"]},
+    ]
+    selected = ["高盛", "鲍比·莫拉维"]
+    result = Assignment(targets=[{
+        "event_id": 1, "new_key": None, "title": "高盛警示美股风险", "reason": "Same report",
+        "quote": "高盛警示美股风险。", "keyword_canonicals": selected,
+        "change_kind": "new_fact", "urgent": False,
+    }])
+    validate_assignment(result, source, {1}, keywords)
+    assert selected_tags(keywords, selected) == {"高盛", "鲍比·莫拉维", "bobby molavi"}
+
+
+def test_event_tags_are_rebuilt_instead_of_retaining_removed_noise(trading):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from alphapulse.news_research.service import refresh_event_tags
+
+    event = N(id=1, tags=["民主党", "旧事件"])
+    session = N(execute=AsyncMock(return_value=[(
+        N(package_id=1, evidence="央行下调利率"),
+        N(rules={"membership_tags": {"1": ["中国人民银行", "央行"]}}),
+    )]))
+    asyncio.run(refresh_event_tags(session, event))
+    assert event.tags == ["中国人民银行", "央行"]
+    session.execute.return_value = []
+    asyncio.run(refresh_event_tags(session, event))
+    assert event.tags == []
+
+
+def test_event_rebuild_uses_successful_snapshot_not_mutable_package_index(trading):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from sqlalchemy.dialects import postgresql
+    from alphapulse.news_research.service import refresh_event_tags
+
+    session = N(execute=AsyncMock(return_value=[(
+        N(package_id=1, evidence="公司遭到黑客攻击。"),
+        N(rules={"membership_tags": {"1": ["旧公司", "黑客攻击"]}}),
+    )]))
+    event = N(id=1, tags=["英伟达"])
+    asyncio.run(refresh_event_tags(session, event))
+    assert event.tags == ["旧公司", "黑客攻击"]
+    statement = str(session.execute.call_args.args[0].compile(
+        dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+    assert "news_research_packages" not in statement
+    assert "news_research_attempts.state = 'done'" in statement
+    assert "max(news_research_attempts.id)" in statement
+
+
+def test_legacy_assignment_retains_its_original_keyword_snapshot(trading):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from alphapulse.news_research.service import refresh_event_tags
+
+    event = N(id=1, tags=[])
+    session = N(execute=AsyncMock(return_value=[(
+        N(package_id=1, evidence="公司遭到黑客攻击。"),
+        N(rules={}, input={"keywords": [
+            {"canonical": "旧公司", "aliases": ["OldCorp"]},
+        ]}),
+    )]))
+    asyncio.run(refresh_event_tags(session, event))
+    assert event.tags == ["oldcorp", "旧公司"]
+
+
+@pytest.mark.parametrize("snapshot", [None, N(rules={}, input={}),
+                                      N(rules={"membership_tags": {"2": ["wrong"]}})])
+def test_event_rebuild_fails_without_owning_assignment_snapshot(trading, snapshot):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from alphapulse.news_research.service import refresh_event_tags
+
+    event = N(id=1, tags=["preserved"])
+    session = N(execute=AsyncMock(return_value=[(N(package_id=1), snapshot)]))
+    with pytest.raises(ValueError, match="快照"):
+        asyncio.run(refresh_event_tags(session, event))
+    assert event.tags == ["preserved"]
+
+
+@pytest.mark.parametrize("offset", ["+03:30", "+08:00", "-05:00"])
+@pytest.mark.parametrize("precision,day", [("day", 4), ("month", 1)])
+def test_coarse_timeline_dates_are_consistent_calendar_markers(trading, offset, precision, day):
+    from alphapulse.news_research.contracts import Point
+
+    p = Point(occurred_at=f"2026-11-04T13:25:00{offset}", time_precision=precision,
+              planned_at=f"2026-12-04T13:25:00{offset}", planned_precision=precision,
+              time_text="4日", reported_at=None, description="公告", verification="supported",
+              evidence_refs=[{"article_id": 1, "quote": "4日公告"}], package_ids=[1])
+    assert p.occurred_at == datetime(2026, 11, day, tzinfo=UTC)
+    assert p.planned_at == datetime(2026, 12, day, tzinfo=UTC)
+    assert p.time_text == "4日"
+
+
+def test_minute_precision_retains_real_instant_and_unknown_stays_null(trading):
+    from alphapulse.news_research.contracts import Point
+
+    p = Point(occurred_at="2026-11-04T13:25:00+03:30", time_precision="minute",
+              time_text="13:25", reported_at=None, description="公告", verification="supported",
+              evidence_refs=[{"article_id": 1, "quote": "13:25公告"}], package_ids=[1])
+    assert p.occurred_at.isoformat() == "2026-11-04T13:25:00+03:30"
+    p = Point(**{**p.model_dump(), "occurred_at": None, "time_precision": "unknown"})
+    assert p.occurred_at is None
+
+
+def test_research_scope_uses_resolved_assignment_and_keeps_full_selected_records(trading):
+    from copy import deepcopy
+    from alphapulse.news_research.service import research_scope
+
+    keywords = [
+        {"canonical": "高盛", "aliases": ["高盛"], "quote": "高盛警示风险"},
+        {"canonical": "鲍比·莫拉维", "aliases": ["Bobby Molavi"], "quote": "作者Bobby Molavi"},
+        {"canonical": "美国民主党", "aliases": ["民主党"], "quote": "民主党选情更新"},
+    ]
+    main = {"title": "风险报告", "quote": "高盛警示风险", "reason": "同一报告",
+            "keyword_canonicals": ["高盛", "鲍比·莫拉维"]}
+    other = {"title": "选情更新", "quote": "民主党选情更新", "reason": "独立事项",
+             "keyword_canonicals": ["美国民主党"]}
+    attempt = N(input={"keywords": keywords},
+                rules={"membership_targets": {"1": main, "2": other}})
+    before = deepcopy(attempt.input)
+    scope = research_scope(N(package_id=10, event_id=1), attempt)
+    assert scope["keywords"] == keywords[:2]
+    assert scope["keyword_canonicals"] == ["高盛", "鲍比·莫拉维"]
+    assert scope["scope_selection"] == "assignment"
+    assert scope["other_scopes"] == [{"title": "选情更新", "scope_quote": "民主党选情更新", "reason": "独立事项"}]
+    assert research_scope(N(package_id=10, event_id=2), attempt)["keywords"] == keywords[2:]
+    assert attempt.input == before
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_research_recovers_unambiguous_selected_tags_from_older_assignment(trading, existing):
+    from alphapulse.news_research.service import research_scope
+
+    keyword = {"canonical": "触雷", "aliases": ["水雷"]}
+    target = {"event_id": 1 if existing else None, "quote": "四艘油轮触雷", "reason": "具体事故",
+              "keyword_canonicals": ["触雷"]}
+    other = {"event_id": None, "title": "船舶拦截", "quote": "另有两艘船被拦截", "reason": "独立行动"}
+    attempt = N(input={"keywords": [keyword, {"canonical": "拦截", "aliases": ["拦截"]}]},
+                rules={}, output={"targets": [target, other]})
+    scope = research_scope(N(package_id=10, event_id=1, evidence=target["quote"], reason=target["reason"]), attempt)
+    assert scope["keywords"] == [keyword]
+    assert scope["other_scopes"][0]["scope_quote"] == "另有两艘船被拦截"
+
+
+@pytest.mark.parametrize("targets", [[], [
+    {"event_id": None, "quote": "同一引文", "reason": "同一理由", "keyword_canonicals": ["甲"]},
+    {"event_id": None, "quote": "同一引文", "reason": "同一理由", "keyword_canonicals": ["乙"]},
+]])
+def test_research_legacy_does_not_invent_a_selected_scope(trading, targets):
+    from alphapulse.news_research.service import research_scope
+
+    keywords = [{"canonical": "甲", "aliases": ["甲"]}, {"canonical": "乙", "aliases": ["乙"]}]
+    scope = research_scope(N(package_id=10, event_id=1, evidence="同一引文", reason="同一理由"),
+                           N(input={"keywords": keywords}, rules={}, output={"targets": targets}))
+    assert scope["scope_selection"] == "legacy_unscoped"
+    assert scope["keyword_canonicals"] is None and scope["keywords"] == keywords
+    assert scope["other_scopes"] == []
+
+
+def test_legacy_research_retains_known_sibling_boundaries_without_inventing_tags(trading):
+    from alphapulse.news_research.service import research_scope
+
+    keywords = [{"canonical": "甲", "aliases": ["甲"]}]
+    own = {"event_id": 1, "title": "事项甲", "quote": "原文甲", "reason": "主线甲"}
+    other = {"event_id": 2, "title": "事项乙", "quote": "原文乙", "reason": "主线乙"}
+    scope = research_scope(N(package_id=10, event_id=1),
+                           N(input={"keywords": keywords}, rules={}, output={"targets": [own, other]}))
+    assert scope["scope_selection"] == "legacy_unscoped" and scope["keyword_canonicals"] is None
+    assert scope["keywords"] == keywords
+    assert scope["other_scopes"] == [{"title": "事项乙", "scope_quote": "原文乙", "reason": "主线乙"}]
+
+
+@pytest.mark.parametrize("attempt", [None, N(input={}, rules={}), N(
+    input={"keywords": [{"canonical": "甲", "aliases": ["甲"]}]},
+    rules={"membership_targets": {"2": {}}},
+)])
+def test_research_fails_without_owning_assignment_snapshot(trading, attempt):
+    from alphapulse.news_research.service import research_scope
+
+    with pytest.raises(ValueError, match="快照"):
+        research_scope(N(package_id=10, event_id=1), attempt)
+
+
+@pytest.mark.parametrize("tool,identifier", [("read_news", 101), ("read_package", 10)])
+def test_provided_member_reads_are_audited_without_reading_or_spending_budget(trading, tool, identifier):
+    import asyncio
+    from alphapulse.news_research.service import Research
+
+    reader = Research(event={"id": 1})
+    source = {"id": 101, "news_id": 101, "content": "完整原文"}
+    payload = {"articles": [source], "packages": [{"id": 10, "news_id": 101}]}
+    reader.register_members(payload)
+    reader.provided_news = {101: 101}
+    result = asyncio.run(reader.tool(tool, {"id": identifier}))
+    assert result["status"] == "already_provided" and result["article_id"] == 101
+    assert "复用" in result["instruction"] and "独立补证查询合并同轮" in result["instruction"]
+    assert "content" not in result and reader.counts["read"] == 0
+    assert reader.records == [{"tool": tool, "arguments": {"id": identifier}, "result": result}]
+    retry = Research(event={"id": 1})
+    retry.register_members(payload)
+    retry.restore(reader.records)
+    assert not retry.provided_news and not retry.records
+    reread = asyncio.run(retry.tool(tool, {"id": identifier}))
+    assert reread["content"] == "完整原文" and retry.counts["read"] == 1
+
+
+@pytest.mark.parametrize("needs_compaction", [False, True])
+def test_long_event_compaction_uses_final_research_context(trading, monkeypatch, needs_compaction):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from alphapulse.news_research import service
+    from alphapulse.news_research.contracts import RESEARCH_SKILL, ResearchResult
+    from alphapulse.news_research.models import Version
+    from alphapulse.news_risk import pipeline
+
+    provider = N(max_tokens=32000, context_window=250000)
+    skill = pipeline.BASE + "\n" + RESEARCH_SKILL
+    quote = "该公司披露事故调查及资金追踪的最新进展。"
+    keywords = [{"canonical": f"因素{j}", "aliases": [f"Factors{j}"], "quote": quote * 4}
+                for j in range(8)]
+    target = {"title": "事故调查", "quote": quote, "reason": "同一事故的后续处置。",
+              "keyword_canonicals": [k["canonical"] for k in keywords]}
+    event = N(id=1, revision=1, title="事故调查", state="pending", result=None,
+              due_at=datetime.now(UTC) - timedelta(seconds=1))
+    members, attempts, versions = [], [], []
+    for identifier in range(1, 41):
+        news = N(id=identifier, title=quote, summary="", content_text=quote * 2000,
+                 content_hash=str(identifier), url="https://example.invalid/event",
+                 published_at=datetime.now(UTC))
+        members.append((N(id=identifier, news_id=identifier, state="done", content_hash=news.content_hash),
+                        N(event_id=1, package_id=identifier, evidence=quote, reason=target["reason"]), news))
+        attempts.append(N(package_id=identifier, content_hash=news.content_hash,
+                          input={"keywords": keywords}, rules={"membership_targets": {"1": target}}))
+    extracts = [{"facts": "detail " * 400 if needs_compaction else "调查继续。",
+                 "evidence_refs": [{"article_id": p.id, "quote": quote}]} for p, _, _ in members]
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        def add(self, version):
+            version.id = 1
+            versions.append(version)
+
+    session = Session()
+    session.get = AsyncMock(side_effect=lambda model, *args, **kwargs: versions[0] if model is Version else event)
+    session.execute = AsyncMock(side_effect=[members, N(all=lambda: [(n.id, n.content_hash) for _, _, n in members])])
+    session.scalars = AsyncMock(return_value=attempts)
+    session.scalar = AsyncMock(return_value=None)
+    session.commit = AsyncMock()
+    session.rollback = AsyncMock()
+    monkeypatch.setattr(service, "SessionLocal", lambda: session)
+    monkeypatch.setattr(service, "model_config", AsyncMock(return_value=(provider, skill, {})))
+    monkeypatch.setattr(service.vocab, "snapshot", AsyncMock(return_value={}))
+    extract = AsyncMock(return_value=(extracts, []))
+    monkeypatch.setattr(service, "extract_articles", extract)
+    # Quote and timeline validation are independent of this context-budget regression.
+    monkeypatch.setattr(service, "validate_event", lambda *args: None)
+    monkeypatch.setattr(service, "validate_timeline", lambda *args: None)
+
+    async def consolidate(provider, rules, payload, schema):
+        assert schema is pipeline.Extraction
+        assert "当前事件及各成员归属边界" in rules and quote in rules
+        assert pipeline.fits_context(provider, rules, payload, schema)
+        refs = [ref for part in payload["extractions"] for ref in part["evidence_refs"]]
+        return pipeline.Extraction(facts="调查继续。", evidence_refs=refs), {"mock": True}
+
+    complete = AsyncMock(side_effect=consolidate)
+    monkeypatch.setattr(pipeline, "complete", complete)
+
+    research_requests = []
+
+    async def research(reader, provider, rules, request, schema):
+        assert rules == skill and schema is ResearchResult
+        assert reader.fits(provider, rules, request, schema)
+        assert request["articles"] == [] and len(request["packages"]) == 40
+        assert {ref["article_id"] for part in request["extractions"] for ref in part["evidence_refs"]} == set(range(1, 41))
+        research_requests.append(request)
+        return N(id=1, title=event.title, references=[], model_dump=lambda **kwargs: {"id": 1}), {}
+
+    monkeypatch.setattr(service.Research, "run", research)
+    asyncio.run(service.process_event(1, {}))
+    assert versions[0].state == "done", versions[0].error
+    assert event.state == "done" and len(research_requests) == 1
+    assert bool(complete.await_count) == needs_compaction
+    boundary_rules = extract.await_args.args[1]
+    compressed = {**versions[0].input, "articles": [], "extractions": extracts}
+    reader = service.Research()
+    assert not reader.fits(provider, skill, versions[0].input, ResearchResult)
+    assert not reader.fits(provider, boundary_rules, compressed, ResearchResult)
+    assert reader.fits(provider, skill, compressed, ResearchResult) != needs_compaction
