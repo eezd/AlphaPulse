@@ -97,12 +97,11 @@ class CoinDeskSpider(RssNewsSpider):
     feeds = ("https://www.coindesk.com/arc/outboundfeeds/rss/",)
 
 
-class FedSpider(RssNewsSpider):
+from alphapulse.crawler.spiders.us_official import USOfficialSpider
+
+
+class FedSpider(USOfficialSpider):
     name = "fed"
-    feeds = (
-        "https://www.federalreserve.gov/feeds/press_monetary.xml",
-        "https://www.federalreserve.gov/feeds/speeches_and_testimony.xml",
-    )
 
 
 class BlsSpider(RssNewsSpider):

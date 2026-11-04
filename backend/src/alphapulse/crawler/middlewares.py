@@ -4,6 +4,9 @@ import hashlib
 from urllib.parse import urlparse
 
 from scrapy.crawler import Crawler
+from scrapy.exceptions import IgnoreRequest
+
+from alphapulse.core.us_news import official_url
 from scrapy.http import Request, Response
 from sqlalchemy import insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -19,6 +22,13 @@ class RedisRateLimitMiddleware:
     interval_ms = 1000
 
     async def process_request(self, request: Request) -> None:
+        if source := request.meta.get("official_source"):
+            try:
+                official_url(source, request.url)
+            except ValueError as exc:
+                raise IgnoreRequest(str(exc)) from exc
+        if urlparse(request.url).hostname != "api.congress.gov":
+            request.headers.pop("X-Api-Key", None)
         key = f"{KEY_PREFIX}rl:{urlparse(request.url).hostname}"
         while not await redis.set(key, "1", px=self.interval_ms, nx=True):
             ttl = await redis.pttl(key)

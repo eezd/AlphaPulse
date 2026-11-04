@@ -8,6 +8,8 @@ export interface NewsBrief {
   author: string | null
   tags: string[]
   is_paywalled: boolean
+  published_at_precision?: string | null
+  published_date?: string | null
   published_at: string
   first_seen_at: string
   revision_no: number

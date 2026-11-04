@@ -25,6 +25,7 @@ class Source(Base):
     last_error: Mapped[str | None] = mapped_column(Text)
     paused_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # 历史回补：目标时间（为空表示不回补）、已回补到的最早时间（断点）、是否已结束（到达目标或来源无更早数据）
+    history_cursor: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
     history_target: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     history_position: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     history_done: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
@@ -71,6 +72,7 @@ class NewsRevision(Base):
     summary: Mapped[str] = mapped_column(Text)
     content_html: Mapped[str] = mapped_column(Text)
     content_hash: Mapped[str] = mapped_column(String(64))
+    extra: Mapped[dict | None] = mapped_column(JSONB)
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     raw_response_id: Mapped[int | None] = mapped_column(ForeignKey("raw_responses.id"))
 
@@ -110,6 +112,7 @@ class CrawlRun(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # running / success / failed / interrupted
     status: Mapped[str] = mapped_column(String(16))
+    stats: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
     requests: Mapped[int] = mapped_column(Integer, default=0)
     items_seen: Mapped[int] = mapped_column(Integer, default=0)
     items_new: Mapped[int] = mapped_column(Integer, default=0)

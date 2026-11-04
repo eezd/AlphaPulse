@@ -51,6 +51,8 @@ class NewsPipeline:
                 )
                 # 插入成功取新行；冲突说明另一处刚写入，按已存在条目走比较/修订流程
                 news = await session.scalar(locked)
+            if inserted_id is None and item["extra"].get("content_scope") == "partial" and news.extra.get("content_scope") == "article":
+                return item
             if inserted_id is not None:
                 kind = "new"
             else:
@@ -74,6 +76,7 @@ class NewsPipeline:
                     content_html=item["content_html"],
                     content_hash=digest,
                     raw_response_id=raw_response_id,
+                    extra=item["extra"],
                 ))
             news_id = news.id
             await session.commit()

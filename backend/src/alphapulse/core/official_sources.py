@@ -98,3 +98,7 @@ def relevant_news(source: str, title: str, url: str) -> bool:
     if source == "insee":
         return any(t in title for t in ("prix à la consommation", "taux de chômage", "le pib", "le produit intérieur brut"))
     raise ValueError(f"未支持的欧洲新闻来源：{source}")
+
+# US adapters share the existing regional directory.
+from alphapulse.core.us_news import SOURCES as US_SOURCES
+REGIONS.update({code: "US" for code in US_SOURCES})

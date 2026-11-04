@@ -55,6 +55,8 @@ class NewsBrief(BaseModel):
     first_seen_at: datetime
     revision_no: int
     risk: NewsRiskBrief | None = None
+    published_at_precision: str | None = None
+    published_date: str | None = None
 
 
 class NewsPage(BaseModel):
@@ -71,6 +73,7 @@ class NewsDetail(NewsBrief):
 
 
 class Revision(BaseModel):
+    extra: dict | None = None
     revision_no: int
     title: str
     summary: str
@@ -131,7 +134,7 @@ async def list_news(
     items = []
     for news, excerpt, package in rows:
         risk = {'state': package.state} if package else None
-        items.append(NewsBrief.model_validate({**news.__dict__, 'excerpt': excerpt, 'risk': risk}))
+        items.append(NewsBrief.model_validate({**news.__dict__, 'excerpt': excerpt, 'risk': risk, 'published_at_precision': news.extra.get('published_at_precision'), 'published_date': news.extra.get('published_date')}))
     return success(NewsPage(items=items, total=total))
 
 
@@ -154,7 +157,7 @@ async def get_news(news_id: int, session: Annotated[AsyncSession, Depends(get_se
     news = await session.get(NewsItem, news_id)
     if news is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "新闻不存在")
-    return success(NewsDetail.model_validate({**news.__dict__, "excerpt": news.content_text[:EXCERPT_LENGTH]}))
+    return success(NewsDetail.model_validate({**news.__dict__, "excerpt": news.content_text[:EXCERPT_LENGTH], "published_at_precision": news.extra.get("published_at_precision"), "published_date": news.extra.get("published_date")}))
 
 
 @router.get("/{news_id}/revisions")

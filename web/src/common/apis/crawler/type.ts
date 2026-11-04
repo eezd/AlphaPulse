@@ -17,6 +17,9 @@ export interface SourceInfo {
   last_success_at: string | null
   last_error: string | null
   paused_until: string | null
+  collection_stats?: Record<string, number>
+  configuration_error?: string | null
+  history_cursor?: { history?: { scanned?: boolean }, realtime?: { entry: number } }
   supports_history: boolean
   history_target: string | null
   history_position: string | null

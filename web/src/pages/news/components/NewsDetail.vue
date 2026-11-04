@@ -89,7 +89,7 @@ const diffStats = computed(() => ({
       </div>
       <div class="grid grid-cols-2 gap-x-6 gap-y-2 border border-slate-200 rounded-lg border-solid bg-slate-50 px-3 py-2 text-sm">
         <div>
-          <span class="label">发布时间</span><span class="num">{{ formatTime(detail.published_at, "YYYY-MM-DD HH:mm:ss") }}</span>
+          <span class="label">发布时间</span><span class="num">{{ detail.published_at_precision === "date" ? `${detail.published_date}（仅日期）` : formatTime(detail.published_at, "YYYY-MM-DD HH:mm:ss") }}</span>
         </div>
         <div>
           <span class="label">作者</span>{{ detail.author || "-" }}
@@ -112,6 +112,13 @@ const diffStats = computed(() => ({
         title="此条新闻仅采集公开摘要，完整内容请查看原文链接。"
         type="info" :closable="false" show-icon
       />
+      <el-alert v-if="detail.extra.content_scope === 'partial'" title="正文或关键附件存在采集缺口，请核对官方原文。" type="warning" :closable="false" />
+      <div v-if="Array.isArray(detail.extra.attachments)" class="flex flex-wrap gap-2 text-xs">
+        <span v-for="attachment in (detail.extra.attachments as { url: string, title: string, status: string }[])" :key="attachment.url">
+          <el-link :href="attachment.url" target="_blank" type="primary">{{ attachment.title || '附件' }}</el-link>
+          （{{ attachment.status === 'complete' ? '已采集' : '存在缺口' }}）
+        </span>
+      </div>
       <el-tabs v-model="activeTab" class="min-h-0 flex flex-1 flex-col">
         <el-tab-pane :label="summaryOnly ? '摘要' : '正文'" name="content" class="h-full">
           <iframe :srcdoc="srcdoc" sandbox="allow-popups allow-popups-to-escape-sandbox" class="h-full w-full border-0" />

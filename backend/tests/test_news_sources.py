@@ -33,7 +33,7 @@ ITEM = """<item><title>Bitcoin &amp; Ethereum</title>
 <dc:creator>News desk</dc:creator><category>Markets</category></item>"""
 
 
-@pytest.mark.parametrize("source", ["CoinDeskSpider", "FedSpider", "BeaSpider"])
+@pytest.mark.parametrize("source", ["CoinDeskSpider", "BeaSpider"])
 def test_rss_preserves_original_summary_time_and_provenance(trading, source):
     from alphapulse.crawler.spiders import rss
     spider = make_spider(getattr(rss, source))
@@ -53,8 +53,8 @@ def test_rss_preserves_original_summary_time_and_provenance(trading, source):
 
 
 def test_rss_identity_survives_revisions_and_different_subfeeds(trading):
-    from alphapulse.crawler.spiders.rss import FedSpider
-    spider = make_spider(FedSpider)
+    from alphapulse.crawler.spiders.rss import CoinDeskSpider
+    spider = make_spider(CoinDeskSpider)
     original, = spider.parse_feed(feed_response(ITEM))
     revised, = spider.parse_feed(feed_response(ITEM.replace("Bitcoin &amp; Ethereum", "Revised headline"), "https://example.invalid/other.xml"))
     assert original["external_id"] == revised["external_id"]

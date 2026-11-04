@@ -209,3 +209,158 @@ With production authorization, retry `remove-cls --execute --build /path/to/buil
 using an accepted current dev build. Completed cleanup and migration stages are
 not repeated; failed stages are retried. A newer accepted build can resume if dev
 has advanced. Ordinary `recover` refuses restoration after maintenance has begun.
+
+### US official news collectors
+
+The US catalog adds `sec`, `cftc`, `treasury`, `ofac`, `fincen`, `whitehouse`,
+`congress`, `federal_register`, `occ`, and `doj`, and enriches `fed` with full
+text and H.4.1 releases. Migration `da1234567890` seeds the ten new sources
+**disabled**; it does not enable news AI or run any historical collection.
+Database migration and deployment still require the project's separate authorization.
+
+For this rollout from `c91234567890` to `da1234567890`:
+
+1. Review and authorize the feature commit/push, the one migration, and deployment
+   to the existing instance. Push `dev` through the existing CI. Its schema guard
+   must block activation until the independently authorized migration completes.
+2. Obtain the accepted build receipt and verify the candidate images using
+   `scripts/deploy.py`. Under the instance `.deploy.lock`, reject pending or stale
+   deployments and confirm the current schema is exactly `c91234567890`.
+3. Create a private full database backup and verify a complete restore into a
+   disposable database. Do not treat a dump listing as a restoration check.
+4. Still holding the lock, run only `alembic upgrade da1234567890` using the
+   verified candidate backend image and the existing private instance environment.
+   Verify three additive columns and ten new disabled sources. Do not modify
+   existing news, source enablement, history targets, or news AI settings.
+5. Release the lock and run `python3 scripts/deploy.py update --build` with that
+   same accepted receipt. Verify the nine services, API/web revisions, Congress
+   configuration presence, paused news AI, and disabled new sources. Report only
+   key presence/match, never its value or expanded container environment.
+
+The already enabled `fed` source keeps its enablement and uses the new full-body
+adapter after deployment. New collectors and historical backfill require a
+separate activation decision. SEC also requires a public contact email; absence
+must remain an explicit configuration error rather than an invented address.
+Rollback uses the existing deployment controller and retains additive columns
+and collected data; do not downgrade or stamp the database as an image rollback.
+
+Set `CONGRESS_API_KEY` and a public `CRAWLER_CONTACT_EMAIL` in the instance
+environment before enabling Congress and SEC. Keys are sent only in the Congress
+API request header and must never appear in URLs. Source access errors, including
+HTTP 200 challenge pages, fail visibly; they are not empty successful collections.
+
+After source acceptance, use the existing collection console to enable sources
+and set history to `2025-01-01`. Real-time discovery runs first; historical work
+issues new document requests for at most 20 seconds per batch and saves page and
+pending-document cursors only after successful processing. Canceling history
+preserves its cursor; restarting a completed traversal scans it again. Official
+rounds wait for the previous checkpoint commit and reload current source settings
+and cursors from the database; queued messages cannot restore canceled history
+or bypass a newly saved failure backoff. A failed checkpoint write is retried on
+subsequent triggers, with three total write attempts per round; exhausted writes
+block new collection with an explicit error until the collector is restarted. An ended
+list traversal does not prove complete bodies or attachments. Attachment failures
+remain visible on the news item, with up to three scheduled attempts one hour apart;
+exhausted gaps require explicit investigation or another traversal.
+
+Real-time discovery follows pagination, including every Federal Register page
+within a day. Only verified descending feeds stop early at a fully dated page
+outside the lookback window; unknown ordering is traversed conservatively.
+Congress screening reads subjects, CRS summaries, and available text before
+excluding a bill whose title alone is inconclusive. Missing bill evidence remains
+an unresolved gap, retried at most three times one hour apart per official update;
+exhausted gaps remain visible in the collection console. No AI is called.
+
+Original documents remain separate news packages across publishers. Body and
+attachment text are searchable and versioned. Date-only releases are displayed as
+dates, not precise release instants. Backfilled documents describe the version
+available at capture time; they are not historical point-in-time evidence.
+
+Validation without production credentials:
+
+- `cd backend && uv run pytest && uvx ruff check --select F,E9,B src tests`
+- `cd web && pnpm lint:check && pnpm typecheck && pnpm test && pnpm build`
+- `scripts/smoke_us_news.py` requires an isolated PostgreSQL database with user
+  `ci`, password `ci-only`, database `ci`, host `127.0.0.1`; it creates its own
+  news tables and must run in an empty disposable database. Redis publication is mocked.
+
+The 50 public HTML fixtures cover eight publishers. Additional API/PDF fixtures
+cover three 2025 DOJ institutional cases (OPA and USAO), their four attachments,
+one excluded personal crime case, and a Federal Register daily XML containing 106
+unique document numbers. The isolated database smoke checks idempotency and
+revisions after API-package edits. Three additional
+packages are actual GovInfo bill XML texts for GENIUS, CLARITY and STABLE;
+this cross-check is separate from the captured Congress API responses.
+The Congress API fixture contains 39 successful responses and produces 100
+packages: GENIUS 52, CLARITY 37, STABLE 10, and one crypto committee meeting.
+The smoke also replays those API packages without network access. On 2026-11-04,
+the isolated PostgreSQL run finished with 156 news packages and 158 revisions;
+replaying unchanged inputs created no extra revisions, and two deliberate edits
+each created one revision.
+
+DOJ discovery uses the public news API with 50 metadata records per page, then
+fetches individual bodies by UUID. It traverses publication dates newest first;
+old HTML discovery cursors are rebuilt without deleting news or changing the
+history target. API attachment file IDs use the verified official `/media/{id}/dl`
+endpoint. Calendar publication dates remain date-only; official update timestamps
+are stored separately.
+
+Federal Register daily results above 2,000 use the GovInfo issue XML to enumerate
+unique document numbers, then reuse the document API/body/PDF path. The issue date
+and unique count must match the daily API total; mismatch or download failure does
+not advance the checkpoint. A day advances only after its pending documents finish.
+Overflow tests use constructed 2,001-document data, not a claim of a real overflow day.
+
+An independent test key completed the three bill parser chains and a selected
+crypto committee meeting on 2026-11-04. This verifies the sampled API/text/action
+and attachment paths, not complete historical discovery or full source quality.
+The report keeps `accepted=false`: GENIUS has one undated text version, and one
+meeting PDF has no extractable text. Production credentials were not used in
+tests, and no key is hardcoded into the collector or saved in the fixtures.
+
+Three Federal Register API/body/PDF documents were previously read successfully
+on 2026-11-04; font encoding fidelity was not independently verified. Fixture replay
+and limited live reads do not prove complete 2025 coverage or authorize production
+collection activation.
+
+The GovInfo GENIUS BILLSTATUS XML captured on 2026-11-04 confirms that the
+Enrolled Bill version has an empty date. The offline cross-check preserves that
+gap and validates a dated text from each of the three bills without inventing a
+date. A dated version without a supported format also remains a bounded retry
+gap even when other versions succeed. Meeting PDFs include both meeting documents
+and witness documents, deduplicated by URL. The selected real meeting lists 16 PDF
+entries with 15 unique URLs: 14 yielded text, while a Truth in Testimony form did not. The meeting
+package remains `partial`; no OCR dependency or invented text/date hides the gap.
+
+Earlier public-key probes returned HTTP 429 and stopped immediately. The
+independent test key resolved that access blocker. Do not reuse production
+credentials for this test.
+
+
+Resumable Congress acceptance capture (no database, Redis, model, or production
+configuration access):
+
+```sh
+PYTHONPATH=backend/src backend/.venv/bin/python scripts/capture_congress.py --cache /tmp/alphapulse-congress-acceptance/responses.json.gz
+```
+
+For a separate local test key, enter `CONGRESS_TEST_API_KEY` in the ignored,
+mode-0600 `/srv/AlphaPulse/.env.congress-test`, then load it with uv:
+
+```sh
+PYTHONPATH=backend/src uv run --project backend --no-sync --env-file /srv/AlphaPulse/.env.congress-test python scripts/capture_congress.py --cache /tmp/alphapulse-congress-acceptance/responses.json.gz --meeting-url https://api.congress.gov/v3/committee-meeting/119/house/119541
+```
+
+The script uses `CONGRESS_TEST_API_KEY` when separately configured, otherwise the
+public DEMO_KEY. It atomically saves each successful, credential-redacted response,
+reuses cached responses on another invocation, and stops on HTTP 429 or its bounded
+request budget (default 60, maximum 100). It never follows redirects with API
+credentials. A separate compressed report records incomplete cases; an incomplete
+run exits nonzero. GENIUS's known undated version remains an explicit gap rather
+than a passing complete case. Meeting selection requires a crypto-relevant title
+or related metadata; `--meeting-url` accepts a known official single-meeting API
+URL to avoid an unrelated meeting scan. `parser_accepted` means the selected
+callback chain finished, including explicit partial packages; it does not mean
+full source quality passed. Exhausted candidate/request budgets remain incomplete.
+Mocked tests and real captured responses are separate evidence; neither proves
+complete 2025 coverage or authorizes production activation.

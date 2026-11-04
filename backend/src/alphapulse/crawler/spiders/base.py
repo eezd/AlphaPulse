@@ -65,6 +65,8 @@ class RunState:
     history_position: datetime | None = None
     history_done: bool = False
     history_deadline: float = 0
+    official_cursor: dict | None = None
+    stats: dict = field(default_factory=dict)
 
     @property
     def full_scan(self) -> bool:
@@ -104,6 +106,7 @@ class NewsSpider(RedisSpider):
         self._tasks: set[asyncio.Task] = set()
         # 上一轮成功后的回补进度 (目标, 断点, 是否结束)。写库是异步的，管理进程推来的下一条触发可能还带着旧断点
         self.history_checkpoint: tuple[datetime, datetime, bool] | None = None
+        self.finish_task: asyncio.Task | None = None
 
     @classmethod
     def from_crawler(cls, crawler: Crawler, *args: Any, **kwargs: Any) -> "NewsSpider":
@@ -177,7 +180,7 @@ class NewsSpider(RedisSpider):
         run, self.run = self.run, None
         if run.history_target is not None and not run.errors:
             self.history_checkpoint = (run.history_target, run.history_position, run.history_done)
-        self._spawn(self._finish_run(run))
+        self.finish_task = self._spawn(self._finish_run(run))
 
     def _on_error(self, failure: Failure, response: Response) -> None:
         if self.run:
@@ -191,10 +194,11 @@ class NewsSpider(RedisSpider):
         self.logger.info("采集进程退出")
         await self._flush_logs()
 
-    def _spawn(self, coro: Coroutine) -> None:
+    def _spawn(self, coro: Coroutine) -> asyncio.Task:
         task = asyncio.get_running_loop().create_task(coro)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+        return task
 
     async def _insert_run(self, run: RunState) -> None:
         async with SessionLocal() as session:
@@ -211,6 +215,7 @@ class NewsSpider(RedisSpider):
         values = {
             "finished_at": now,
             "status": "failed" if failed else "success",
+            "stats": run.stats,
             "requests": run.requests,
             "items_seen": run.items_seen,
             "items_new": run.items_new,
@@ -227,6 +232,12 @@ class NewsSpider(RedisSpider):
             source = await session.get(Source, self.name, with_for_update=True)
             # 本轮失败不推进断点，下一轮从原位置重做（写入幂等）；目标期间被修改或取消时丢弃本轮进度
             history_saved = not failed and run.history_target is not None and source.history_target == run.history_target
+            if not failed and run.official_cursor is not None:
+                cursor = dict(source.history_cursor or {})
+                cursor.update({k: v for k, v in run.official_cursor.items() if k != "history"})
+                if history_saved:
+                    cursor["history"] = run.official_cursor.get("history", {})
+                source.history_cursor = cursor
             if history_saved:
                 source.history_position = run.history_position
                 source.history_done = run.history_done

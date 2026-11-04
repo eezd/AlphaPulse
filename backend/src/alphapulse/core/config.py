@@ -7,6 +7,9 @@ class Settings(BaseSettings):
     # 容器内由 compose 的 env_file 注入；只有一套配置，见仓库根目录 .env
     model_config = SettingsConfigDict(extra="ignore")
 
+    congress_api_key: str = ""
+    crawler_contact_email: str = ""
+
     searxng_url: str = "http://searxng:8080"
     database_url: str
     redis_url: str

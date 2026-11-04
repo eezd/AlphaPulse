@@ -19,6 +19,7 @@ from alphapulse.core.redis import KEY_PREFIX, redis
 from alphapulse.core.official_sources import REGIONS
 from alphapulse.calendar.catalog import FAMILIES
 from alphapulse.crawler.events import CONTROL_CHANNEL, HISTORY_SOURCES, LOG_CHANNEL, STATUS_KEY
+from alphapulse.crawler.spiders.us_official import configuration_error
 from alphapulse.models import CrawlLog, CrawlRun, EconomicRelease, NewsItem, Source
 
 router = APIRouter(prefix="/api/crawler", tags=["crawler"], dependencies=[Depends(require_admin)])
@@ -46,10 +47,13 @@ class SourceOut(BaseModel):
     last_success_at: datetime | None
     last_error: str | None
     paused_until: datetime | None
+    configuration_error: str | None = None
+    history_cursor: dict = Field(default_factory=dict)
     supports_history: bool
     history_target: datetime | None
     history_position: datetime | None
     history_done: bool
+    collection_stats: dict = Field(default_factory=dict)
     # 管理进程未运行时为 None
     process: ProcessStatus | None
     today_new: int
@@ -180,6 +184,8 @@ async def list_sources(session: Annotated[AsyncSession, Depends(get_session)]) -
     totals = dict((await session.execute(
         select(NewsItem.source_code, func.count()).group_by(NewsItem.source_code)
     )).all())
+    latest_runs = (await session.scalars(select(CrawlRun).order_by(CrawlRun.source_code, CrawlRun.started_at.desc()).distinct(CrawlRun.source_code))).all()
+    run_stats = {run.source_code: run.stats for run in latest_runs}
     statuses = await redis.hgetall(STATUS_KEY)
     db_size = await session.scalar(select(func.pg_database_size(func.current_database())))
     return success(SourcesOut(
@@ -191,6 +197,8 @@ async def list_sources(session: Annotated[AsyncSession, Depends(get_session)]) -
                 **s.__dict__,
                 "region_code": REGIONS.get(s.code),
                 "supports_history": s.code in HISTORY_SOURCES,
+                "configuration_error": configuration_error(s.code),
+                "collection_stats": run_stats.get(s.code, {}),
                 "process": json.loads(statuses[s.code]) if s.code in statuses else None,
                 "today_new": today_counts.get(s.code, (0, 0))[0],
                 "today_revised": today_counts.get(s.code, (0, 0))[1],
@@ -206,6 +214,8 @@ async def patch_source(code: str, body: SourcePatch, session: Annotated[AsyncSes
     source = await session.get(Source, code)
     if source is None or source.collector != "news":
         raise HTTPException(status.HTTP_404_NOT_FOUND, "来源不存在")
+    if body.enabled and (error := configuration_error(code)):
+        raise HTTPException(status.HTTP_409_CONFLICT, error)
     for field, value in body.model_dump(exclude_none=True, exclude={"history_target"}).items():
         setattr(source, field, value)
     if "history_target" in body.model_fields_set:
@@ -214,6 +224,8 @@ async def patch_source(code: str, body: SourcePatch, session: Annotated[AsyncSes
         if body.history_target is not None and body.history_target >= datetime.now(LOCAL_TZ):
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "回补目标时间必须早于现在")
         # 保留断点：改目标或重新开始时从已回补的位置继续
+        if body.history_target is not None and (source.history_cursor or {}).get("history", {}).get("scanned"):
+            source.history_cursor = {k: v for k, v in source.history_cursor.items() if k != "history"}
         source.history_target = body.history_target
         source.history_done = False
     await session.commit()

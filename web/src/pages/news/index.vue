@@ -68,7 +68,7 @@ onBeforeUnmount(() => media?.removeEventListener("change", updateMobile))
               <el-tag size="small">
                 {{ sourceNames[item.source_code] ?? item.source_code }}
               </el-tag>
-              <span class="num">{{ formatTime(item.published_at) }}</span>
+              <span class="num">{{ item.published_at_precision === "date" ? item.published_date : formatTime(item.published_at) }}</span>
               <div class="flex-1" />
               <el-tag v-if="item.revision_no > 1" size="small" type="warning">
                 已修订 {{ item.revision_no - 1 }} 次

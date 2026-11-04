@@ -22,6 +22,7 @@ from alphapulse.api.calendar import calendar_data
 from alphapulse.api.market import call_binance, client, tradable_symbols
 from alphapulse.api.news import news_filters
 from alphapulse.core.db import SessionLocal
+from alphapulse.core.us_news import SOURCES as US_SOURCES
 from alphapulse.models import ContextVersion, NewsItem, SkillVersion
 from alphapulse.models.market import INTERVALS
 
@@ -33,6 +34,8 @@ SOURCE_NAMES = {
     "wscn_live": "华尔街见闻快讯", "wscn_news": "华尔街见闻文章",
     "coindesk": "CoinDesk", "fed": "美联储·政策与讲话", "bls": "美国劳工统计局·CPI/PPI/就业", "bea": "美国经济分析局",
 }
+
+SOURCE_NAMES.update({code: spec.name for code, spec in US_SOURCES.items()})
 
 
 @dataclass
@@ -59,7 +62,7 @@ def dump(data: Any) -> str:
 
 class SearchNews(BaseModel):
     query: Annotated[str, Field(description="关键字，按标题和正文字面匹配；比特币/Bitcoin、以太坊/Ethereum、美联储、CPI/PPI/非农/GDP/PCE 等完整主题词会同时匹配中英文；其他词请分别使用原文语言检索")]
-    sources: Annotated[list[Literal["wscn_live", "wscn_news", "coindesk", "fed", "bls", "bea"]] | None, Field(description="限定来源，不填为全部")] = None
+    sources: Annotated[list[Literal["wscn_live", "wscn_news", "coindesk", "fed", "bls", "bea", "sec", "cftc", "treasury", "ofac", "fincen", "whitehouse", "congress", "federal_register", "occ", "doj", "ecb", "boe", "eurostat", "ons", "destatis", "insee"]] | None, Field(description="限定来源，不填为全部")] = None
     start: Annotated[datetime | None, Field(description="开始时间（ISO 8601，带时区），如 2026-10-01T00:00:00+08:00")] = None
     end: Annotated[datetime | None, Field(description="结束时间（ISO 8601，带时区）")] = None
     limit: Annotated[int, Field(ge=1, le=20)] = 10
@@ -70,11 +73,11 @@ async def search_news(args: SearchNews) -> ToolOutcome:
         conditions = news_filters(args.sources, args.query, args.start, args.end)
         total = await session.scalar(select(func.count()).select_from(NewsItem).where(*conditions))
         rows = (await session.execute(
-            select(NewsItem.id, NewsItem.source_code, NewsItem.published_at, NewsItem.title, NewsItem.summary, func.left(NewsItem.content_text, 200))
+            select(NewsItem.id, NewsItem.source_code, NewsItem.published_at, NewsItem.title, NewsItem.summary, func.left(NewsItem.content_text, 200), NewsItem.extra)
             .where(*conditions).order_by(NewsItem.published_at.desc()).limit(args.limit)
         )).all()
     items = [
-        {"id": r[0], "source": SOURCE_NAMES.get(r[1], r[1]), "published_at": local(r[2]), "title": r[3], "brief": r[4] or r[5]}
+        {"id": r[0], "source": SOURCE_NAMES.get(r[1], r[1]), "published_at": r[6].get("published_date") if r[6].get("published_at_precision") == "date" else local(r[2]), "title": r[3], "brief": r[4] or r[5]}
         for r in rows
     ]
     return ToolOutcome(dump({"total": total, "returned": len(items), "items": items}))
@@ -90,10 +93,13 @@ async def get_news(args: GetNews) -> ToolOutcome:
     if news is None:
         return ToolOutcome(dump({"error": f"新闻 {args.id} 不存在"}))
     return ToolOutcome(dump({
-        "id": news.id, "source": SOURCE_NAMES.get(news.source_code, news.source_code), "published_at": local(news.published_at),
+        "id": news.id, "source": SOURCE_NAMES.get(news.source_code, news.source_code), "published_at": news.extra.get("published_date") if news.extra.get("published_at_precision") == "date" else local(news.published_at),
         "title": news.title, "url": news.url, "is_paywalled": news.is_paywalled,
         "content": news.content_text[:NEWS_BODY_LIMIT], "truncated": len(news.content_text) > NEWS_BODY_LIMIT,
         "content_scope": news.extra.get("content_scope", "article"),
+        "published_at_precision": news.extra.get("published_at_precision"),
+        "published_date": news.extra.get("published_date"),
+        "attachments": news.extra.get("attachments", []),
     }))
 
 

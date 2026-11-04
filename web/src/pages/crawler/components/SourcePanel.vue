@@ -54,8 +54,8 @@ async function saveInterval() {
   emit("changed")
 }
 
-// 默认回补到 2026 年初；已设置过目标时沿用
-const DEFAULT_HISTORY_TARGET = "2026-01-01"
+// Default to 2025; retain a previously selected target.
+const DEFAULT_HISTORY_TARGET = "2025-01-01"
 const historyDate = ref(props.source.history_target ? dayjs(props.source.history_target).format("YYYY-MM-DD") : DEFAULT_HISTORY_TARGET)
 
 const history = computed(() => {
@@ -68,7 +68,7 @@ const history = computed(() => {
   const percent = Math.min(100, Math.max(0, Math.round(covered / span * 1000) / 10))
   const reached = formatTime(position, "YYYY-MM-DD HH:mm")
   if (done && position && new Date(position) <= new Date(target))
-    return { text: `已完成，已到 ${reached}`, percent: 100, status: "success" } as const
+    return { text: `列表遍历完成，已到 ${reached}；正文及附件缺口以条目状态为准`, percent: 100, status: "success" } as const
   if (done)
     return { text: `来源最早只能翻到 ${reached}，更早的数据接口不提供`, percent, status: "warning" } as const
   return { text: position ? `进行中，已到 ${reached}` : "等待下一轮开始", percent, status: undefined }
@@ -88,6 +88,8 @@ async function cancelHistory() {
 }
 
 const statusTag = computed(() => {
+  if (props.source.configuration_error)
+    return { type: "warning", text: props.source.configuration_error } as const
   const process = props.source.process
   if (props.restarting || process?.state === "restarting")
     return { type: "warning", text: "重启中" } as const
@@ -121,7 +123,7 @@ onMounted(loadLatest)
         告警
       </el-tag>
       <div class="flex-1" />
-      <el-switch :model-value="source.enabled" @change="toggleEnabled" />
+      <el-switch :disabled="Boolean(source.configuration_error)" :model-value="source.enabled" @change="toggleEnabled" />
     </div>
     <div class="flex items-center gap-2 text-xs">
       <span class="h-2 w-2 rounded-full" :style="{ background: `var(--el-color-${statusTag.type})` }" />
@@ -154,6 +156,12 @@ onMounted(loadLatest)
           {{ source.total_items.toLocaleString() }}
         </div>
       </div>
+    </div>
+    <div v-if="source.collection_stats?.unresolved_bills" class="text-xs text-amber-600">
+      待核验法案 {{ source.collection_stats.unresolved_bills }}；官方资料尚不充分
+    </div>
+    <div v-if="source.collection_stats?.discovered" class="text-xs text-slate-500">
+      本轮发现 {{ source.collection_stats.discovered }}；筛除 {{ source.collection_stats.excluded ?? 0 }}；附件缺口 {{ source.collection_stats.partial ?? 0 }}
     </div>
     <div class="flex justify-between text-xs text-slate-500">
       <span>今日新增 <b class="num text-[var(--el-color-primary)]">+{{ source.today_new }}</b></span>
