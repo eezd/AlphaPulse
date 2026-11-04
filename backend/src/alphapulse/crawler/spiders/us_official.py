@@ -237,12 +237,30 @@ class USOfficialSpider(NewsSpider):
                 except ValueError:
                     continue
                 if re.search(pattern, urlsplit(url).path) and url not in SOURCES[self.name].entries and not re.search(r'/\d{4}-(?:press|speeches|testimony)\.htm$', urlsplit(url).path) and not url.lower().endswith('.pdf'):
-                    docs.append({'url': url, 'kind': 'article'})
+                    doc = {'url': url, 'kind': 'article'}
+                    if self.name == 'fed' and '/monetarypolicy/fomcminutes' in url:
+                        # The URL identifies the meeting; the calendar gives the release day.
+                        match = re.search(r'Released\s+([A-Za-z]+ \d{1,2}, \d{4})', a.xpath('normalize-space(parent::*)').get() or '')
+                        if not match:
+                            raise ValueError('FOMC 纪要链接缺少官方发布日期')
+                        doc.update(release_date=published(match[1])[0].date().isoformat(), release_date_source=response.url)
+                    docs.append(doc)
                 if a.attrib.get('rel') == 'next' or re.match(r'^(?:Next|Next page|下一页)', a.xpath('normalize-space(.)').get() or '', re.I):
                     next_url = url
             docs = list({d['url']: d for d in docs}.values())
             if not docs:
                 raise ValueError('官方列表未发现文档，不能认定历史遍历完成')
+        if self.name == 'fed':
+            begin = self.run.history_target if lane == 'history' else self.run.cutoff
+            def in_range(doc):
+                if doc.get('release_date'):
+                    day = published(doc['release_date'])[0].date()
+                elif match := re.search(r'((?:19|20)\d{6})', doc['url']):
+                    day = datetime.strptime(match[1], '%Y%m%d').date()
+                else:
+                    return True
+                return day >= begin.date()
+            docs = [doc for doc in docs if in_range(doc)]
         if lane == 'realtime':
             # OFAC's recent-actions entry is a descending day-indexed feed.
             if self.name == 'ofac' and docs:
@@ -253,11 +271,6 @@ class USOfficialSpider(NewsSpider):
             threshold = (self.run.started_at - timedelta(hours=24)).timestamp()
             self.cursor['checked'] = {k: v for k, v in checked.items() if v >= threshold}
             docs = [d for d in docs if self.cursor['checked'].get(d['url'], 0) < threshold]
-            if self.name == 'fed':
-                def recent(d):
-                    found = re.search(r'(202[5-9]\d{4})', d['url'])
-                    return not found or datetime.strptime(found[1], '%Y%m%d').replace(tzinfo=UTC) >= self.run.cutoff
-                docs = [d for d in docs if recent(d)]
         if next_url and official_url(self.name, next_url, response.url) == response.url:
             raise ValueError('官方列表翻页重复当前页面，未推进断点')
         visited = state.setdefault('visited_pages', [])
@@ -431,7 +444,9 @@ class USOfficialSpider(NewsSpider):
             if doc.get('pdf'):
                 parsed['extra']['attachments'].append({'url': official_url(self.name, doc['pdf']), 'title': 'Official PDF', 'status': 'pending'})
         else:
-            parsed = article(self.name, response.text, response.url)
+            parsed = article(self.name, response.text, response.url, release_date=doc.get('release_date'))
+            if doc.get('release_date'):
+                parsed['extra'].update(published_at_basis='official_calendar_release', published_at_source=doc['release_date_source'])
         if doc.get('bill'):
             context = self.cursor[lane]['bill']
             context['bodies'] += 1
@@ -446,7 +461,8 @@ class USOfficialSpider(NewsSpider):
         begin = self.run.history_target if lane == 'history' else self.run.cutoff
         if doc.get('attachment_retry') or (doc.get('bill') and self.cursor[lane]['bill'].get('retry')):
             begin = datetime(2025, 1, 1, tzinfo=UTC)
-        if parsed['published_at'] < begin:
+        outside_range = parsed['published_at'].date() < begin.date() if parsed['extra'].get('published_at_precision') == 'date' else parsed['published_at'] < begin
+        if outside_range:
             self.run.stats['outside_range'] = self.run.stats.get('outside_range', 0) + 1
             for result in self.complete(lane):
                 yield result

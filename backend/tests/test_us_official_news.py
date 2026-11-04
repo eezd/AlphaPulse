@@ -139,6 +139,99 @@ def test_fed_entries_match_real_archives_and_discover_documents(trading):
         assert obj.run.stats['discovered'] > 0
 
 
+def test_fed_realtime_completes_all_real_discovery_entries(trading, monkeypatch):
+    from dataclasses import replace
+    import gzip
+    from pathlib import Path
+    samples = json.loads(gzip.decompress((Path(__file__).parent / 'fixtures/us_news/fed_archives.json.gz').read_bytes()))
+    bodies = {s['url']: s['body'] for s in samples}
+    monkeypatch.setitem(SOURCES, 'fed', replace(SOURCES['fed'], entries=tuple(bodies)))
+    obj = spider(trading, 'fed')
+    requests = obj.first_requests()
+    visited = []
+    while requests:
+        request = requests.pop()
+        if request.meta.get('document'):
+            assert '2024' not in request.url
+            requests.extend(obj.complete('realtime'))
+        else:
+            assert request.url not in visited
+            visited.append(request.url)
+            requests.extend(obj.parse_listing(response(request.url, bodies[request.url], lane='realtime')))
+    assert visited == list(SOURCES['fed'].entries)
+    assert obj.cursor['realtime'] == {'entry': 0}
+    assert not obj.run.errors
+
+
+@pytest.mark.parametrize('lane', ['history', 'realtime'])
+def test_fed_discovery_respects_old_and_boundary_dates(trading, lane):
+    obj = spider(trading, 'fed')
+    obj.run.cutoff = datetime(2026, 11, 1, 15, tzinfo=UTC)
+    body = '<h1>FOMC</h1>' + ''.join(
+        f'<a href="/newsevents/pressreleases/monetary{day}a1.htm">Note</a>'
+        for day in ('20240131', '20251031', '20261101')
+    )
+    list(obj.parse_listing(response('https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm', body, lane=lane)))
+    pending = obj.cursor[lane]['pending']
+    assert all('20240131' not in doc['url'] for doc in pending)
+    assert any('20261101' in doc['url'] for doc in pending)
+    assert any('20251031' in doc['url'] for doc in pending) is (lane == 'history')
+
+
+@pytest.mark.parametrize('lane', ['history', 'realtime'])
+def test_fed_minutes_use_official_release_day_instead_of_meeting_day(trading, monkeypatch, lane):
+    import gzip
+    from pathlib import Path
+    samples = json.loads(gzip.decompress((Path(__file__).parent / 'fixtures/us_news/fed_archives.json.gz').read_bytes()))
+    sample = next(s for s in samples if 'fomccalendars' in s['url'])
+    obj = spider(trading, 'fed')
+    obj.run.cutoff = obj.run.history_target = datetime(2026, 2, 18, 15, tzinfo=UTC)
+    list(obj.parse_listing(response(sample['url'], sample['body'], lane=lane)))
+    doc = next(d for d in obj.cursor[lane]['pending'] if 'fomcminutes20260128.htm' in d['url'])
+    assert doc['release_date'] == '2026-02-18'
+    assert doc['release_date_source'] == sample['url']
+    bodies = json.loads(gzip.decompress((Path(__file__).parent / 'fixtures/us_news/fed_materials.json.gz').read_bytes()))
+    body = next(s['body'] for s in bodies if s['url'] == doc['url'])
+    from alphapulse.crawler.spiders import us_official
+    class Session:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def scalar(self, query): return None
+    monkeypatch.setattr(us_official, 'SessionLocal', Session)
+    monkeypatch.setattr(obj, 'attach_or_finish', lambda parsed, lane: iter([parsed]))
+    async def collect():
+        return [p async for p in obj.parse_document(response(doc['url'], body, lane=lane, document=doc))]
+    parsed, = asyncio.run(collect())
+    assert parsed['published_at'] == datetime(2026, 2, 18, tzinfo=UTC)
+    assert parsed['extra']['published_at_basis'] == 'official_calendar_release'
+    assert parsed['extra']['published_at_source'] == sample['url']
+
+
+def test_fed_minutes_missing_release_date_fail_explicitly(trading):
+    obj = spider(trading, 'fed')
+    body = '<h1>FOMC</h1><a href="/monetarypolicy/fomcminutes20260128.htm">HTML</a>'
+    with pytest.raises(ValueError, match='官方发布日期'):
+        list(obj.parse_listing(response(SOURCES['fed'].entries[-2], body, lane='history')))
+
+
+def test_fed_real_policy_bodies_have_titles_and_publication_dates():
+    import gzip
+    from pathlib import Path
+    samples = json.loads(gzip.decompress((Path(__file__).parent / 'fixtures/us_news/fed_materials.json.gz').read_bytes()))
+    for sample in samples:
+        is_minutes = '/fomcminutes' in sample['url']
+        if is_minutes:
+            with pytest.raises(ValueError, match='官方日历发布日期'):
+                article('fed', sample['body'], sample['url'])
+            with pytest.raises(ValueError, match='可识别的发布时间'):
+                article('fed', sample['body'], sample['url'], release_date='invalid')
+        parsed = article('fed', sample['body'], sample['url'], release_date=sample['published_date'] if is_minutes else None)
+        assert parsed['title'] == sample['title']
+        assert parsed['published_at'].date().isoformat() == sample['published_date']
+        assert parsed['extra']['published_at_precision'] == 'date'
+        assert len(parsed['content_html']) > 1000
+
+
 def test_fifty_real_public_documents_parse_without_io():
     import gzip
     from pathlib import Path

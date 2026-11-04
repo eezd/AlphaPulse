@@ -105,11 +105,11 @@ def validate_body(content: str) -> None:
         raise ValueError('官方正文为空或过短')
 
 
-def article(source: str, html: str, url: str) -> dict:
+def article(source: str, html: str, url: str, *, release_date: str | None = None) -> dict:
     sel = Selector(html)
     validate_body(html)
     selectors = {
-        'fed': ('#article h3.title', '#article h3', '#article h2'),
+        'fed': ('#article h3.title', '#article h3', '#article h2', '#content .heading h3', '#content .col-xs-12.col-sm-8.col-md-8 h3'),
         'treasury': ('h2.uswds-page-title',),
         'cftc': ('article h1:not(.press-release-title)',),
     }.get(source, ('.main-content__main h1', '#main_content h1', 'main h1', 'h1'))
@@ -133,6 +133,10 @@ def article(source: str, html: str, url: str) -> dict:
         values.insert(0, '-'.join(m.groups()))
     if source == 'ofac' and (m := re.search(r'/recent-actions/(\d{4})(\d{2})(\d{2})', url)):
         values.insert(0, '-'.join(m.groups()))
+    if source == 'fed' and '/monetarypolicy/fomcminutes' in url:
+        if release_date is None:
+            raise ValueError('FOMC 纪要缺少官方日历发布日期')
+        values = [release_date]
     at = precision = None
     for value in values:
         try:

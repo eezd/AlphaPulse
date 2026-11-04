@@ -289,6 +289,11 @@ discovery responses were captured on 2026-11-04: the 2025/2026
 press, speech and testimony archives, FOMC calendars and H.4.1 release dates.
 Their offline regression checks configured entry URLs and article discovery;
 Fed speech archives use the singular `speech/` directory.
+Three captured policy bodies cover implementation notes, economic projections
+and meeting minutes. Minutes use the calendar's explicit release date, with its
+source URL recorded, rather than the meeting date encoded in the document URL.
+Date-only documents remain eligible on the cutoff day; older discovery links
+are filtered before fetching their bodies in both realtime and history lanes.
 Additional API/PDF fixtures cover three 2025 DOJ institutional cases (OPA and USAO), their four attachments,
 one excluded personal crime case, and a Federal Register daily XML containing 106
 unique document numbers. The isolated database smoke checks idempotency and
