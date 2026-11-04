@@ -12,7 +12,7 @@ def pipeline(trading):
 
 
 def match(pipeline, **changes):
-    return dict(package_id=None, group_key='event', title='公告', category='macro', entities=['央行'],
+    return dict(event=dict(event_id=None,group_key='event',title='公告',fact='公告',reason='同一具体事项'),package_id=None, group_key='event', title='公告', category='macro', entities=['央行'],
         fact='公告', evidence='公告', urgent=False, tags=['央行'], content_kind='report', **changes)
 
 

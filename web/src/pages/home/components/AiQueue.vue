@@ -18,7 +18,7 @@ let version = 0
 let busy = false
 let alive = true
 let timer: ReturnType<typeof setInterval> | undefined
-const labels: Record<string, string> = { grouping: "新闻分包", analysis: "包研判", events: "事件时间线", outlook: "阅读编排", backfill: "历史新闻", running: "运行中", queued: "排队", waiting: "等待条件", failed: "失败", done: "已完成", unknown: "状态未知" }
+const labels: Record<string, string> = { grouping: "新闻分包", analysis: "事件研判", events: "事件研判", outlook: "阅读编排", backfill: "历史新闻", running: "运行中", queued: "排队", waiting: "等待条件", failed: "失败", done: "已完成", unknown: "状态未知" }
 async function load() {
   if (busy) return
   busy = true
@@ -82,7 +82,7 @@ onBeforeUnmount(() => {
         <el-option v-for="s in ['running', 'queued', 'waiting', 'failed', 'done']" :key="s" :label="labels[s]" :value="s" />
       </el-select>
       <el-select v-if="expanded" v-model="stage" clearable placeholder="全部阶段" class="!w-36">
-        <el-option v-for="s in ['grouping', 'analysis', 'events', 'outlook', 'backfill']" :key="s" :label="labels[s]" :value="s" />
+        <el-option v-for="s in ['grouping', 'events', 'outlook', 'backfill']" :key="s" :label="labels[s]" :value="s" />
       </el-select>
       <el-select v-if="expanded" v-model="origin" clearable placeholder="全部来源" class="!w-36">
         <el-option label="实时" value="realtime" /><el-option label="回补" value="history" />

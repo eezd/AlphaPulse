@@ -5,7 +5,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import RedirectResponse
 from starlette.exceptions import HTTPException
 
-from alphapulse.api import auth, calendar, chat, crawler, market, news, settings, skills, trading, risk, jin10
+from alphapulse.api import auth, calendar, chat, crawler, market, news, settings, skills, trading, jin10
+from alphapulse.news_research import api as risk
 from alphapulse.api.response import (
     ApiResponse, ValidationErrors, http_error, internal_error, success, validation_error,
 )

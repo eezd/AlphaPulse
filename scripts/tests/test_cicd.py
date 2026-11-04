@@ -152,6 +152,30 @@ class NewsResetTests(unittest.TestCase):
                     deploy.reset_news_ai({}, True)
                 run.assert_not_called()
 
+    def test_full_reset_requires_real_accepted_sample_before_docker(self):
+        with patch.object(deploy,'validate_images') as images, patch.object(deploy,'run') as run:
+            with self.assertRaisesRegex(RuntimeError,'验收尚未通过'):
+                deploy.reset_news_derived({},True)
+            images.assert_not_called()
+            run.assert_not_called()
+
+    def test_full_reset_preview_keeps_worker_and_data(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.object(deploy,'INSTANCE',Path(temporary)), patch.object(deploy,'validate_images'), patch.object(deploy,'run',return_value='{}') as run:
+                deploy.reset_news_derived({'version':'synthetic'})
+                self.assertEqual(run.call_count,2)
+                self.assertIn('False,None,None',run.call_args.kwargs['input'])
+                self.assertFalse(any('stop' in call.args for call in run.call_args_list))
+
+    def test_full_reset_refuses_pending_deployment(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory=Path(temporary)
+            ci.save(directory / 'deployment.pending.json',{})
+            with patch.object(deploy,'INSTANCE',directory),patch.object(deploy,'validate_images'),patch.object(deploy,'run') as run:
+                with self.assertRaisesRegex(RuntimeError,'pending deployment'):
+                    deploy.reset_news_derived({})
+                run.assert_not_called()
+
 
 class RecoveryTests(unittest.TestCase):
     def test_rollback_removes_new_calendar_worker_and_checks_previous_services(self):

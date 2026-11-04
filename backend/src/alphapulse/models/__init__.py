@@ -40,3 +40,6 @@ __all__ = [
     "TradingOrder",
     "TradingSymbol",
 ]
+
+# Register additive news research tables with Alembic metadata.
+from alphapulse.news_research import models as news_research_models  # noqa: F401,E402

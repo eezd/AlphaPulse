@@ -10,6 +10,9 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
+from contextvars import ContextVar
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -34,6 +37,9 @@ STREAM_RETRY_DELAY_SECONDS = 2
 TRUNCATED_RESULT = json.dumps({"error": "输出达到最大输出上限被截断，工具参数不完整，未执行。请精简内容后重新调用"}, ensure_ascii=False)
 
 logger = logging.getLogger("alphapulse.ai.llm")
+
+
+news_retry = ContextVar("news_model_retry", default=None)
 
 
 class LlmError(Exception):
@@ -104,8 +110,11 @@ async def stream(
     provider: AiProvider, system: str, messages: list[dict], tools: list[ToolSpec], effort: Effort | None = None,
 ) -> AsyncIterator[TextDelta | ThinkingStarted | Completion]:
     """先逐段产出 TextDelta / ThinkingStarted，最后产出一个 Completion。effort 为空表示不传，由模型决定"""
-    for attempt in range(STREAM_RETRIES + 1):
+    policy = news_retry.get()
+    retries = 2 if policy is not None else STREAM_RETRIES
+    for attempt in range(retries + 1):
         output = False
+        if policy is not None: policy["output"] = False
         try:
             if provider.protocol == "openai":
                 events = _stream_openai(provider, system, messages, tools, effort)
@@ -118,10 +127,49 @@ async def stream(
         # 流式读取过程中的网络错误 SDK 不包装，以原始的 httpx / httpx2 异常抛出
         except (openai.APIError, anthropic.APIError, httpx.TransportError, httpx2.TransportError) as e:
             # 已经推送过内容再重试会重复输出
-            if output or attempt == STREAM_RETRIES or not _retryable(e):
+            delay = _news_retry_delay(e, attempt) if policy is not None else STREAM_RETRY_DELAY_SECONDS
+            retryable = delay is not None if policy is not None else _retryable(e)
+            if output or (policy is not None and policy.get("output")) or attempt == retries or not retryable:
                 raise _llm_error(e) from e
-            logger.warning("模型调用失败，%ss 后第 %s 次重试：%s", STREAM_RETRY_DELAY_SECONDS, attempt + 1, _llm_error(e))
-            await asyncio.sleep(STREAM_RETRY_DELAY_SECONDS)
+            if policy is not None:
+                from alphapulse.news_risk.progress import step
+                step(f"上游暂时拒绝：{_llm_error(e)}；{delay:g}秒后重试（{attempt + 1}/2）")
+            logger.warning("模型调用失败，%ss 后第 %s 次重试：%s", delay, attempt + 1, _llm_error(e))
+            await asyncio.sleep(delay)
+            if policy is not None:
+                from alphapulse.news_risk.progress import step
+                step(f"等待模型响应（重试 {attempt + 1}/2）")
+
+
+def _news_retry_delay(error, attempt):
+    """One bounded retry owner for news; never repeat a timed out request."""
+    if isinstance(error, (openai.APITimeoutError, anthropic.APITimeoutError, httpx.TimeoutException, httpx2.TimeoutException)):
+        return None
+    status = getattr(error, 'status_code', None)
+    body = getattr(error, 'body', None)
+    detail = body.get('error', body) if isinstance(body, dict) else {}
+    message = str((detail.get('message') if isinstance(detail, dict) else detail) or getattr(error, 'message', '')).lower()
+    concurrency = _in_stream_error(error) and 'concurrency limit exceeded' in message
+    connection = isinstance(error, (openai.APIConnectionError, anthropic.APIConnectionError, httpx.TransportError, httpx2.TransportError))
+    if not (status == 429 or status is not None and 500 <= status <= 599 or concurrency or connection):
+        return None
+    delay = 30 * (attempt + 1)
+    response = getattr(error, 'response', None)
+    header = response.headers.get('retry-after') if response is not None else None
+    if header:
+        try:
+            try: seconds = float(header)
+            except ValueError: seconds = (parsedate_to_datetime(header) - datetime.now(UTC)).total_seconds()
+            if seconds > 120: return None
+            if seconds > 0: delay = max(delay, seconds)
+        except (ValueError, TypeError, OverflowError):
+            pass
+    return delay
+
+
+def _news_output():
+    policy = news_retry.get()
+    if policy is not None: policy['output'] = True
 
 
 def _in_stream_error(e: Exception) -> bool:
@@ -183,7 +231,7 @@ def _openai_messages(system: str, messages: list[dict]) -> list[dict]:
 async def _stream_openai(provider: AiProvider, system: str, messages: list[dict], tools: list[ToolSpec], effort: Effort | None) -> AsyncIterator[TextDelta | Completion]:
     client = openai.AsyncOpenAI(
         api_key=decrypt(provider.api_key_encrypted), base_url=f"{api_root(provider.base_url)}/v1",
-        timeout=TIMEOUT_SECONDS, max_retries=MAX_RETRIES,
+        timeout=TIMEOUT_SECONDS, max_retries=0 if news_retry.get() is not None else MAX_RETRIES,
     )
     kwargs: dict[str, Any] = {}
     if tools:
@@ -214,6 +262,8 @@ async def _stream_openai(provider: AiProvider, system: str, messages: list[dict]
             if reason == "length":
                 result.truncated = True
             delta = chunk.choices[0].delta
+            if delta.content or delta.tool_calls or getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None):
+                _news_output()
             if delta.content:
                 result.text += delta.content
                 yield TextDelta(delta.content)
@@ -260,7 +310,7 @@ def _anthropic_messages(messages: list[dict]) -> list[dict]:
 async def _stream_anthropic(provider: AiProvider, system: str, messages: list[dict], tools: list[ToolSpec], effort: Effort | None) -> AsyncIterator[TextDelta | ThinkingStarted | Completion]:
     client = anthropic.AsyncAnthropic(
         api_key=decrypt(provider.api_key_encrypted), base_url=api_root(provider.base_url),
-        timeout=TIMEOUT_SECONDS, max_retries=MAX_RETRIES,
+        timeout=TIMEOUT_SECONDS, max_retries=0 if news_retry.get() is not None else MAX_RETRIES,
     )
     kwargs: dict[str, Any] = {}
     if tools:
@@ -279,6 +329,7 @@ async def _stream_anthropic(provider: AiProvider, system: str, messages: list[di
             stream=True, **kwargs,
         )
         async for event in events:
+            if event.type in ("content_block_start", "content_block_delta"): _news_output()
             if event.type == "message_start":
                 result.usage["input_tokens"] = event.message.usage.input_tokens
             elif event.type == "content_block_start" and event.content_block.type == "tool_use":

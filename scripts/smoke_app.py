@@ -40,18 +40,14 @@ async def main():
         try:
             for path in ['/api/auth/me', '/api/news?q=CI', '/api/crawler/sources', '/api/market/symbols',
                          '/api/skills/tree', '/api/trading/status', '/api/chat/session',
-                         '/api/risk/settings', '/api/risk/overview', '/api/risk/summaries',
+                         '/api/risk/settings', '/api/risk/events', '/api/risk/packages',
                          '/api/calendar?start=' + now.strftime('%Y-%m-%d')]:
                 response = await client.get(path)
                 response.raise_for_status()
                 assert response.json()['code'] == 0, path
             assert 'CI synthetic news' in (await client.get('/api/news?q=CI')).text
-            for endpoint in ('overview', 'summaries'):
-                for hours in (24, 48, 72, 168):
-                    response = await client.get('/api/risk/'+endpoint, params={'hours': hours})
-                    response.raise_for_status()
-                    assert response.json()['code'] == 0
-                assert (await client.get('/api/risk/'+endpoint, params={'hours': 25})).status_code == 422
+            for endpoint in ('events', 'packages'):
+                assert (await client.get('/api/risk/'+endpoint, params={'page': 0})).status_code == 422
             item = (await client.get('/api/news?q=CI')).json()['data']['items'][0]
             selected = await client.get('/api/news', params=[('ids', item['id']), ('ids', 2147483647)])
             assert selected.status_code == 200 and [n['id'] for n in selected.json()['data']['items']] == [item['id']]

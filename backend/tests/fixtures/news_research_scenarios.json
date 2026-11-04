@@ -1,0 +1,199 @@
+{
+  "news": [
+    {
+      "id": 1001,
+      "source_code": "wscn_news",
+      "external_id": "synthetic-1001",
+      "title": "虚构验收材料",
+      "summary": "",
+      "content_text": "以下为完全虚构的隔离验收新闻，不对应现实事件。星桥交易所（XBridge）公告：2025年12月15日发生A号钱包被盗案，初步损失100万元。",
+      "content_hash": "f02937d18c6bdd36dab4b3c24ec0a5bc2479c5804b520cdd21860ad9fecc27b7",
+      "url": "https://example.invalid/1001",
+      "published_at": "2025-12-16T12:00:00+00:00"
+    },
+    {
+      "id": 1002,
+      "source_code": "wscn_news",
+      "external_id": "synthetic-1002",
+      "title": "虚构验收材料",
+      "summary": "",
+      "content_text": "以下为完全虚构的隔离验收新闻，不对应现实事件。本消息转载星桥交易所12月16日公告：2025年12月15日发生A号钱包被盗案，初步损失100万元。无新增事实。",
+      "content_hash": "27affb99835472e5217ced064faa963cb74232555ad87ab8545d03b6c892448a",
+      "url": "https://example.invalid/1002",
+      "published_at": "2025-12-17T12:00:00+00:00"
+    },
+    {
+      "id": 1003,
+      "source_code": "wscn_news",
+      "external_id": "synthetic-1003",
+      "title": "虚构验收材料",
+      "summary": "",
+      "content_text": "以下为完全虚构的隔离验收新闻，不对应现实事件。独立审计机构完成链上核查，确认XBridge的2025年12月15日A号钱包被盗案存在未经授权的转出，为该案新增独立证据。",
+      "content_hash": "5f5cc2c46643ac24456a94510309bdd43da7ba9b2445e4cf48f3d2df924e3fe6",
+      "url": "https://example.invalid/1003",
+      "published_at": "2026-02-02T12:00:00+00:00"
+    },
+    {
+      "id": 1004,
+      "source_code": "wscn_news",
+      "external_id": "synthetic-1004",
+      "title": "虚构验收材料",
+      "summary": "",
+      "content_text": "以下为完全虚构的隔离验收新闻，不对应现实事件。星桥交易所更正2025年12月15日A号钱包被盗案损失：经审计为80万元，原初步100万元被更正。",
+      "content_hash": "0fe85ccb8202bfc3e70a7d0ab93d7586d1ee0363e98ffde32192b1ace462ac7b",
+      "url": "https://example.invalid/1004",
+      "published_at": "2026-05-20T12:00:00+00:00"
+    },
+    {
+      "id": 1005,
+      "source_code": "wscn_news",
+      "external_id": "synthetic-1005",
+      "title": "虚构验收材料",
+      "summary": "",
+      "content_text": "以下为完全虚构的隔离验收新闻，不对应现实事件。星桥交易所宣布，2025年12月15日A号钱包被盗案的80万元赔付已于2026年7月19日完成，后续调查披露时间未知。",
+      "content_hash": "eeac23a20c8c1ae898559c8522dde9b3fbff4b561bb8916ef68f0432b1dc7114",
+      "url": "https://example.invalid/1005",
+      "published_at": "2026-07-20T12:00:00+00:00"
+    },
+    {
+      "id": 1006,
+      "source_code": "wscn_news",
+      "external_id": "synthetic-1006",
+      "title": "虚构验收材料",
+      "summary": "",
+      "content_text": "以下为完全虚构的隔离验收新闻，不对应现实事件。星桥交易所公告：2026年5月24日发生独立的B号热钱包被盗案，与2025年12月15日A号案不同，损失20万元。A号案仅作区别背景。",
+      "content_hash": "5595a83480c4b4d94ebdaf57794452851fbe32f6138ed301819ce0cf486d2c8f",
+      "url": "https://example.invalid/1006",
+      "published_at": "2026-05-25T12:00:00+00:00"
+    },
+    {
+      "id": 1007,
+      "source_code": "wscn_news",
+      "external_id": "synthetic-1007",
+      "title": "虚构验收材料",
+      "summary": "",
+      "content_text": "以下为完全虚构的隔离验收新闻，不对应现实事件。虚构监管机构发布新的全行业钱包托管规则。这是独立政策决策，明确以星桥交易所2025年12月15日A号被盗案及其审计更正结论为制定依据，不是A号案调查进展。",
+      "content_hash": "ce097bc5befd683ba24b1e9d6e3a6c9b9c86e2bb52d02563d2e3ba8c5aa9df71",
+      "url": "https://example.invalid/1007",
+      "published_at": "2026-06-01T12:00:00+00:00"
+    },
+    {
+      "id": 1008,
+      "source_code": "wscn_news",
+      "external_id": "synthetic-1008",
+      "title": "虚构验收材料",
+      "summary": "",
+      "content_text": "以下为完全虚构的隔离验收新闻，不对应现实事件。虚构标准协会发布独立的行业安全标准，以星桥交易所2025年12月15日A号被盗案为研究案例和对象，引用其审计更正结论。标准覆盖全行业，并非该案处置公告。",
+      "content_hash": "c439d7b7ab09e6038cbce1e9cec9ef1787b5ebbc3c61f17d488dce9b5be95918",
+      "url": "https://example.invalid/1008",
+      "published_at": "2026-06-02T12:00:00+00:00"
+    },
+    {
+      "id": 1009,
+      "source_code": "wscn_news",
+      "external_id": "synthetic-1009",
+      "title": "虚构验收材料",
+      "summary": "",
+      "content_text": "以下为完全虚构的隔离验收新闻，不对应现实事件。虚构甲国统计局5月10日发布2026年4月CPI，同比增长2%，环比0.1%。统计期为2026年4月。",
+      "content_hash": "39c3f342f2529c59a3313d414dd3e16556bf44be03267e3c0461c8741051ddd2",
+      "url": "https://example.invalid/1009",
+      "published_at": "2026-05-10T12:00:00+00:00"
+    },
+    {
+      "id": 1010,
+      "source_code": "wscn_news",
+      "external_id": "synthetic-1010",
+      "title": "虚构验收材料",
+      "summary": "",
+      "content_text": "以下为完全虚构的隔离验收新闻，不对应现实事件。受甲国5月10日发布的2026年4月CPI数据直接影响，甲币当日上涨0.2%。",
+      "content_hash": "cd75149b7264d821c050be40d766b3bdfb5c1ca122fdffd85e63666474bbdfb1",
+      "url": "https://example.invalid/1010",
+      "published_at": "2026-05-10T12:00:00+00:00"
+    },
+    {
+      "id": 1011,
+      "source_code": "wscn_news",
+      "external_id": "synthetic-1011",
+      "title": "虚构验收材料",
+      "summary": "",
+      "content_text": "以下为完全虚构的隔离验收新闻，不对应现实事件。虚构甲国统计局6月10日发布2026年5月CPI，同比增长3%。统计期为2026年5月，与4月不同。",
+      "content_hash": "fd6f8e1a0a660791af60376840f4ce35403cfc27aa29f56b92dc8f6971fd53fc",
+      "url": "https://example.invalid/1011",
+      "published_at": "2026-06-10T12:00:00+00:00"
+    },
+    {
+      "id": 1012,
+      "source_code": "wscn_news",
+      "external_id": "synthetic-1012",
+      "title": "虚构验收材料",
+      "summary": "",
+      "content_text": "以下为完全虚构的隔离验收新闻，不对应现实事件。虚构甲国央行6月11日作出独立降息决策，下调利率25个基点。决策参考2026年5月CPI，不能视为CPI数据发布本身。",
+      "content_hash": "d85455695fe1b07b217af1c7999c1339e6d052ace3a9284c8dbfa98fc92d89d0",
+      "url": "https://example.invalid/1012",
+      "published_at": "2026-06-11T12:00:00+00:00"
+    }
+  ],
+  "batches": [
+    [
+      1001
+    ],
+    [
+      1002
+    ],
+    [
+      1003,
+      1004
+    ],
+    [
+      1006,
+      1007,
+      1008
+    ],
+    [
+      1005
+    ],
+    [
+      1009,
+      1010
+    ],
+    [
+      1011
+    ],
+    [
+      1012
+    ]
+  ],
+  "must_link": [
+    [
+      1001,
+      1002,
+      1003,
+      1004,
+      1005
+    ],
+    [
+      1009,
+      1010
+    ]
+  ],
+  "must_separate": [
+    1001,
+    1006,
+    1007,
+    1008,
+    1009,
+    1011,
+    1012
+  ],
+  "references": [
+    [
+      1007,
+      1001
+    ],
+    [
+      1008,
+      1001
+    ]
+  ],
+  "expected_main_versions": 3
+}

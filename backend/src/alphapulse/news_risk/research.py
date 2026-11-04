@@ -13,7 +13,7 @@ from alphapulse.ai import llm
 from alphapulse.core.db import SessionLocal
 from alphapulse.models import NewsItem
 from alphapulse.models.risk import NewsSummary
-from alphapulse.news_risk.service import fits_context, validate_submission
+from alphapulse.news_risk.service import fits_context, validate_submission, model_stream
 
 
 async def public_address(url):
@@ -86,12 +86,12 @@ TOOLS = {
     'read_event': (Read, '读取事件、成员包和时间线，原文仍须另行读取'),
     'search_calendar': (LocalSearch, '检索已有经济日历'),
     'search_web': (Search, '通过SearXNG搜索外部来源，摘要仅作线索'),
-    'read_web': (ReadWeb, '读取搜索结果中的公开网页正文'),
+    'read_web': (ReadWeb, '读取已发现或已知URL的公开网页正文，链接本身不是证据'),
 }
 
 
 class Research:
-    def __init__(self):
+    def __init__(self, package=None, event=None):
         self.counts = {'search': 0, 'read': 0, 'search_web': 0, 'read_web': 0}
         self.records = []
         self.sources = {}
@@ -100,6 +100,12 @@ class Research:
         self.package_ids = set()
         self.read_package_ids = set()
         self.read_event_ids = set()
+        self.read_event_versions = {}
+        self.package = package or {}
+        self.event = event or {}
+        self.provided_news = {}
+        self.provided_packages = {}
+        self.web_unavailable = None
 
     @staticmethod
     def tool_specs():
@@ -116,23 +122,38 @@ class Research:
         for record in records:
             name, args, result = record['tool'], record['arguments'], record['result']
             if isinstance(result, dict) and 'error' in result: continue
+            # Membership and revisions can change between attempts; reread local objects.
+            if name in ('read_event', 'read_package'): continue
             self.cache[name+json.dumps(args, sort_keys=True)] = result
             if name in ('read_web', 'read_news'):
                 self.sources[result['article_id']] = result
             if name == 'search_web': self.urls.update(r['url'] for r in result['results'] if r.get('url'))
             if name == 'search_calendar': self.urls.update(r['release_url'] for r in result if r.get('release_url'))
-            if name == 'read_event': self.read_event_ids.add(result['id'])
             if name == 'search_packages': self.package_ids.update(r['id'] for r in result)
-            if name == 'read_package':
-                self.package_ids.add(result['id']); self.read_package_ids.add(result['id'])
 
     async def tool(self, name, arguments):
         if name not in TOOLS: raise ValueError('未知研究工具')
         from alphapulse.news_risk.progress import step
         step('查询资料', tool=name)
         args = TOOLS[name][0].model_validate(arguments)
+        if name == 'read_event' and args.id == self.event.get('id'):
+            return {**self.event, 'status':'already_provided', 'scope':'ai_summary_not_evidence'}
+        if name == 'read_package' and args.id in self.provided_packages:
+            return {**self.provided_packages[args.id], 'status':'already_provided', 'scope':'ai_summary_not_evidence'}
+        if name == 'read_package' and args.id == self.package.get('id'):
+            return {'id': args.id, 'revision': self.package.get('revision'), 'status': 'already_provided',
+                'scope': 'ai_summary_not_evidence', 'instruction': '当前包及previous已在输入中；纠错使用给定articles中的id或package.sources中的analysis_id。'}
+        if name == 'read_news' and args.id in self.provided_news:
+            return {'article_id': self.provided_news[args.id], 'news_id': args.id, 'status': 'already_provided',
+                'instruction': '原文已在本轮输入或工具响应中，使用该article_id引用，不重复计为独立来源。'}
+        if name == 'search_web' and self.web_unavailable is not None:
+            return self.web_unavailable
         key = name+json.dumps(arguments, sort_keys=True)
-        if key in self.cache: return self.cache[key]
+        if key in self.cache:
+            result = self.cache[key]
+            # Restored text becomes provided only when returned to this conversation.
+            if name == 'read_news': self.provided_news[args.id] = result['article_id']
+            return result
         budget = name if name in ('search_web', 'read_web') else 'search' if name.startswith('search') else 'read'
         if self.counts[budget] >= {'search': 4, 'read': 8, 'search_web': 2, 'read_web': 4}[budget]:
             raise ValueError('工具预算已用尽，请明确证据不足')
@@ -146,44 +167,47 @@ class Research:
                 rows = data.get('results', [])[:10]
                 self.urls.update(r['url'] for r in rows if r.get('url'))
                 result = {'results': rows, 'errors': data.get('unresponsive_engines', []), 'scope': 'search_snippets_only', 'status': 'matched' if rows else 'unavailable' if data.get('unresponsive_engines') else 'no_matches'}
+                if result['status'] == 'unavailable': self.web_unavailable = result
             elif name == 'read_web':
-                if args.url not in self.urls: raise ValueError('只能读取本轮搜索发现的地址')
                 result = await fetch_public(args.url)
-                identifier = -(len(self.sources)+1)
+                result['discovery_method'] = 'discovered' if args.url in self.urls else 'direct'
+                identifier = min([0, *self.sources])-1
                 self.sources[identifier] = result
                 result = {**result, 'article_id': identifier}
             elif name in ('search_events', 'read_event'):
                 from alphapulse.models.risk import NewsEvent, EventMember
                 if name == 'search_events':
-                    rows = (await session.scalars(select(NewsEvent).where(or_(*(NewsEvent.title.icontains(term, autoescape=True) for term in (args.keywords or args.query.split())[:6])), NewsEvent.state != 'retired').limit(20))).all()
+                    rows = (await session.scalars(select(NewsEvent).where(or_(*(NewsEvent.title.icontains(term, autoescape=True) for term in (args.keywords or args.query.split())[:6])), NewsEvent.state != 'retired', NewsEvent.id != self.event.get('id', 0)).limit(20))).all()
                     result = [{'id': e.id, 'title': e.title} for e in rows]
                 else:
                     row = await session.get(NewsEvent, args.id)
                     if row is None: raise ValueError('事件不存在')
-                    self.read_event_ids.add(row.id)
+                    self.read_event_ids.add(row.id); self.read_event_versions[row.id]=row.revision
                     members = list((await session.scalars(select(EventMember.package_id).where(EventMember.event_id == row.id))).all())
-                    result = {'id':row.id, 'title':row.title, 'result':row.result, 'package_ids':members, 'scope':'ai_summary_not_evidence'}
+                    packages = list(await session.scalars(select(NewsSummary).where(NewsSummary.id.in_(members),NewsSummary.replacement_ids==[],NewsSummary.state!='withdrawn')))
+                    result = {'packages':[{'id':p.id,'revision':p.revision,'fact':p.fact,'tags':p.tags} for p in packages], 'id':row.id, 'revision':row.revision, 'title':row.title, 'fact':row.fact, 'result':row.result, 'package_ids':members, 'scope':'ai_summary_not_evidence'}
             elif name in ('search_news', 'search_packages'):
                 model = NewsItem if name == 'search_news' else NewsSummary
                 from alphapulse.news_risk.retrieval import terms_for, matching
                 conditions, score = matching(model, terms_for(args.query, args.keywords))
-                if model is NewsSummary: conditions = conditions & (NewsSummary.replacement_ids == []) & (NewsSummary.state != 'withdrawn')
+                if model is NewsSummary: conditions = conditions & (NewsSummary.replacement_ids == []) & (NewsSummary.state != 'withdrawn') & (NewsSummary.id != self.package.get('id', 0)) & NewsSummary.id.not_in(self.provided_packages)
                 rows = (await session.scalars(select(model).where(conditions).order_by(score.desc(), model.published_at.desc(), model.id).limit(20))).all()
                 result = [{'id': r.id, 'title': r.title} for r in rows]
                 if model is NewsSummary: self.package_ids.update(r.id for r in rows)
             elif name == 'read_news':
                 row = await session.get(NewsItem, args.id)
                 if row is None: raise ValueError('新闻不存在')
-                identifier = -(len(self.sources)+1)
+                identifier = min([0, *self.sources])-1
                 result = {'article_id': identifier, 'news_id': row.id, 'title': row.title, 'content': row.content_text,
                     'summary': row.summary, 'url': row.url, 'published_at': row.published_at.isoformat()}
                 self.sources[identifier] = result
+                self.provided_news[row.id] = identifier
             elif name == 'read_package':
                 from alphapulse.models.risk import SummaryArticle, ArticleAnalysis, EventMember
                 row = await session.get(NewsSummary, args.id)
                 if row is None: raise ValueError('包不存在')
                 self.package_ids.add(row.id); self.read_package_ids.add(row.id)
-                ids = (await session.scalars(select(ArticleAnalysis.news_id).join(SummaryArticle).where(SummaryArticle.summary_id == row.id, SummaryArticle.active.is_(True)))).all()
+                ids = (await session.scalars(select(ArticleAnalysis.news_id).join(SummaryArticle).join(NewsItem).where(SummaryArticle.summary_id == row.id, SummaryArticle.active.is_(True), ArticleAnalysis.content_hash == NewsItem.content_hash).distinct())).all()
                 assignments = (await session.scalars(select(ArticleAnalysis).join(SummaryArticle).join(NewsItem).where(SummaryArticle.summary_id == row.id, SummaryArticle.active.is_(True), ArticleAnalysis.content_hash == NewsItem.content_hash))).all()
                 membership = await session.get(EventMember, row.id)
                 result = {'main_event_id': membership.event_id if membership else None, 'replacement_ids': row.replacement_ids, 'state': row.state, 'id': row.id, 'revision': row.revision, 'fact': row.fact, 'result': row.result, 'articles': [{'analysis_id': a.id, **a.input} for a in assignments], 'news_ids': ids, 'scope': 'ai_summary_not_evidence'}
@@ -197,6 +221,10 @@ class Research:
         return result
 
     async def run(self, provider, system, payload, schema):
+        # Only full articles actually present in the prompt can replace a source read.
+        self.provided_news.update({a['news_id']: a['id'] for a in payload.get('articles', []) if a.get('news_id') is not None})
+        self.sources.update({a['id']: a for a in payload.get('articles', [])})
+        self.provided_packages.update({p['id']:p for p in payload.get('packages',[])})
         specs = self.tool_specs()
         submit = llm.ToolSpec('submit', '提交完整研判，引用实际读取来源', schema.model_json_schema())
         messages = [{'role': 'user', 'text': json.dumps(payload, ensure_ascii=False)}]
@@ -207,7 +235,7 @@ class Research:
             if not self.fits_messages(provider, system, messages, schema):
                 raise ValueError('研究上下文不足，请增大上下文配置；证据未截断')
             completion = None
-            async for item in llm.stream(provider, system, messages, [*specs, submit] if round_no < 8 else [submit], provider.reasoning_effort):
+            async for item in model_stream(provider, system, messages, [*specs, submit] if round_no < 8 else [submit], provider.reasoning_effort):
                 if isinstance(item, llm.Completion): completion = item
             if completion is not None: usages.append(completion.usage)
             if completion is None or completion.truncated: raise ValueError('研究输出未完成或被截断')

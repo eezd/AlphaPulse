@@ -1,0 +1,142 @@
+"""Additive storage: original news and legacy AI tables are never written here."""
+
+from datetime import datetime
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Mapped, mapped_column
+from alphapulse.core.db import Base
+
+
+class VocabularyVersion(Base):
+    __tablename__ = "news_research_vocabulary_versions"
+    revision: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    entries: Mapped[list] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ResearchSettings(Base):
+    __tablename__ = "news_research_settings"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    config: Mapped[dict] = mapped_column(JSONB)
+    enabled: Mapped[bool] = mapped_column(default=False)
+    control_revision: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0"
+    )
+    start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class Package(Base):
+    __tablename__ = "news_research_packages"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    news_id: Mapped[int] = mapped_column(ForeignKey("news_items.id"), unique=True)
+    content_hash: Mapped[str] = mapped_column(String(64))
+    state: Mapped[str] = mapped_column(String(20), default="index_pending", index=True)
+    keywords: Mapped[list] = mapped_column(JSONB, default=list)
+    error: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class Attempt(Base):
+    __tablename__ = "news_research_attempts"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    package_id: Mapped[int] = mapped_column(
+        ForeignKey("news_research_packages.id"), index=True
+    )
+    content_hash: Mapped[str] = mapped_column(String(64))
+    stage: Mapped[str] = mapped_column(String(16))
+    state: Mapped[str] = mapped_column(String(16))
+    input: Mapped[dict] = mapped_column(JSONB)
+    output: Mapped[dict | None] = mapped_column(JSONB)
+    rules: Mapped[dict] = mapped_column(JSONB)
+    usage: Mapped[dict | None] = mapped_column(JSONB)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class Event(Base):
+    __tablename__ = "news_research_events"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    title: Mapped[str] = mapped_column(Text)
+    tags: Mapped[list] = mapped_column(JSONB, default=list)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    state: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    result: Mapped[dict | None] = mapped_column(JSONB)
+    error: Mapped[str | None] = mapped_column(Text)
+    dirty_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    due_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class Membership(Base):
+    __tablename__ = "news_research_memberships"
+    event_id: Mapped[int] = mapped_column(
+        ForeignKey("news_research_events.id"), primary_key=True
+    )
+    package_id: Mapped[int] = mapped_column(
+        ForeignKey("news_research_packages.id"), primary_key=True
+    )
+    evidence: Mapped[str] = mapped_column(Text)
+    reason: Mapped[str] = mapped_column(Text)
+    change_kind: Mapped[str] = mapped_column(String(20))
+
+
+class Version(Base):
+    __tablename__ = "news_research_versions"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    event_id: Mapped[int] = mapped_column(
+        ForeignKey("news_research_events.id"), index=True
+    )
+    revision: Mapped[int] = mapped_column(Integer)
+    state: Mapped[str] = mapped_column(String(16))
+    input: Mapped[dict] = mapped_column(JSONB)
+    output: Mapped[dict | None] = mapped_column(JSONB)
+    rules: Mapped[dict] = mapped_column(JSONB)
+    usage: Mapped[dict | None] = mapped_column(JSONB)
+    evidence: Mapped[list] = mapped_column(JSONB, default=list)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class Reference(Base):
+    __tablename__ = "news_research_references"
+    __table_args__ = (UniqueConstraint("version_id", "target_version_id"),)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    version_id: Mapped[int] = mapped_column(
+        ForeignKey("news_research_versions.id"), index=True
+    )
+    target_version_id: Mapped[int] = mapped_column(
+        ForeignKey("news_research_versions.id")
+    )
+    role: Mapped[str] = mapped_column(String(20))
+    reason: Mapped[str] = mapped_column(Text)
+
+
+TABLES = [
+    VocabularyVersion.__table__,
+    ResearchSettings.__table__,
+    Package.__table__,
+    Attempt.__table__,
+    Event.__table__,
+    Membership.__table__,
+    Version.__table__,
+    Reference.__table__,
+]

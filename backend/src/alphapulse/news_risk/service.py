@@ -76,45 +76,56 @@ class OutputTruncated(ValueError):
 
 
 class SubmissionFailure(ValueError):
-    def __init__(self, message, usage):
+    def __init__(self, message, usage, correction_attempted=False):
         super().__init__(message)
         self.usage = usage
+        self.correction_attempted = correction_attempted
 
 
-async def validate_submission(provider, system, messages, schema, completion, usages):
-    """Repair time-contract errors once without acquiring another worker slot."""
+async def model_stream(*args):
+    """Scope transport retry changes to news requests only."""
+    token = llm.news_retry.set({"output": False})
+    try:
+        async for item in llm.stream(*args):
+            yield item
+    finally:
+        llm.news_retry.reset(token)
+
+
+async def validate_submission(provider, system, messages, schema, completion, usages, allow_repair=True):
+    """Repair structural or time-contract errors once using the same evidence."""
     calls = completion.tool_calls
     try:
         return schema.model_validate(calls[0]['arguments'])
     except ValidationError as error:
         errors = error.errors(include_input=False, include_url=False, include_context=False)
-        if not all('timeline_points' in e['loc'] and
+        if not allow_repair or not all(e['type'] in ('missing', 'extra_forbidden') or 'timeline_points' in e['loc'] and
                    (any(f in e['loc'] for f in ('occurred_at', 'reported_at', 'time_precision', 'planned_at', 'planned_precision'))
                     or e['msg'] in ('Value error, 发生时间与精度不一致', 'Value error, 发生时间必须有时区', 'Value error, 报道时间必须有时区', 'Value error, 计划时间与精度不一致', 'Value error, 计划时间必须有时区'))
                    for e in errors):
             raise SubmissionFailure(str(error), {'rounds': usages}) from error
     from alphapulse.news_risk.progress import step
-    step('纠正时间字段（1/1）', model=provider.model, reasoning_effort=provider.reasoning_effort)
+    step('纠正结构化输出（1/1）', model=provider.model, reasoning_effort=provider.reasoning_effort)
     assistant = {'role': 'assistant', 'text': completion.text, 'tool_calls': calls}
     if completion.thinking_blocks:
         assistant['thinking_blocks'] = completion.thinking_blocks
     messages = [*messages, assistant, {'role': 'tool', 'tool_call_id': calls[0]['id'],
-        'result': json.dumps({'errors': errors, 'instruction': '仅纠正时间字段并重新submit；未知发生或计划时间用null和unknown，不改变原文证据，不添加查询。'}, ensure_ascii=False)}]
+        'result': json.dumps({'errors': errors, 'instruction': '根据errors逐项纠正字段缺失、层级或时间错误并重新submit完整结果；不得省略必填字段或补造事实。未知时间用null和unknown；保留原文证据，不添加查询。'}, ensure_ascii=False)}]
     if not fits_context(provider, system, {'messages': messages}, schema):
-        raise SubmissionFailure('纠错上下文不足；证据未截断', {'rounds': usages})
+        raise SubmissionFailure('纠错上下文不足；证据未截断', {'rounds': usages}, True)
     repaired = None
-    tool = llm.ToolSpec('submit', '纠正时间字段后提交完整结果', schema.model_json_schema())
+    tool = llm.ToolSpec('submit', '纠正字段后提交完整结果', schema.model_json_schema())
     try:
-        async for item in llm.stream(provider, system, messages, [tool], provider.reasoning_effort):
+        async for item in model_stream(provider, system, messages, [tool], provider.reasoning_effort):
             if isinstance(item, llm.Completion): repaired = item
         if repaired is not None: usages.append(repaired.usage)
         if repaired is None or repaired.truncated:
-            raise ValueError('时间字段纠错输出未完成或被截断')
+            raise ValueError('结构化输出纠错输出未完成或被截断')
         if len(repaired.tool_calls) != 1 or repaired.tool_calls[0]['name'] != 'submit':
-            raise ValueError('时间字段纠错必须只提交一次结果')
+            raise ValueError('结构化输出纠错必须只提交一次结果')
         return schema.model_validate(repaired.tool_calls[0]['arguments'])
     except Exception as error:
-        raise SubmissionFailure(str(error), {'rounds': usages}) from error
+        raise SubmissionFailure(str(error), {'rounds': usages}, True) from error
 
 
 async def complete(provider: AiProvider, system: str, payload: dict, schema: type[BaseModel]):
@@ -125,7 +136,7 @@ async def complete(provider: AiProvider, system: str, payload: dict, schema: typ
         raise ValueError('新闻输入超出模型上下文；未截断或发送，请调整模型配置')
     completion = None
     tool = llm.ToolSpec('submit', '提交有依据的结构化结果', schema.model_json_schema())
-    async for item in llm.stream(provider, system, [{'role': 'user', 'text': text}], [tool], provider.reasoning_effort):
+    async for item in model_stream(provider, system, [{'role': 'user', 'text': text}], [tool], provider.reasoning_effort):
         if isinstance(item, llm.Completion):
             completion = item
     if completion is not None and completion.truncated:
@@ -136,7 +147,7 @@ async def complete(provider: AiProvider, system: str, payload: dict, schema: typ
     if len(calls) != 1 or len(completion.tool_calls) != 1:
         raise SubmissionFailure('模型必须提交一次完整结构化结果', completion.usage)
     usages = [completion.usage]
-    result = await validate_submission(provider, system, [{'role': 'user', 'text': text}], schema, completion, usages)
+    result = await validate_submission(provider, system, [{'role': 'user', 'text': text}], schema, completion, usages, allow_repair="correction" not in payload)
     return result, completion.usage if len(usages) == 1 else {'rounds': usages}
 
 
@@ -190,3 +201,9 @@ async def default_settings(session):
         return RiskSettings(id=1, enabled=False, provider_id=provider.id if provider else None,
                             model=provider.model if provider else '', second_model='', third_model='')
     return settings
+
+
+def accumulate_usage(previous, current):
+    """Retain billed attempts when one durable identity is retried or deferred."""
+    attempts = previous.get('attempts', [previous]) if previous else []
+    return {'attempts': [*attempts, current]}

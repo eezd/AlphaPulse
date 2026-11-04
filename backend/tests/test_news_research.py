@@ -18,14 +18,23 @@ def test_private_and_mixed_dns_are_rejected(trading, monkeypatch):
     asyncio.run(check())
 
 
-def test_read_web_requires_discovered_url_and_budget(trading):
-    from alphapulse.news_risk.research import Research
-    research = Research()
-    with pytest.raises(ValueError, match='本轮搜索'):
-        asyncio.run(research.tool('read_web', {'url': 'https://example.invalid'}))
-    research.counts['read_web'] = 4
+@pytest.mark.parametrize('discovered', [False, True])
+def test_read_web_supports_direct_urls_and_budget(trading, monkeypatch, discovered):
+    from alphapulse.news_risk import research as module
+    reader = module.Research()
+    url = 'https://example.invalid/official'
+    if discovered:
+        reader.urls.add(url)
+    fetch = AsyncMock(return_value={'url': url, 'content': 'Official original'})
+    monkeypatch.setattr(module, 'fetch_public', fetch)
+    result = asyncio.run(reader.tool('read_web', {'url': url}))
+    assert result['discovery_method'] == ('discovered' if discovered else 'direct')
+    assert result['article_id'] < 0
+    fetch.assert_awaited_once_with(url)
+    reader.counts['read_web'] = 4
     with pytest.raises(ValueError, match='预算'):
-        asyncio.run(research.tool('read_web', {'url': 'https://example.invalid'}))
+        asyncio.run(reader.tool('read_web', {'url': url + '/other'}))
+    assert fetch.await_count == 1
 
 
 def test_briefing_covers_all_packages_across_batches(trading, monkeypatch):
@@ -95,6 +104,58 @@ def test_failed_review_can_reuse_saved_evidence_without_new_io(trading):
     assert not research.records and research.counts['read_web'] == 0
 
 
+def test_restored_news_is_sent_before_reusing_its_reference(trading, monkeypatch):
+    import json
+    from pydantic import BaseModel
+    from alphapulse.news_risk import research
+    class Result(BaseModel):
+        summary: str
+    review = research.Research({'id': 42})
+    review.restore([{'tool': 'read_news', 'arguments': {'id': 123},
+        'result': {'article_id': -1, 'news_id': 123, 'content': 'Restored original'}}])
+    rounds = []
+    async def stream(provider, system, messages, tools, effort):
+        rounds.append(len(messages))
+        if len(rounds) == 2:
+            assert json.loads(messages[-1]['result'])['content'] == 'Restored original'
+        if len(rounds) == 3:
+            reply = json.loads(messages[-1]['result'])
+            assert reply['article_id'] == -1 and reply['status'] == 'already_provided'
+            assert 'content' not in reply
+            yield research.llm.Completion(tool_calls=[{'id': 'submit', 'name': 'submit',
+                'arguments': {'summary': 'Restored original'}}])
+        else:
+            yield research.llm.Completion(tool_calls=[{'id': str(len(rounds)), 'name': 'read_news', 'arguments': {'id': 123}}])
+    monkeypatch.setattr(research.llm, 'stream', stream)
+    result, _ = asyncio.run(review.run(SimpleNamespace(max_tokens=1000, context_window=200000, reasoning_effort=None),
+        'rules', {'articles': []}, Result))
+    assert result.summary == 'Restored original' and len(rounds) == 3
+    assert review.counts['read'] == 0 and not review.records
+
+
+def test_current_input_takes_precedence_over_restored_news(trading, monkeypatch):
+    from pydantic import BaseModel
+    from alphapulse.news_risk import research
+    class Result(BaseModel):
+        summary: str
+    review = research.Research()
+    review.restore([{'tool': 'read_news', 'arguments': {'id': 123},
+        'result': {'article_id': -1, 'news_id': 123, 'content': 'Old original'}}])
+    async def stream(provider, system, messages, tools, effort):
+        if len(messages) == 1:
+            yield research.llm.Completion(tool_calls=[{'id': 'read', 'name': 'read_news', 'arguments': {'id': 123}}])
+        else:
+            import json
+            reply = json.loads(messages[-1]['result'])
+            assert reply['article_id'] == 9 and reply['status'] == 'already_provided'
+            assert 'Old original' not in json.dumps(messages)
+            yield research.llm.Completion(tool_calls=[{'id': 'submit', 'name': 'submit', 'arguments': {'summary': 'Current original'}}])
+    monkeypatch.setattr(research.llm, 'stream', stream)
+    asyncio.run(review.run(SimpleNamespace(max_tokens=1000, context_window=200000, reasoning_effort=None), 'rules',
+        {'articles': [{'id': 9, 'news_id': 123, 'content': 'Current original'}]}, Result))
+    assert review.counts['read'] == 0
+
+
 def test_research_stops_after_eight_tool_rounds_and_retains_failures(trading, monkeypatch):
     from alphapulse.news_risk import research
     from pydantic import BaseModel
@@ -130,7 +191,7 @@ def test_reading_updates_only_for_changes_and_respects_aggregation(trading, monk
     session = AsyncMock()
     session.__aenter__.return_value = session
     session.get.return_value = SimpleNamespace(enabled=True)
-    session.scalar.side_effect = [latest, None, None]
+    session.scalar.side_effect = [latest, None, None] + ([None] if mode == 'expired' else [])
     session.scalars.return_value = SimpleNamespace(all=lambda: [] if mode == 'expired' else [event])
     monkeypatch.setattr(events, 'reading_inputs', AsyncMock(return_value=[] if mode == 'expired' else [{'kind': 'package', 'id': event.id, 'revision': event.published_revision, 'importance_stars': event.importance_stars, 'category': event.category, 'tags': event.tags, 'result': event.result}]))
     added = []
@@ -175,8 +236,29 @@ def test_single_package_truncation_is_bounded_and_does_not_retry_other_errors(tr
     complete = AsyncMock(side_effect=ValueError('Malformed ranking'))
     monkeypatch.setattr(briefing, 'complete', complete)
     with pytest.raises(ValueError, match='Malformed'):
-        asyncio.run(briefing.generate(SimpleNamespace(max_tokens=256, context_window=200000), 'rules', [{'id': 1}, {'id': 2}]))
+        asyncio.run(briefing.generate(SimpleNamespace(max_tokens=256, context_window=200000), 'rules', [{'id': 1, 'revision': 1}, {'id': 2, 'revision': 1}]))
     assert complete.await_count == 1
+
+
+@pytest.mark.parametrize('split', [False, True])
+def test_terminal_truncation_keeps_completed_and_split_attempt_usage(trading, monkeypatch, split):
+    from alphapulse.news_risk import briefing
+    from alphapulse.news_risk.service import OutputTruncated
+    calls = []
+    async def complete(provider, system, payload, schema):
+        calls.append(payload)
+        if split and len(calls) == 1:
+            raise OutputTruncated('Split batch', {'output_tokens': 30})
+        if len(calls) == (2 if split else 1):
+            return briefing.Ranked(reading=[briefing.Reading(**p, priority=50, reason='Read') for p in payload['expected']],
+                notes='Notes'), {'output_tokens': 120}
+        raise OutputTruncated('Single item', {'output_tokens': 20})
+    monkeypatch.setattr(briefing, 'complete', complete)
+    inputs = [{'id': i, 'revision': 1, 'importance_stars': 3} for i in range(2 if split else 13)]
+    with pytest.raises(OutputTruncated, match='单包排序') as error:
+        asyncio.run(briefing.generate(SimpleNamespace(max_tokens=1000, context_window=200000), 'rules', inputs, ranking_only=True))
+    assert [u['output_tokens'] for u in error.value.usage['rounds']] == ([30, 120, 20] if split else [120, 20])
+    assert len(calls) == (3 if split else 2)
 
 
 @pytest.mark.parametrize('change,expected', [('links', False), ('verdict', True), ('risk', True), ('fact', True)])
@@ -212,3 +294,142 @@ def test_reposts_do_not_trigger_advanced_calls_but_review_changes_do(trading, mo
     monkeypatch.setattr(briefing, 'generate', generated)
     asyncio.run(worker.outlook())
     assert bool(generated.await_count) is expected
+
+
+def test_current_package_read_needs_no_io_or_budget(trading):
+    from alphapulse.news_risk.research import Research
+    research = Research({'id': 42, 'revision': 3})
+    result = asyncio.run(research.tool('read_package', {'id': 42}))
+    assert result['status'] == 'already_provided' and result['revision'] == 3
+    assert research.counts['read'] == 0 and not research.records
+
+
+def test_provided_original_is_reused_without_io(trading, monkeypatch):
+    from alphapulse.news_risk import research
+    from pydantic import BaseModel
+    class Result(BaseModel):
+        summary: str
+    async def stream(provider, system, messages, tools, effort):
+        if len(messages) == 1:
+            yield research.llm.Completion(tool_calls=[{'id': 'read', 'name': 'read_news', 'arguments': {'id': 123}}])
+        else:
+            import json
+            response = json.loads(messages[-1]['result'])
+            assert response['article_id'] == 9 and 'content' not in response
+            yield research.llm.Completion(tool_calls=[{'id': 'submit', 'name': 'submit', 'arguments': {'summary': 'Done'}}])
+    monkeypatch.setattr(research.llm, 'stream', stream)
+    review = research.Research()
+    asyncio.run(review.run(SimpleNamespace(max_tokens=1000, context_window=200000, reasoning_effort=None), '',
+        {'articles': [{'id': 9, 'news_id': 123, 'content': 'Original'}]}, Result))
+    assert review.sources[9]['content'] == 'Original'
+    assert review.counts['read'] == 0 and not review.records
+
+
+def test_web_unavailable_short_circuits_only_this_review(trading, monkeypatch):
+    from alphapulse.news_risk import research
+    session = AsyncMock()
+    session.__aenter__.return_value = session
+    monkeypatch.setattr(research, 'SessionLocal', lambda: session)
+    client = AsyncMock()
+    client.__aenter__.return_value = client
+    response = SimpleNamespace(raise_for_status=lambda: None,
+        json=lambda: {'results': [], 'unresponsive_engines': [['engine', 'CAPTCHA']]})
+    client.get.return_value = response
+    monkeypatch.setattr(research.httpx, 'AsyncClient', lambda **kwargs: client)
+    review = research.Research()
+    assert asyncio.run(review.tool('search_web', {'query': 'first query'}))['status'] == 'unavailable'
+    assert asyncio.run(review.tool('search_web', {'query': 'different query'}))['status'] == 'unavailable'
+    assert client.get.await_count == 1 and review.counts['search_web'] == 1
+    assert research.Research().web_unavailable is None
+
+
+def test_ranking_repairs_identity_once_and_accounts_usage(trading, monkeypatch):
+    from alphapulse.news_risk import briefing
+    calls = []
+    async def complete(provider, system, payload, schema):
+        calls.append(payload)
+        ids = [] if len(calls) == 1 else [p['id'] for p in payload['packages']]
+        return briefing.Ranked(reading=[briefing.Reading(id=i, revision=2, priority=50, reason='Read') for i in ids], notes='Notes'), {'output_tokens': 10}
+    monkeypatch.setattr(briefing, 'complete', complete)
+    result = asyncio.run(briefing.generate(SimpleNamespace(max_tokens=100, context_window=10000), '',
+        [{'id': 1, 'revision': 2, 'importance_stars': 3}], ranking_only=True))
+    assert len(calls) == 2 and calls[1]['correction']['errors']['missing'] == [('package', 1, 2)]
+    assert len(result['usage']) == 2 and result['reading'][0]['id'] == 1
+
+
+def test_ranking_missing_revision_repaired_with_explicit_identity(trading, monkeypatch):
+    from alphapulse.news_risk import briefing
+    from alphapulse.news_risk.service import SubmissionFailure
+    from pydantic import ValidationError
+    calls = []
+    async def complete(provider, system, payload, schema):
+        calls.append(payload)
+        if len(calls) == 1:
+            try: briefing.Ranked.model_validate({'reading': [{'id': 1, 'priority': 50, 'reason': 'Read'}], 'notes': 'Notes'})
+            except ValidationError as error: raise SubmissionFailure('Missing revision', {'output_tokens': 10}) from error
+        return briefing.Ranked(reading=[briefing.Reading(**payload['expected'][0], priority=50, reason='Read')], notes='Notes'), {}
+    monkeypatch.setattr(briefing, 'complete', complete)
+    result = asyncio.run(briefing.generate(SimpleNamespace(max_tokens=100, context_window=10000), '',
+        [{'id': 1, 'revision': 2, 'importance_stars': 3}], ranking_only=True))
+    assert len(calls) == 2 and len(result['usage']) == 2
+
+
+def test_ranking_batches_are_bounded_and_cover_every_identity(trading, monkeypatch):
+    from alphapulse.news_risk import briefing
+    counts = []
+    async def complete(provider, system, payload, schema):
+        counts.append(len(payload['packages']))
+        return briefing.Ranked(reading=[briefing.Reading(**p, priority=50, reason='Read') for p in payload['expected']], notes='Notes'), {}
+    monkeypatch.setattr(briefing, 'complete', complete)
+    result = asyncio.run(briefing.generate(SimpleNamespace(max_tokens=1000, context_window=200000), '',
+        [{'id': i, 'revision': 1, 'importance_stars': 3} for i in range(25)], ranking_only=True))
+    assert counts == [12, 12, 1] and len(result['reading']) == 25
+
+
+def test_package_search_excludes_current_package(trading, monkeypatch):
+    from alphapulse.news_risk import research
+    from sqlalchemy.dialects.postgresql import dialect
+    statements = []
+    class Session:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def scalars(self, statement):
+            statements.append(statement.compile(dialect=dialect()))
+            return SimpleNamespace(all=lambda: [])
+    monkeypatch.setattr(research, 'SessionLocal', Session)
+    review = research.Research({'id': 42})
+    asyncio.run(review.tool('search_packages', {'query': 'policy', 'keywords': ['policy']}))
+    assert 'news_ai_summaries.id !=' in str(statements[0]) and 42 in statements[0].params.values()
+
+
+@pytest.mark.parametrize('result,expected', [({'title': '媒体称11月2日拟开会'}, '媒体称11月2日拟开会'), (None, '明天开会')])
+def test_package_api_returns_fact_title_without_legacy_rating(trading, result, expected):
+    from alphapulse.api.risk import package_out
+    from alphapulse.models.risk import NewsSummary
+    session = AsyncMock()
+    session.scalar.return_value = 1
+    session.get.return_value = None
+    package = NewsSummary(id=1, title='明天开会', result=result, replacement_ids=[])
+    assert asyncio.run(package_out(package, session))['title'] == '明天开会'
+
+
+def test_ranking_invalid_identity_stops_after_one_repair(trading, monkeypatch):
+    from alphapulse.news_risk import briefing
+    from alphapulse.news_risk.service import SubmissionFailure
+    complete = AsyncMock(return_value=(briefing.Ranked(reading=[], notes='Notes'), {'output_tokens': 10}))
+    monkeypatch.setattr(briefing, 'complete', complete)
+    with pytest.raises(SubmissionFailure, match='missing') as error:
+        asyncio.run(briefing.generate(SimpleNamespace(max_tokens=100, context_window=10000), '',
+            [{'id': 1, 'revision': 2, 'importance_stars': 3}], ranking_only=True))
+    assert complete.await_count == 2
+    assert len(error.value.usage['failed_batch']['rounds']) == 2
+
+
+def test_direct_web_read_preserves_public_reader_rejection(trading, monkeypatch):
+    from alphapulse.news_risk import research as module
+    reader = module.Research()
+    fetch = AsyncMock(side_effect=ValueError('不允许访问非公开地址'))
+    monkeypatch.setattr(module, 'fetch_public', fetch)
+    with pytest.raises(ValueError, match='非公开'):
+        asyncio.run(reader.tool('read_web', {'url': 'http://127.0.0.1'}))
+    assert not reader.sources

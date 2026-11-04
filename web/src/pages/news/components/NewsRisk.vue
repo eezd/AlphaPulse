@@ -1,12 +1,11 @@
 <script setup lang="ts">
-import type { Analysis, RiskEvent } from "@/common/apis/risk/type"
-import { listNewsSummariesApi, listRiskAnalysesApi } from "@/common/apis/risk"
+import type { Package } from "@@/apis/news-research/type"
+import { listNewsPackagesApi } from "@@/apis/news-research"
 import { useUserStore } from "@/pinia/stores/user"
 
 const props = defineProps<{ newsId: number, revision: number }>()
 const user = useUserStore()
-const analysis = ref<Analysis | null>(null)
-const summaries = ref<RiskEvent[]>([])
+const summaries = ref<Package[]>([])
 const failed = ref(false)
 const loading = ref(false)
 const ownerVersion = user.sessionVersion
@@ -19,15 +18,13 @@ async function load(reset = true) {
   const version = user.sessionVersion
   loading.value = true
   if (reset) {
-    analysis.value = null
     summaries.value = []
     failed.value = false
   }
   try {
-    const [rows, events] = await Promise.all([listRiskAnalysesApi({ news_id: props.newsId, revision_no: props.revision }, reset), listNewsSummariesApi(props.newsId, props.revision)])
+    const events = await listNewsPackagesApi(props.newsId, props.revision)
     if (seq === sequence && version === user.sessionVersion) {
       summaries.value = events
-      analysis.value = rows[0] ?? null
       failed.value = false
     }
   } catch {
@@ -39,7 +36,7 @@ async function load(reset = true) {
 watch(() => [props.newsId, props.revision], () => void load(), { immediate: true })
 onMounted(() => {
   timer = setInterval(() => {
-    if (!document.hidden && !loading.value && (!["done"].includes(analysis.value?.state ?? "") || summaries.value.some(e => ["pending", "processing"].includes(e.state)))) void load(false)
+    if (!document.hidden && !loading.value && (!summaries.value.length || summaries.value.some(e => e.state !== "done"))) void load(false)
   }, 15000)
 })
 onBeforeUnmount(() => {
@@ -53,16 +50,20 @@ onBeforeUnmount(() => {
   <div class="rounded bg-sky-50 p-3 text-sm">
     <b>AI 关联新闻包</b>
     <div v-for="event in summaries" :key="event.id" class="my-2">
-      <router-link :to="{ path: '/home', query: { summary: event.id } }">
+      <router-link :to="{ path: '/home', query: { package: event.id } }">
         {{ event.title }}
       </router-link>
-      <p>{{ event.result?.summary || '事件归并完成，等待二阶段总结' }}</p>
+      <div class="my-2 flex flex-wrap gap-2">
+        <el-tag v-for="word in event.keywords" :key="word.canonical">
+          {{ word.canonical }}
+        </el-tag>
+      </div>
       <p v-if="event.error">
         更新失败：{{ event.error }}
       </p>
     </div>
     <p v-if="!summaries.length">
-      {{ failed ? '关联事件读取失败' : analysis?.state === 'failed' ? `初筛失败：${analysis.error}` : '暂无关联总结；新流程只处理启用后的新闻' }}
+      {{ failed ? '关联事件读取失败' : '尚未建立关键词索引' }}
       <el-button v-if="failed" link :loading="loading" @click="load()">
         重试
       </el-button>

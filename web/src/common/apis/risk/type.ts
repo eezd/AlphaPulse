@@ -20,24 +20,19 @@ export interface RiskResult {
   related_packages?: { id: number, relation: string, reason: string }[]
   evidence_refs?: { article_id: number, quote: string }[]
 }
-export interface RiskEvent {
-  main_event_id?: number | null
-  replacement_ids?: number[]
+export interface NewsPackage {
+  main_event_id: number | null
+  replacement_ids: number[]
+  fact: string
   tags: string[]
   content_kind: string
-  importance_stars: number
   article_count: number
   id: number
   title: string
   category: string
   entities: string[]
-  risk_stars: number
-  peak_stars: number
-  result: RiskResult | null
   state: string
-  analyzed_at: string | null
   revision: number
-  published_revision: number
   error: string | null
   published_at: string
   updated_at: string
@@ -115,11 +110,20 @@ export interface NewsEvent {
   title: string
   state: string
   error: string | null
-  result: { summary: string, importance_stars: number, risk_stars: number, counter_evidence: string, timeline_points: TimelinePoint[], uncertainty: string, opinions: string, watchpoints: string } | null
+  revision: number
+  published_revision: number
+  updated_at: string
+  tags: string[]
+  category: string
+  package_count: number
+  risk_stars: number
+  importance_stars: number
+  result: (RiskResult & { timeline_points: TimelinePoint[] }) | null
 }
 export interface EventDetail extends NewsEvent {
-  packages: RiskEvent[]
-  versions: { id: number, revision: number, state: string, error: string | null, result: NewsEvent["result"] }[]
+  packages: NewsPackage[]
+  evidence: { id: number, version_id: number, data: unknown, fetched_at: string }[]
+  versions: { id: number, revision: number, state: string, error: string | null, result: NewsEvent["result"], usage: unknown }[]
 }
 export interface ReprocessRange { selection?: "range" | "attempted", start?: string, end?: string, modes: ("missing" | "review")[] }
 export interface ReprocessPreview { articles: number, packages: number, events: number, total: number, missing: number, review: number, preview_id: string, models: Record<string, { model: string, reasoning_effort: string | null }> }

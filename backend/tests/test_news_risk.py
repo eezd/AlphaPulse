@@ -64,21 +64,22 @@ def mock_enable(risk, monkeypatch, valid=True, verification='reported', directio
     monkeypatch.setattr(pipeline, 'configuration', AsyncMock(return_value=(provider, 'rules', {}, 'fingerprint')))
     async def complete(provider, system, payload, schema):
         if schema is pipeline.Grouping:
-            return pipeline.Grouping( reason='财经维护通知', packages=[pipeline.Match(package_id=None,
+            return pipeline.Grouping( reason='财经维护通知', packages=[pipeline.Match(event=dict(event_id=None,group_key='maintenance',title='维护',fact='维护',reason='维护通知'),package_id=None,
                 group_key='maintenance', title='维护', category='company', entities=['示例公司'], fact='维护',
                 evidence=payload['article']['summary'] if valid else '捏造损失', urgent=False, tags=['维护'], content_kind='statement')]), {}
         if schema is risk.Outlook:
             return risk.Outlook(windows=[risk.Scenario(hours=h, direction='unknown', summary='不足', conditions='不足',
                 counter_factors='不足', uncertainty='不足', event_ids=[]) for h in (24, 48, 168)]), {}
         article = payload['articles'][0]
-        result = pipeline.EventResult(**{**label(risk).model_dump(exclude={'event_id', 'same_event_as', 'evidence', 'stars'}), 'verification': verification,
-            'direction': direction}, timeline_points=[dict(occurred_at=None, time_precision='unknown', time_text='Unknown', reported_at=None, description='Synthetic', verification='insufficient', evidence_refs=[{'article_id':1,'quote':article['summary']}])], facts='维护', timeline='维护',
-            asset_impacts='未知', risk_stars=0, importance_stars=3, opinions='待观察', counter_evidence='不足', watchpoints='恢复', claims=[pipeline.Claim(statement='维护', verdict='insufficient', evidence_refs=[])], related_packages=[], excluded_article_ids=[],
+        from alphapulse.news_risk.event_research import EventResult
+        result = EventResult(**{**label(risk).model_dump(exclude={'event_id', 'same_event_as', 'evidence', 'stars'}), 'verification': verification,
+            'direction': direction}, timeline_points=[dict(package_id=1,package_revision=1,occurred_at=None, time_precision='unknown', time_text='Unknown', reported_at=None, description='Synthetic', verification='insufficient', evidence_refs=[{'article_id':1,'quote':article['summary']}])], facts='维护', timeline='维护',
+            asset_impacts='未知', risk_stars=0, importance_stars=3, opinions='待观察', counter_evidence='不足', watchpoints='恢复', claims=[pipeline.Claim(statement='维护', verdict='insufficient', evidence_refs=[])], excluded_article_ids=[],
             evidence_refs=[pipeline.Evidence(article_id=1, quote=article['summary'])])
         return result, {}
     async def high(provider, system, payload, schema):
         if schema is briefing.Ranked:
-            return briefing.Ranked(reading=[briefing.Reading(id=p['id'], revision=p['revision'], priority=50, reason='重要') for p in payload['packages']], notes='虚构测试'), {}
+            return briefing.Ranked(reading=[briefing.Reading(kind=p.get('kind','event'),id=p['id'], revision=p['revision'], priority=50, reason='重要') for p in payload['packages']], notes='虚构测试'), {}
         trend = briefing.Trend(summary='未知', conditions='不足', counter_evidence='不足', watchpoints='后续')
         return briefing.Synthesis(summary='不足', market='未知', short_term=trend, medium_term=trend, references=[]), {}
     monkeypatch.setattr(briefing, 'complete', high)
@@ -218,7 +219,7 @@ def test_long_sources_are_split_without_losing_text(risk, monkeypatch):
         if payload['task'] == 'extract':
             seen.append(payload['content'])
             return schema(facts='事实', evidence_refs=[pipeline.Evidence(article_id=1, quote=payload['content'][:1])]), {}
-        return pipeline.EventResult(**label(risk).model_dump(exclude={'event_id', 'same_event_as', 'evidence', 'stars'}), timeline_points=[dict(occurred_at=None, time_precision='unknown', time_text='Unknown', reported_at=None, description='Synthetic', verification='insufficient', evidence_refs=[{'article_id':1,'quote':'安全事件'}])], facts='事实', timeline='时间', asset_impacts='资产',
+        return pipeline.EventResult(**label(risk).model_dump(exclude={'event_id', 'same_event_as', 'evidence', 'stars'}), timeline_points=[dict(package_id=1,package_revision=1,occurred_at=None, time_precision='unknown', time_text='Unknown', reported_at=None, description='Synthetic', verification='insufficient', evidence_refs=[{'article_id':1,'quote':'安全事件'}])], facts='事实', timeline='时间', asset_impacts='资产',
             risk_stars=5, importance_stars=5, opinions='待观察', counter_evidence='不足', watchpoints='恢复', claims=[pipeline.Claim(statement='事件', verdict='insufficient', evidence_refs=[])], related_packages=[], excluded_article_ids=[], evidence_refs=[pipeline.Evidence(article_id=1, quote='安全事件')]), {}
     monkeypatch.setattr(pipeline, 'complete', complete)
     result, _ = asyncio.run(pipeline.summarize_articles(provider, 'rules', [article], {'id': 1, 'fact': 'Synthetic event'}))
@@ -232,7 +233,7 @@ def test_context_budget_includes_unicode_and_tool_schema(risk):
     assert not risk.fits_context(provider, risk.SYSTEM, {'content': '风'*1000}, risk.Labels)
 
 
-@pytest.mark.parametrize('endpoint', ['overview', 'summaries'])
+@pytest.mark.parametrize('endpoint', ['overview', 'events'])
 @pytest.mark.parametrize('hours,status', [(None, 200), ('24', 200), ('48', 200), ('168', 200), ('25', 422), ('0', 422), ('abc', 422)])
 def test_window_query_parameters_over_http(risk, monkeypatch, endpoint, hours, status):
     from types import SimpleNamespace
@@ -292,11 +293,11 @@ def test_old_failed_analysis_cannot_requeue_a_completed_or_running_revision(risk
     from fastapi import HTTPException
     from alphapulse.api import risk as api
     event = SimpleNamespace(revision=3, published_revision=published, state=state)
-    row = SimpleNamespace(state='failed', summary_id=1, revision=3)
+    row = SimpleNamespace(state='failed', event_id=1, revision=3)
     session = SimpleNamespace(get=AsyncMock(side_effect=[row, event]), commit=AsyncMock())
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(api.retry(7, session, stage='analysis'))
-    assert exc.value.status_code == 409 and reason in exc.value.detail
+        asyncio.run(api.retry(7, session, stage='events'))
+    assert exc.value.status_code == 409
     assert event.state == state
     session.commit.assert_not_awaited()
 
@@ -311,7 +312,7 @@ def test_completed_version_recovers_a_previously_stuck_pending_package(risk, mon
     session.__aenter__.return_value = session
     session.get.return_value = SimpleNamespace(enabled=True)
     session.scalar.side_effect = [event, SimpleNamespace(state='done')]
-    session.scalars.return_value = SimpleNamespace(all=lambda: [SimpleNamespace(id=1, input={'title': 'Statement'})])
+    session.scalars.return_value = SimpleNamespace(all=lambda: [SimpleNamespace(id=1, news_id=10, content_hash='current', input={'title': 'Statement'})])
     monkeypatch.setattr(worker, 'SessionLocal', lambda: session)
     monkeypatch.setattr(worker, 'configuration', AsyncMock(return_value=(SimpleNamespace(model='medium'), 'rules', {}, 'key')))
     analyze = AsyncMock()

@@ -84,13 +84,7 @@ onBeforeUnmount(() => media?.removeEventListener("change", updateMobile))
               {{ item.summary || item.excerpt }}
             </div>
             <div class="mt-1 line-clamp-2 text-xs text-slate-500">
-              <template v-if="item.risk?.state === 'done'">
-                <span class="text-amber-600">{{ item.risk.verification === 'insufficient' ? '信息不足，无法判断' : item.risk.stars ? '★'.repeat(item.risk.stars) : '无明显风险' }}</span>
-                · {{ item.risk.summary }}
-              </template>
-              <template v-else>
-                {{ item.risk?.state === 'skipped' ? '非财经新闻，原文保留' : item.risk?.state === 'failed' ? 'AI 分析失败' : item.risk?.state === 'processing' ? 'AI 分析中' : '未纳入新流程或等待总结' }}
-              </template>
+              {{ item.risk?.state === 'done' ? '关键词与事件归属已完成，研判请查看关联事件' : item.risk?.state?.endsWith('_failed') ? '关键词索引或事件分类失败' : item.risk ? '关键词索引与事件分类处理中' : '尚未建立关键词索引' }}
             </div>
           </div>
           <el-alert v-if="failed" type="error" :closable="false" title="新闻读取失败；已有内容保留">

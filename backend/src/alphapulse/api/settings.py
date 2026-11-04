@@ -154,6 +154,12 @@ async def patch_provider(provider_id: int, body: ProviderPatch, session: Annotat
 @router.delete("/providers/{provider_id}")
 async def delete_provider(provider_id: int, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[None]:
     provider = await get_provider(session, provider_id)
+    from alphapulse.news_research.models import ResearchSettings
+    research = await session.scalar(select(ResearchSettings).where(
+        ResearchSettings.config.contains({'index': {'provider_id': provider_id}}) |
+        ResearchSettings.config.contains({'research': {'provider_id': provider_id}})).with_for_update())
+    if research:
+        raise HTTPException(409, '请先切换两阶段新闻研究使用的接入配置')
     risk = await session.scalar(select(RiskSettings).where((RiskSettings.provider_id == provider_id) | (RiskSettings.second_provider_id == provider_id) | (RiskSettings.third_provider_id == provider_id)).with_for_update())
     if risk:
         if risk.enabled:

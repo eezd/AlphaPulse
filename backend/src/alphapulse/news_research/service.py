@@ -1,0 +1,856 @@
+"""Persistent keyword indexing, membership and versioned event research."""
+
+import asyncio
+import json
+import re
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from sqlalchemy import select, update, func, or_, case, column, exists, true, literal
+from sqlalchemy.dialects.postgresql import insert
+from alphapulse.core.db import SessionLocal
+from alphapulse.models import NewsItem
+from alphapulse.news_risk.service import complete, provider_for
+from alphapulse.news_risk.pipeline import (
+    configuration,
+    validate_evidence,
+    Evidence,
+    validate_event,
+    extract_articles,
+    compact_extractions,
+)
+from alphapulse.news_risk.research import Research as LegacyResearch
+from alphapulse.news_research.models import (
+    Package,
+    Attempt,
+    Event,
+    Membership,
+    Version,
+    Reference,
+)
+from alphapulse.news_research.contracts import (
+    INDEX_SKILL,
+    ASSIGN_SKILL,
+    RESEARCH_SKILL,
+    IndexResult,
+    Assignment,
+    ResearchResult,
+)
+
+from alphapulse.news_research import vocabulary as vocab
+
+publication_lock = asyncio.Lock()
+assignment_lock = asyncio.Lock()
+
+
+def article(news):
+    return {
+        "id": news.id,
+        "news_id": news.id,
+        "title": news.title,
+        "summary": news.summary,
+        "content": news.content_text,
+        "url": news.url,
+        "published_at": news.published_at.isoformat(),
+    }
+
+
+def validate_keywords(result, source):
+    seen = set()
+    for keyword in result.keywords:
+        key = keyword.canonical.strip().casefold()
+        if not key or key in seen:
+            raise ValueError("规范关键词为空或重复")
+        seen.add(key)
+        validate_evidence(
+            [Evidence(article_id=source["id"], quote=keyword.quote)],
+            {source["id"]: source},
+        )
+        if any(
+            not alias.strip()
+            or not any(
+                alias in (source.get(k) or "") for k in ("title", "summary", "content")
+            )
+            for alias in keyword.aliases
+        ):
+            raise ValueError("关键词别名必须实际出现在本篇原文中")
+
+
+def validate_assignment(result, source, candidate_ids):
+    for target in result.targets:
+        if target.event_id is not None and target.event_id not in candidate_ids:
+            raise ValueError("归属引用未知事件")
+        validate_evidence(
+            [Evidence(article_id=source["id"], quote=target.quote)],
+            {source["id"]: source},
+        )
+
+
+def dirty(event, urgent=False):
+    now = datetime.now(UTC)
+    ready = (
+        event.dirty_since is not None
+        and event.state in ("pending", "processing")
+        and event.due_at <= now
+    )
+    event.revision += 1
+    event.dirty_since = event.dirty_since or now
+    event.due_at = (
+        now
+        if urgent or ready
+        else min(now + timedelta(minutes=5), event.dirty_since + timedelta(minutes=15))
+    )
+    event.updated_at = now
+    event.state = "pending"
+    event.error = None
+
+
+async def model_config(session, config, stage):
+    selected = config[stage]
+    provider = await provider_for(
+        session,
+        SimpleNamespace(provider_id=selected["provider_id"], model=selected["model"]),
+    )
+    if selected.get("reasoning_effort") is not None:
+        provider.reasoning_effort = selected["reasoning_effort"]
+    # Skill nodes are optional only for explicitly supplied isolated acceptance config.
+    if selected.get("skill_id"):
+        settings = SimpleNamespace(
+            grouping_skill_id=selected["skill_id"],
+            analysis_skill_id=selected["skill_id"],
+            provider_id=provider.id,
+            model=provider.model,
+            second_provider_id=provider.id,
+            second_model=provider.model,
+            reasoning_effort=provider.reasoning_effort,
+            second_reasoning_effort=provider.reasoning_effort,
+        )
+        _, skill, rules, _ = await configuration(
+            session, settings, "grouping" if stage == "index" else "analysis"
+        )
+    else:
+        if not config.get("isolated_acceptance"):
+            raise ValueError("请选择已发布的新闻专用Skill")
+        skill = (
+            INDEX_SKILL + "\n" + ASSIGN_SKILL if stage == "index" else RESEARCH_SKILL
+        )
+        rules = {"content": skill}
+    return (
+        provider,
+        skill,
+        {
+            **rules,
+            "model": provider.model,
+            "reasoning_effort": provider.reasoning_effort,
+        },
+    )
+
+
+async def enroll(session, ids):
+    news = list(await session.scalars(select(NewsItem).where(NewsItem.id.in_(ids))))
+    for row in news:
+        await session.execute(
+            insert(Package)
+            .values(news_id=row.id, content_hash=row.content_hash)
+            .on_conflict_do_nothing(index_elements=["news_id"])
+        )
+        package = await session.scalar(
+            select(Package)
+            .where(Package.news_id == row.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        # Read after acquiring the package lock, bypassing cached source objects.
+        current_hash = await session.scalar(
+            select(NewsItem.content_hash).where(NewsItem.id == row.id)
+        )
+        if package.content_hash != current_hash:
+            package.content_hash = current_hash
+            package.keywords = []
+            package.state = "index_pending"
+            for event in await session.scalars(
+                select(Event)
+                .join(Membership)
+                .where(Membership.package_id == package.id)
+                .with_for_update()
+            ):
+                dirty(event)
+    await session.commit()
+
+
+async def candidates(session, keywords, vocabulary=None):
+    vocabulary = vocabulary if vocabulary is not None else await vocab.snapshot(session)
+    groups = [vocab.expand([k["canonical"], *k["aliases"]], vocabulary) for k in vocab.normalize(keywords, vocabulary)]
+    conditions = [
+        or_(
+            *(
+                Event.tags.contains([term])
+                | Event.title.icontains(term, autoescape=True)
+                for term in group
+            )
+        )
+        for group in groups
+        if group
+    ]
+    if not conditions:
+        raise ValueError("关键词索引为空，不能进行事件分类")
+    # Compound aliases can omit the standalone entity TAG present in older reports.
+    # Tokens widen candidate recall only; the model still decides event identity.
+    tokens = sorted({token.casefold() for k in keywords for alias in k["aliases"]
+                     for token in re.findall(r"(?<![A-Za-z0-9])[A-Za-z][A-Za-z0-9]{2,}(?![A-Za-z0-9])", alias)})
+    fallback = [Event.tags.contains([token]) | Event.title.op("~*")(
+        r"(^|[^A-Za-z0-9])" + re.escape(token) + r"([^A-Za-z0-9]|$)") for token in tokens]
+    exact = or_(*conditions)
+    score = sum(case((condition, 1), else_=0) for condition in conditions)
+    fallback_score = sum((case((condition, 1), else_=0) for condition in fallback), literal(0))
+    return list(await session.scalars(
+        select(Event).where(Event.state != "retired", or_(exact, *fallback))
+        .order_by(case((exact, 1), else_=0).desc(), score.desc(),
+                  fallback_score.desc(), Event.updated_at.desc(), Event.id)
+        .limit(60)
+    ))
+
+
+
+def package_matching(terms, vocabulary=None):
+    term_groups = vocab.groups(terms, vocabulary) if vocabulary is not None else [[t] for t in dict.fromkeys(t.strip().lower() for t in terms if t.strip())]
+    # Compare JSON values without changing literal aliases stored as evidence.
+    words = (
+        func.jsonb_array_elements(Package.keywords)
+        .table_valued(column("value"))
+        .alias("keyword")
+    )
+    aliases = (
+        func.jsonb_array_elements_text(words.c.value.op("->")("aliases"))
+        .table_valued(column("value"))
+        .alias("alias")
+    )
+    conditions = []
+    for group in term_groups:
+        matches = []
+        for term in group:
+            canonical = func.lower(words.c.value.op("->>")("canonical")) == term
+            alias = exists(select(1).select_from(aliases).where(func.lower(aliases.c.value) == term)).correlate(words)
+            matches.append(NewsItem.title.icontains(term, autoescape=True)
+                | ((Package.content_hash == NewsItem.content_hash)
+                   & exists(select(1).select_from(words).where(canonical | alias)).correlate(Package)))
+        conditions.append(or_(*matches))
+    return or_(*conditions) if conditions else true(), sum(
+        case((c, 1), else_=0) for c in conditions
+    )
+
+
+async def candidate_context(session, catalog):
+    if not catalog:
+        return []
+    # Keep the first report and two recent reports without growing model input per event.
+    reports = (
+        select(
+            Membership.event_id,
+            NewsItem.id.label("news_id"),
+            NewsItem.title,
+            NewsItem.published_at,
+            Membership.evidence.label("quote"),
+            func.row_number()
+            .over(
+                partition_by=Membership.event_id,
+                order_by=(NewsItem.published_at, NewsItem.id),
+            )
+            .label("position"),
+            func.count().over(partition_by=Membership.event_id).label("total"),
+            func.min(NewsItem.published_at)
+            .over(partition_by=Membership.event_id)
+            .label("first_reported_at"),
+            func.max(NewsItem.published_at)
+            .over(partition_by=Membership.event_id)
+            .label("last_reported_at"),
+        )
+        .join(Package, Package.id == Membership.package_id)
+        .join(NewsItem, NewsItem.id == Package.news_id)
+        .where(
+            Membership.event_id.in_([e.id for e in catalog]),
+            Package.content_hash == NewsItem.content_hash,
+            Package.state == "done",
+        )
+        .subquery()
+    )
+    contexts = {
+        e.id: {
+            "id": e.id,
+            "revision": e.revision,
+            "title": e.title,
+            "tags": e.tags,
+            "reporting_range": None,
+            "evidence": [],
+        }
+        for e in catalog
+    }
+    for row in await session.execute(
+        select(reports)
+        .where(or_(reports.c.position == 1, reports.c.position > reports.c.total - 2))
+        .order_by(reports.c.event_id, reports.c.position)
+    ):
+        context = contexts[row.event_id]
+        context["reporting_range"] = {
+            "first": row.first_reported_at.isoformat(),
+            "latest": row.last_reported_at.isoformat(),
+        }
+        context["evidence"].append(
+            {
+                "news_id": row.news_id,
+                "title": row.title,
+                "published_at": row.published_at.isoformat(),
+                "quote": row.quote,
+            }
+        )
+    return list(contexts.values())
+
+
+async def process_package(identifier, config):
+    async with SessionLocal() as session:
+        package = await session.get(Package, identifier)
+        assigning = package is not None and package.state == "assign_pending"
+    if assigning:
+        async with assignment_lock:
+            await _process_package(identifier, config, "assign")
+    else:
+        await _process_package(identifier, config, "index")
+
+
+async def _process_package(identifier, config, expected_stage):
+    async with SessionLocal() as session:
+        package = await session.get(Package, identifier, with_for_update=True)
+        if package is None:
+            return
+        if package.state != expected_stage + "_pending":
+            return
+        news = await session.get(NewsItem, package.news_id)
+        if package.content_hash != news.content_hash:
+            await enroll(session, [news.id])
+            return
+        source = article(news)
+        source_hash = package.content_hash
+        stage = "index" if package.state == "index_pending" else "assign"
+        if package.state not in ("index_pending", "assign_pending"):
+            return
+        catalog = []
+        payload = {"task": stage, "article": source}
+        attempt = Attempt(
+            package_id=package.id,
+            content_hash=source_hash,
+            stage=stage,
+            state="processing",
+            input=payload,
+            rules={},
+        )
+        session.add(attempt)
+        package.state = stage + "_processing"
+        await session.commit()
+        attempt_id = attempt.id
+        output = None
+        used = None
+        try:
+            vocabulary = await vocab.snapshot(session)
+            if stage == "assign":
+                catalog = await candidates(session, package.keywords, vocabulary)
+                payload = {
+                    **payload,
+                    "keywords": package.keywords,
+                    "events": await candidate_context(session, catalog),
+                }
+                attempt.input = payload
+            provider, skill, rules = await model_config(session, config, "index")
+            attempt.rules = {**rules, "vocabulary": vocabulary}
+            await session.commit()
+            output, used = await complete(
+                provider,
+                skill + "\n当前子任务为" + stage + "，只提交该子任务schema规定字段。",
+                payload,
+                IndexResult if stage == "index" else Assignment,
+            )
+            if stage == "index":
+                validate_keywords(output, source)
+            else:
+                validate_assignment(output, source, {e.id for e in catalog})
+            async with publication_lock:
+                package = await session.get(
+                    Package, identifier, populate_existing=True, with_for_update=True
+                )
+                current = await session.get(NewsItem, news.id, populate_existing=True)
+                if (
+                    package.content_hash != source_hash
+                    or package.state != stage + "_processing"
+                ):
+                    attempt.state = "superseded"
+                    attempt.output = output.model_dump(mode="json")
+                    attempt.usage = used
+                    await session.commit()
+                    return
+                if current.content_hash != source_hash:
+                    attempt.state = "superseded"
+                    await enroll(session, [current.id])
+                elif stage == "index":
+                    package.keywords = vocab.normalize([k.model_dump() for k in output.keywords], vocabulary)
+                    package.state = "assign_pending"
+                    attempt.state = "done"
+                else:
+                    previous = list(
+                        await session.scalars(
+                            select(Membership).where(
+                                Membership.package_id == package.id
+                            )
+                        )
+                    )
+                    previous_ids = {m.event_id for m in previous}
+                    assigned = set()
+                    tags = sorted(
+                        {
+                            t.strip().casefold()
+                            for k in package.keywords
+                            for t in [k["canonical"], *k["aliases"]]
+                        }
+                    )
+                    for target in output.targets:
+                        event = (
+                            await session.get(
+                                Event,
+                                target.event_id,
+                                populate_existing=True,
+                                with_for_update=True,
+                            )
+                            if target.event_id
+                            else None
+                        )
+                        if target.event_id and (
+                            event is None or event.state == "retired"
+                        ):
+                            raise ValueError("候选事件已变化，请重试归属")
+                        if event is None:
+                            event = Event(title=target.title, tags=tags, revision=0)
+                            session.add(event)
+                            await session.flush()
+                        assigned.add(event.id)
+                        existing = next(
+                            (m for m in previous if m.event_id == event.id), None
+                        )
+                        if existing is None:
+                            session.add(
+                                Membership(
+                                    event_id=event.id,
+                                    package_id=package.id,
+                                    evidence=target.quote,
+                                    reason=target.reason,
+                                    change_kind=target.change_kind,
+                                )
+                            )
+                        else:
+                            existing.evidence = target.quote
+                            existing.reason = target.reason
+                            existing.change_kind = target.change_kind
+                        event.tags = sorted(set(event.tags) | set(tags))
+                        if target.change_kind != "repost" or event.result is None:
+                            dirty(event, target.urgent)
+                    for old in previous:
+                        if old.event_id not in assigned:
+                            event = await session.get(
+                                Event, old.event_id, with_for_update=True
+                            )
+                            dirty(event)
+                            await session.delete(old)
+                    package.state = "done"
+                    attempt.state = "done"
+                    if not assigned and previous_ids:
+                        raise ValueError("每个包至少归属一个事件")
+                package.error = None
+                attempt.output = output.model_dump(mode="json")
+                attempt.usage = used
+                await session.commit()
+        except Exception as error:
+            await session.rollback()
+            attempt = await session.get(Attempt, attempt_id)
+            attempt.state = "failed"
+            attempt.error = str(error)[:2000]
+            attempt.output = output.model_dump(mode="json") if output else None
+            attempt.usage = used or getattr(error, "usage", None)
+            # A failed old request must not replace a newly enrolled source revision.
+            await session.execute(
+                update(Package)
+                .where(
+                    Package.id == identifier,
+                    Package.content_hash == source_hash,
+                    Package.state == stage + "_processing",
+                )
+                .values(state=stage + "_failed", error=attempt.error)
+            )
+            await session.commit()
+
+
+class Research(LegacyResearch):
+    def register_members(self, payload):
+        self.member_sources = {a["news_id"]: a for a in payload["articles"]}
+        self.member_packages = {p["id"]: p for p in payload["packages"]}
+        self.sources.update({a["id"]: a for a in payload["articles"]})
+
+    def restore(self, records):
+        # Retry local searches against current data and reviewed vocabulary.
+        records = [
+            r
+            for r in records
+            if r["tool"] not in ("search_packages", "search_events")
+            and not (
+                r["tool"] == "read_news"
+                and r["arguments"].get("id") in getattr(self, "member_sources", {})
+            )
+            and not (
+                r["tool"] == "search_web"
+                and isinstance(r.get("result"), dict)
+                and r["result"].get("status") == "unavailable"
+            )
+        ]
+        super().restore(records)
+        self.records.extend(
+            {**record, "reused": True}
+            for record in records
+            if not (
+                isinstance(record.get("result"), dict) and "error" in record["result"]
+            )
+            and record["tool"] not in ("read_event", "read_package")
+        )
+
+    async def tool(self, name, arguments):
+        member_sources = getattr(self, "member_sources", {})
+        member_packages = getattr(self, "member_packages", {})
+        if name in ("read_news", "read_package"):
+            from alphapulse.news_risk.research import TOOLS
+
+            args = TOOLS[name][0].model_validate(arguments)
+            member = member_packages.get(args.id) if name == "read_package" else None
+            news_id = (
+                member["news_id"]
+                if member
+                else args.id
+                if name == "read_news"
+                else None
+            )
+            if news_id in member_sources:
+                source = member_sources[news_id]
+                if news_id in self.provided_news:
+                    return {
+                        "article_id": source["id"],
+                        "news_id": news_id,
+                        "status": "already_provided",
+                    }
+                if self.counts["read"] >= 8:
+                    raise ValueError("工具预算已用尽")
+                self.counts["read"] += 1
+                result = {**source, "article_id": source["id"]}
+                if member:
+                    result.update(id=args.id, package_id=args.id)
+                self.provided_news[news_id] = source["id"]
+                self.records.append(
+                    {"tool": name, "arguments": arguments, "result": result}
+                )
+                return result
+        if name in ("search_packages", "read_package", "search_events", "read_event"):
+            from alphapulse.news_risk.research import TOOLS
+
+            arguments = TOOLS[name][0].model_validate(arguments).model_dump()
+            key = name + json.dumps(arguments, sort_keys=True)
+            if key in self.cache:
+                return self.cache[key]
+            if name == "read_package" and arguments["id"] in self.provided_packages:
+                return {
+                    **self.provided_packages[arguments["id"]],
+                    "status": "already_provided",
+                }
+            budget = "search" if name.startswith("search_") else "read"
+            if self.counts[budget] >= ({"search": 4, "read": 8}[budget]):
+                raise ValueError("工具预算已用尽")
+            self.counts[budget] += 1
+            async with SessionLocal() as session:
+                if name.startswith("search_"):
+                    query = arguments.get("query", "").strip()
+                    if not query:
+                        raise ValueError("检索词不能为空")
+                    vocabulary = getattr(self, "vocabulary", None)
+                    if vocabulary is None:
+                        vocabulary = await vocab.snapshot(session)
+                    terms = arguments.get("keywords") or query.split()
+                    if name == "search_events":
+                        conditions = [or_(*(Event.title.icontains(t, autoescape=True) | Event.tags.contains([t]) for t in group))
+                                      for group in vocab.groups([query, *terms[:6]], vocabulary)]
+                        phrase = or_(*(Event.title.icontains(t, autoescape=True) | Event.tags.contains([t]) for t in vocab.expand([query], vocabulary)))
+                        score = sum(case((c, 1), else_=0) for c in conditions)
+                        rows = await session.scalars(
+                            select(Event)
+                            .where(
+                                Event.state != "retired",
+                                Event.id != self.event["id"],
+                                or_(*conditions),
+                            )
+                            .order_by(
+                                case((phrase, 1), else_=0).desc(),
+                                score.desc(),
+                                Event.updated_at.desc(),
+                                Event.id,
+                            )
+                            .limit(20)
+                        )
+                        result = [
+                            {"id": r.id, "title": r.title, "tags": r.tags} for r in rows
+                        ]
+                    else:
+                        # Retain the phrase in addition to the bounded search terms.
+                        condition, score = package_matching([query, *terms[:6]], vocabulary)
+                        phrase, _ = package_matching([query], vocabulary)
+                        rows = await session.execute(
+                            select(Package, NewsItem.content_hash)
+                            .join(NewsItem)
+                            .where(condition)
+                            .order_by(
+                                case((phrase, 1), else_=0).desc(),
+                                score.desc(),
+                                NewsItem.published_at.desc(),
+                                Package.id,
+                            )
+                            .limit(20)
+                        )
+                        result = [
+                            {"id": r.id, "news_id": r.news_id,
+                             "keywords": r.keywords if r.content_hash == source_hash else []}
+                            for r, source_hash in rows
+                        ]
+                elif name == "read_package":
+                    row = await session.get(Package, arguments["id"])
+                    if row is None:
+                        raise ValueError("新闻包不存在")
+                    news = await session.get(NewsItem, row.news_id)
+                    result = article(news)
+                    self.sources[news.id] = result
+                    self.provided_news[news.id] = news.id
+                    result = {
+                        **result,
+                        "id": row.id,
+                        "article_id": news.id,
+                        "package_id": row.id,
+                    }
+                else:
+                    row = await session.get(Event, arguments["id"])
+                    if row is None or row.id == self.event["id"]:
+                        raise ValueError("只能读取其他事件")
+                    version = await session.scalar(
+                        select(Version)
+                        .where(Version.event_id == row.id, Version.state == "done")
+                        .order_by(Version.id.desc())
+                        .limit(1)
+                    )
+                    if version is None:
+                        raise ValueError("引用事件尚无成功研判")
+                    self.read_event_ids.add(row.id)
+                    self.read_event_versions[row.id] = version.id
+                    result = {
+                        "id": row.id,
+                        "version_id": version.id,
+                        "result": version.output,
+                        "scope": "ai_summary_not_evidence",
+                        "citation_instruction": "此版本中的历史evidence_refs不是本轮可用引用。请读取原文，并使用工具返回article_id（可能为负数），不得使用news_id或历史引用ID。",
+                        "changed": version.revision != row.revision
+                        or row.state != "done",
+                        "package_ids": version.input["package_ids"],
+                    }
+            self.cache[key] = result
+            self.records.append(
+                {"tool": name, "arguments": arguments, "result": result}
+            )
+            return result
+        return await super().tool(name, arguments)
+
+
+def validate_timeline(result, package_news):
+    for point in result.timeline_points:
+        if not point.evidence_refs:
+            raise ValueError("时间线节点缺少原文证据")
+        if not set(point.package_ids) <= set(package_news):
+            raise ValueError("时间线引用未知新闻包")
+        quoted = {ref["article_id"] for ref in point.evidence_refs}
+        if any(package_news[p] not in quoted for p in point.package_ids):
+            raise ValueError("时间线必须有对应新闻包原文证据")
+        if not point.package_ids and quoted & set(package_news.values()):
+            raise ValueError("成员包时间线节点必须标注对应包ID")
+
+
+async def process_event(identifier, config, force=False):
+    async with SessionLocal() as session:
+        event = await session.get(Event, identifier, with_for_update=True)
+        if (
+            event is None
+            or event.state != "pending"
+            or (not force and event.due_at > datetime.now(UTC))
+        ):
+            return
+        members = list(
+            await session.execute(
+                select(Package, Membership, NewsItem)
+                .join(Membership, Membership.package_id == Package.id)
+                .join(NewsItem, NewsItem.id == Package.news_id)
+                .where(Membership.event_id == identifier)
+                .order_by(Package.id)
+            )
+        )
+        if not members:
+            event.state = "retired"
+            await session.commit()
+            return
+        if any(
+            p.state != "done" or p.content_hash != n.content_hash for p, m, n in members
+        ):
+            return
+        payload = {
+            "id": identifier,
+            "event": {
+                "id": identifier,
+                "revision": event.revision,
+                "title": event.title,
+            },
+            "previous": event.result,
+            "package_ids": [p.id for p, m, n in members],
+            "packages": [
+                {
+                    "id": p.id,
+                    "news_id": n.id,
+                    "content_hash": p.content_hash,
+                    "keywords": p.keywords,
+                    "scope_quote": m.evidence,
+                    "reason": m.reason,
+                }
+                for p, m, n in members
+            ],
+            "articles": [article(n) for p, m, n in members],
+        }
+        version = Version(
+            event_id=identifier,
+            revision=event.revision,
+            state="processing",
+            input=payload,
+            rules={},
+        )
+        session.add(version)
+        event.state = "processing"
+        await session.commit()
+        version_id, revision = version.id, event.revision
+        researcher = Research(event={"id": identifier, "revision": revision})
+        researcher.register_members(payload)
+        output = None
+        used = None
+        preparations = []
+        try:
+            provider, skill, rules = await model_config(session, config, "research")
+            researcher.vocabulary = await vocab.snapshot(session)
+            version.rules = {**rules, "vocabulary": researcher.vocabulary}
+            await session.commit()
+            previous = await session.scalar(
+                select(Version)
+                .where(
+                    Version.event_id == identifier,
+                    Version.id != version_id,
+                    Version.revision == revision,
+                    Version.state == "failed",
+                )
+                .order_by(Version.id.desc())
+                .limit(1)
+            )
+            if previous and previous.input == payload:
+                researcher.restore(previous.evidence)
+            request = payload
+            if not researcher.fits(provider, skill, request, ResearchResult):
+                extraction_rules = (
+                    skill
+                    + "\nextract只提取当前片段对本事件有用的事实与连续原文引用，不作评级。consolidate保留各来源、冲突、时间与引用，不新增事实。"
+                )
+                extracts, preparations = await extract_articles(
+                    provider, extraction_rules, payload["articles"]
+                )
+                if {
+                    ref["article_id"]
+                    for part in extracts
+                    for ref in part["evidence_refs"]
+                } != {a["id"] for a in payload["articles"]}:
+                    raise ValueError("长输入提取遗漏成员原文，不能发布事件研判")
+                request = {**payload, "articles": [], "extractions": extracts}
+                request, extra = await compact_extractions(
+                    provider, extraction_rules, request, ResearchResult, researcher.fits
+                )
+                preparations.extend(extra)
+                researcher.sources.update({a["id"]: a for a in payload["articles"]})
+            output, used = await researcher.run(
+                provider, skill, request, ResearchResult
+            )
+            if preparations:
+                used = {"preparation": preparations, "research": used}
+            validate_event(
+                output,
+                {**{a["id"]: a for a in payload["articles"]}, **researcher.sources},
+            )
+            if output.id != identifier:
+                raise ValueError("返回事件ID不匹配")
+            package_news = {p.id: n.id for p, m, n in members}
+            validate_timeline(output, package_news)
+            if len({r.version_id for r in output.references}) != len(output.references):
+                raise ValueError("引用事件版本重复")
+            if not {r.version_id for r in output.references} <= set(
+                researcher.read_event_versions.values()
+            ):
+                raise ValueError("引用事件必须实际读取对应成功版本")
+            async with publication_lock:
+                current = await session.get(
+                    Event, identifier, populate_existing=True, with_for_update=True
+                )
+                source_hashes = dict(
+                    (
+                        await session.execute(
+                            select(NewsItem.id, NewsItem.content_hash).where(
+                                NewsItem.id.in_(package_news.values())
+                            )
+                        )
+                    ).all()
+                )
+                valid = current.revision == revision and all(
+                    source_hashes[n.id] == p.content_hash for p, m, n in members
+                )
+                version.state = "done" if valid else "superseded"
+                version.output = output.model_dump(mode="json")
+                version.usage = used
+                version.evidence = researcher.records
+                if valid:
+                    current.result = version.output
+                    current.title = output.title
+                    current.state = "done"
+                    current.dirty_since = None
+                    current.error = None
+                    for ref in output.references:
+                        session.add(
+                            Reference(
+                                version_id=version_id,
+                                target_version_id=ref.version_id,
+                                role=ref.role,
+                                reason=ref.reason,
+                            )
+                        )
+                else:
+                    current.state = "pending"
+                await session.commit()
+        except Exception as error:
+            await session.rollback()
+            version = await session.get(Version, version_id)
+            version.state = "failed"
+            version.error = str(error)[:2000]
+            version.evidence = researcher.records
+            version.output = output.model_dump(mode="json") if output else None
+            version.usage = used or {
+                "preparation": preparations,
+                "failed": getattr(error, "usage", None),
+                "rounds": getattr(researcher, "usages", []),
+            }
+            event = await session.get(Event, identifier, with_for_update=True)
+            event.state = "pending" if event.revision > revision else "failed"
+            event.error = version.error
+            await session.commit()

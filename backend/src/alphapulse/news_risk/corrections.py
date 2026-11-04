@@ -4,13 +4,12 @@ import json
 from datetime import UTC, datetime
 from sqlalchemy import select
 from alphapulse.models import NewsItem
-from alphapulse.models.risk import NewsSummary, SummaryArticle, ArticleAnalysis, PackageCorrection, EventMember
+from alphapulse.models.risk import NewsSummary, SummaryArticle, ArticleAnalysis, PackageCorrection, EventMember, NewsEvent
 from alphapulse.news_risk.pipeline import Evidence, validate_evidence
 from alphapulse.news_risk.contracts import Correction
 
 
 async def apply_correction(session, proposal: Correction, current_id, researched_ids, rules):
-    from alphapulse.news_risk.worker import schedule
     from alphapulse.news_risk.events import dirty_event
     ids = [p.id for p in proposal.packages]
     if len(ids) != len(set(ids)) or current_id not in ids or not set(ids)-{current_id} <= researched_ids:
@@ -40,9 +39,15 @@ async def apply_correction(session, proposal: Correction, current_id, researched
     fingerprint = hashlib.sha256(json.dumps([sorted((a.news_id,a.content_hash) for a in sources.values()), rules], sort_keys=True).encode()).hexdigest()
     if await session.scalar(select(PackageCorrection.id).where(PackageCorrection.fingerprint == fingerprint)):
         raise ValueError('相同输入已纠错，拒绝反复拆合；需要新的证据')
+    event_ids = set(await session.scalars(select(EventMember.event_id).where(EventMember.package_id.in_(ids))))
+    if len(event_ids) != 1: raise ValueError('跨事件分包纠错须先合并事件')
+    event_id = next(iter(event_ids))
+    event = await session.get(NewsEvent, event_id, with_for_update=True, populate_existing=True)
+    if event is None or event.state == 'retired': raise ValueError('所属事件已失效')
+    review_config = event.review_config
     before = {'packages': [{'id':p.id,'revision':p.revision,'fact':p.fact,'tags':p.tags} for p in packages],
         'memberships': [{'package_id':l.summary_id,'analysis_id':l.analysis_id,'unit':l.unit} for l in links]}
-    for package in packages: await dirty_event(session, package.id, next(p.review_config for p in packages if p.id == current_id))
+    for package in packages: await dirty_event(session, package.id, review_config)
     for link in links: link.active = False
     outputs = []
     now = datetime.now(UTC)
@@ -59,17 +64,16 @@ async def apply_correction(session, proposal: Correction, current_id, researched
         if not package.tags: raise ValueError('纠错标签不能为空')
         package.published_at = min(dates)
         package.updated_at = max(datetime.fromisoformat(sources[a.analysis_id].input['progress_at']) for a in replacement.assignments)
-        package.review_config = next(p.review_config for p in packages if p.id == current_id)
+        package.review_config = review_config
         package.content_kind = replacement.content_kind
         for assignment in replacement.assignments:
             link = next((l for l in links if l.summary_id == package.id and l.analysis_id == assignment.analysis_id), None)
             if link is None:
                 link = SummaryArticle(summary_id=package.id, analysis_id=assignment.analysis_id); session.add(link)
             link.active = True; link.unit = {'fact':replacement.fact,'evidence':assignment.evidence,'correction':True}
-        schedule(package, now, True); outputs.append(package.id)
-        if package.review_config and package.review_config.get('request'):
-            from alphapulse.news_risk.backfill import target
-            await target(session, package.review_config['job_id'], 'analysis', package)
+        package.revision += 1; package.state='done'; outputs.append(package.id)
+        membership = await session.get(EventMember,package.id)
+        if membership is None: session.add(EventMember(package_id=package.id,event_id=event_id,reason=proposal.reason))
     for package in packages:
         if package.id not in outputs:
             package.replacement_ids = outputs; package.state = 'superseded'

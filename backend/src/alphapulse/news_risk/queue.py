@@ -3,7 +3,7 @@ import json
 from datetime import UTC, datetime
 from sqlalchemy import select, func, or_, exists, BigInteger
 from alphapulse.models import NewsItem
-from alphapulse.models.risk import (ReprocessItem, ReprocessTarget, ArticleAnalysis, NewsSummary, NewsEvent, RiskSnapshot, RiskSettings, ReprocessJob)
+from alphapulse.models.risk import (ReprocessItem, ReprocessTarget, ArticleAnalysis, NewsEvent, RiskSnapshot, RiskSettings, ReprocessJob)
 from alphapulse.core.redis import redis
 
 
@@ -13,7 +13,7 @@ async def job_out(session, job):
         counts = {state:sum(i.get('state','pending')==state for i in job.items) for state in ('pending','processing','done','failed')}
         return {'id':job.id,'state':job.state,'total':len(job.items),'completed':job.position,'failures':job.failures,'request':None,'counts':counts}
     stages = {}
-    for kind, model in (('analysis',NewsSummary),('events',NewsEvent)):
+    for kind, model in (('events',NewsEvent),):
         stages[kind] = dict((await session.execute(select(model.state,func.count()).join(
             ReprocessTarget,ReprocessTarget.object_id==model.id).where(ReprocessTarget.job_id==job.id,
                 ReprocessTarget.kind==kind).group_by(model.state))).all())
@@ -31,7 +31,7 @@ async def listing(session, state, stage, origin, job_id, page, limit):
     entries=[]
     total=0
     offset=(page-1)*limit
-    for kind,model in [('grouping',ArticleAnalysis),('analysis',NewsSummary),('events',NewsEvent),('outlook',RiskSnapshot),('backfill',ReprocessItem)]:
+    for kind,model in [('grouping',ArticleAnalysis),('events',NewsEvent),('outlook',RiskSnapshot),('backfill',ReprocessItem)]:
         if stage and stage!=kind:continue
         query=select(model)
         busy = [a['object_id'] for a in (active or []) if a['stage']==kind]
@@ -45,12 +45,6 @@ async def listing(session, state, stage, origin, job_id, page, limit):
         pending = model.state.in_(['pending','processing','reprocess'])
         due = getattr(model,'due_at',None)
         waiting = due > now if due is not None else False
-        if kind=='events':
-            from alphapulse.models.risk import EventMember
-            blocked=select(EventMember.event_id).join(NewsSummary,NewsSummary.id==EventMember.package_id).where(
-                NewsSummary.replacement_ids==[],NewsSummary.state!='withdrawn',
-                or_(NewsSummary.state!='done',NewsSummary.result==None))
-            waiting=or_(waiting,model.id.in_(blocked))
         if state=='running': query=query.where(model.id.in_(busy) if active is not None else model.state=='processing')
         elif state=='waiting': query=query.where(pending,model.id.not_in(busy),waiting)
         elif state=='queued': query=query.where(pending,model.state!='processing' if active is None else True,model.id.not_in(busy),~waiting if due is not None else True)

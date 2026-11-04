@@ -178,6 +178,12 @@ async def delete(node_id: int, session: Annotated[AsyncSession, Depends(get_sess
         (RiskSettings.grouping_skill_id == node_id) | (RiskSettings.analysis_skill_id == node_id) | (RiskSettings.outlook_skill_id == node_id)))
     if referenced:
         raise HTTPException(409, "请先解除新闻模型的Skill绑定")
+    from alphapulse.news_research.models import ResearchSettings
+    research = await session.scalar(select(ResearchSettings).where(
+        ResearchSettings.config.contains({'index': {'skill_id': node_id}}) |
+        ResearchSettings.config.contains({'research': {'skill_id': node_id}})).with_for_update())
+    if research:
+        raise HTTPException(409, '请先解除两阶段新闻研究的Skill绑定')
     # 先解除对版本的引用，版本随节点级联删除
     node.published_version_id = None
     await session.flush()

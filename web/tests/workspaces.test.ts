@@ -340,164 +340,13 @@ test("交易确认绑定发起币种；交易所或会话切换后拒绝旧操�
   assert.equal(writes.length, 1)
 })
 
-test("风险首页丢弃旧窗口与旧会话结果，详情关闭后不写回", async () => {
-  const requests: ReturnType<typeof Promise.withResolvers>[] = []
-  const details = Promise.withResolvers()
-  const user = { sessionVersion: 1 }
-  const load = moduleLoader({
-    "@/common/apis/risk": {
-      getRiskOverviewApi: () => {
-        const request = Promise.withResolvers()
-        requests.push(request)
-        return request.promise
-      },
-      listRiskEventsApi: async () => ({ items: [], total: 0 }),
-      getRiskEventApi: () => details.promise
-    },
-    "@@/apis/skills": { listSkillTreeApi: async () => [] },
-    "@/common/apis/settings": {},
-    "@/pinia/stores/user": { useUserStore: () => user }
-  }, globals)
-  const page = load("@/pages/home/index.vue").default.setup({}, { expose() {} })
-  const old = page.load()
-  const current = page.load()
-  requests[1].resolve({ as_of: "current" })
-  await current
-  requests[0].resolve({ as_of: "old" })
-  await old
-  assert.equal(page.overview.value.as_of, "current")
-  const previous = page.load()
-  user.sessionVersion++
-  requests[2].resolve({ as_of: "other-session" })
-  await previous
-  assert.equal(page.overview.value.as_of, "current")
-  const opening = page.openEvent(1)
-  await vue.nextTick()
-  page.showDetail.value = false
-  await vue.nextTick()
-  details.resolve({ event: { id: 1 }, history: [] })
-  await opening
-  assert.equal(page.detail.value, null)
-})
-
-test("新闻模型列表随接入配置更新，保留手填值并丢弃旧配置、关闭及旧会话结果", async () => {
-  const requests: { id: number, response: ReturnType<typeof Promise.withResolvers> }[] = []
-  let unmount = () => {}
-  const user = vue.reactive({ sessionVersion: 1 })
-  const load = moduleLoader({
-    "@@/apis/skills": { listSkillTreeApi: async () => [] },
-    "@/common/apis/risk": { getRiskSettingsApi: async () => ({ provider_id: 1, model: "manual-model", enabled: false }) },
-    "@/common/apis/settings": {
-      listProvidersApi: async () => [],
-      listProviderModelsApi: (id: number) => {
-        const response = Promise.withResolvers()
-        requests.push({ id, response })
-        return response.promise
-      }
-    },
-    "@/pinia/stores/user": { useUserStore: () => user }
-  }, { ...globals, clearInterval, onBeforeUnmount: (callback: () => void) => unmount = callback })
-  const page = load("@/pages/home/index.vue").default.setup({}, { expose() {} })
-  await page.openSettings()
-  await vue.nextTick()
-  assert.equal(requests[0].id, 1)
-  page.settings.value.provider_id = 2
-  await vue.nextTick()
-  requests[1].response.resolve(["model-two"])
-  await setImmediate()
-  requests[0].response.resolve(["model-one"])
-  await setImmediate()
-  assert.deepEqual(Array.from(page.models.value), ["model-two"])
-  assert.equal(page.settings.value.model, "manual-model")
-  const failed = page.loadModels()
-  requests[2].response.reject(new Error("目录不可用"))
-  await failed
-  assert.equal(page.modelsError.value, "目录不可用")
-  assert.equal(page.settings.value.model, "manual-model")
-  const closed = page.loadModels()
-  page.showSettings.value = false
-  await vue.nextTick()
-  requests[3].response.resolve(["closed"])
-  await closed
-  assert.equal(page.models.value.length, 0)
-  await page.openSettings()
-  await vue.nextTick()
-  user.sessionVersion++
-  await vue.nextTick()
-  requests[4].response.resolve(["previous-session"])
-  await setImmediate()
-  assert.equal(page.showSettings.value, false)
-  assert.equal(page.models.value.length, 0)
-  await page.openSettings()
-  await vue.nextTick()
-  unmount()
-  requests[5].response.resolve(["unmounted"])
-  await setImmediate()
-  assert.equal(page.models.value.length, 0)
-})
-
-test("第二阶段模型列表随接入配置更新，保留手填值并丢弃旧配置、关闭及旧会话结果", async () => {
-  const requests: { id: number, response: ReturnType<typeof Promise.withResolvers> }[] = []
-  let unmount = () => {}
-  const user = vue.reactive({ sessionVersion: 1 })
-  const load = moduleLoader({
-    "@@/apis/skills": { listSkillTreeApi: async () => [] },
-    "@/common/apis/risk": { getRiskSettingsApi: async () => ({ second_provider_id: 1, second_model: "manual-model", enabled: false }) },
-    "@/common/apis/settings": {
-      listProvidersApi: async () => [],
-      listProviderModelsApi: (id: number) => {
-        const response = Promise.withResolvers()
-        requests.push({ id, response })
-        return response.promise
-      }
-    },
-    "@/pinia/stores/user": { useUserStore: () => user }
-  }, { ...globals, clearInterval, onBeforeUnmount: (callback: () => void) => unmount = callback })
-  const page = load("@/pages/home/index.vue").default.setup({}, { expose() {} })
-  await page.openSettings()
-  await vue.nextTick()
-  assert.equal(requests[0].id, 1)
-  page.settings.value.second_provider_id = 2
-  await vue.nextTick()
-  requests[1].response.resolve(["model-two"])
-  await setImmediate()
-  requests[0].response.resolve(["model-one"])
-  await setImmediate()
-  assert.deepEqual(Array.from(page.secondModels.value), ["model-two"])
-  assert.equal(page.settings.value.second_model, "manual-model")
-  const failed = page.loadSecondModels()
-  requests[2].response.reject(new Error("目录不可用"))
-  await failed
-  assert.equal(page.secondModelsError.value, "目录不可用")
-  assert.equal(page.settings.value.second_model, "manual-model")
-  const closed = page.loadSecondModels()
-  page.showSettings.value = false
-  await vue.nextTick()
-  requests[3].response.resolve(["closed"])
-  await closed
-  assert.equal(page.secondModels.value.length, 0)
-  await page.openSettings()
-  await vue.nextTick()
-  user.sessionVersion++
-  await vue.nextTick()
-  requests[4].response.resolve(["previous-session"])
-  await setImmediate()
-  assert.equal(page.showSettings.value, false)
-  assert.equal(page.secondModels.value.length, 0)
-  await page.openSettings()
-  await vue.nextTick()
-  unmount()
-  requests[5].response.resolve(["unmounted"])
-  await setImmediate()
-  assert.equal(page.secondModels.value.length, 0)
-})
-
 test("新闻 AI 详情绑定新闻修订版本，旧分析响应不能覆盖当前版本", async () => {
   const requests: { params: unknown, response: ReturnType<typeof Promise.withResolvers> }[] = []
   const props = vue.reactive({ newsId: 1, revision: 1 })
   const user = { sessionVersion: 1 }
   const load = moduleLoader({
-    "@/common/apis/risk": { listNewsSummariesApi: async () => [], listRiskAnalysesApi: (params: unknown) => {
+    "@@/apis/news-research": { listNewsPackagesApi: (id: number, revision: number) => {
+      const params = { news_id: id, revision_no: revision }
       const response = Promise.withResolvers()
       requests.push({ params, response })
       return response.promise
@@ -512,13 +361,13 @@ test("新闻 AI 详情绑定新闻修订版本，旧分析响应不能覆盖当�
   await setImmediate()
   requests[0].response.resolve([{ id: 1 }])
   await setImmediate()
-  assert.equal(page.analysis.value.id, 2)
+  assert.equal(page.summaries.value[0].id, 2)
   props.newsId = 3
   await vue.nextTick()
   user.sessionVersion++
   requests[2].response.resolve([{ id: 3 }])
   await setImmediate()
-  assert.equal(page.analysis.value, null)
+  assert.equal(page.summaries.value.length, 0)
 })
 
 test("新闻 AI 详情等待期间自动刷新，完成后停止；隐藏、旧会话和卸载不继续请求", async () => {
@@ -530,7 +379,7 @@ test("新闻 AI 详情等待期间自动刷新，完成后停止；隐藏、旧�
   const document = { hidden: false }
   const user = { sessionVersion: 1 }
   const load = moduleLoader({
-    "@/common/apis/risk": { listNewsSummariesApi: async () => [], listRiskAnalysesApi: async () => {
+    "@@/apis/news-research": { listNewsPackagesApi: async () => {
       requests++
       return [{ state }]
     } },
@@ -555,7 +404,7 @@ test("新闻 AI 详情等待期间自动刷新，完成后停止；隐藏、旧�
   const props = vue.reactive({ newsId: 1, revision: 1 })
   const page = load("@/pages/news/components/NewsRisk.vue").default.setup(props, { expose() {} })
   await setImmediate()
-  assert.equal(page.analysis.value.state, "pending")
+  assert.equal(page.summaries.value[0].state, "pending")
   document.hidden = true
   tick()
   assert.equal(requests, 1)
@@ -564,7 +413,7 @@ test("新闻 AI 详情等待期间自动刷新，完成后停止；隐藏、旧�
   tick()
   tick()
   await setImmediate()
-  assert.equal(page.analysis.value.state, "done")
+  assert.equal(page.summaries.value[0].state, "done")
   assert.equal(requests, 2)
   tick()
   assert.equal(requests, 2)
@@ -634,146 +483,6 @@ test("新闻列表只更新可见条目的匹配版本评级，保留滚动与�
   assert.equal(queries.length, 5)
 })
 
-test("第三阶段模型列表随接入配置更新，保留手填值并丢弃旧配置、关闭及旧会话结果", async () => {
-  const requests: { id: number, response: ReturnType<typeof Promise.withResolvers> }[] = []
-  let unmount = () => {}
-  const user = vue.reactive({ sessionVersion: 1 })
-  const load = moduleLoader({
-    "@@/apis/skills": { listSkillTreeApi: async () => [] },
-    "@/common/apis/risk": { getRiskSettingsApi: async () => ({ third_provider_id: 1, third_model: "manual-model", enabled: false }) },
-    "@/common/apis/settings": {
-      listProvidersApi: async () => [],
-      listProviderModelsApi: (id: number) => {
-        const response = Promise.withResolvers()
-        requests.push({ id, response })
-        return response.promise
-      }
-    },
-    "@/pinia/stores/user": { useUserStore: () => user }
-  }, { ...globals, clearInterval, onBeforeUnmount: (callback: () => void) => unmount = callback })
-  const page = load("@/pages/home/index.vue").default.setup({}, { expose() {} })
-  await page.openSettings()
-  await vue.nextTick()
-  assert.equal(requests[0].id, 1)
-  page.settings.value.third_provider_id = 2
-  await vue.nextTick()
-  requests[1].response.resolve(["model-two"])
-  await setImmediate()
-  requests[0].response.resolve(["model-one"])
-  await setImmediate()
-  assert.deepEqual(Array.from(page.thirdModels.value), ["model-two"])
-  assert.equal(page.settings.value.third_model, "manual-model")
-  const failed = page.loadThirdModels()
-  requests[2].response.reject(new Error("目录不可用"))
-  await failed
-  assert.equal(page.thirdError.value, "目录不可用")
-  assert.equal(page.settings.value.third_model, "manual-model")
-  const closed = page.loadThirdModels()
-  page.showSettings.value = false
-  await vue.nextTick()
-  requests[3].response.resolve(["closed"])
-  await closed
-  assert.equal(page.thirdModels.value.length, 0)
-  await page.openSettings()
-  await vue.nextTick()
-  user.sessionVersion++
-  await vue.nextTick()
-  requests[4].response.resolve(["previous-session"])
-  await setImmediate()
-  assert.equal(page.showSettings.value, false)
-  assert.equal(page.thirdModels.value.length, 0)
-  await page.openSettings()
-  await vue.nextTick()
-  unmount()
-  requests[5].response.resolve(["unmounted"])
-  await setImmediate()
-  assert.equal(page.thirdModels.value.length, 0)
-})
-
-test("72小时阅读列表分页保留全部包，更新缩页后回到有效页", async () => {
-  let count = 45
-  const load = moduleLoader({
-    "@/common/apis/risk": {
-      getRiskOverviewApi: async () => ({ briefing: { reading: Array.from({ length: count }, (_, id) => ({ id })) } }),
-      listRiskEventsApi: async () => ({ items: [], total: 0 })
-    },
-    "@@/apis/skills": {},
-    "@/common/apis/settings": {},
-    "@/pinia/stores/user": { useUserStore: () => ({ sessionVersion: 1 }) }
-  }, globals)
-  const page = load("@/pages/home/index.vue").default.setup({}, { expose() {} })
-  await page.load()
-  assert.equal(page.readingRows.value.length, 20)
-  page.readingPage.value = 3
-  assert.deepEqual(Array.from(page.readingRows.value, (row: { id: number }) => row.id), [40, 41, 42, 43, 44])
-  count = 1
-  await page.load()
-  assert.equal(page.readingPage.value, 1)
-  assert.equal(page.readingRows.value[0].id, 0)
-})
-
-test("创建新闻 Skills 后刷新列表，旧会话响应不能覆盖新会话", async () => {
-  const user = vue.reactive({ sessionVersion: 1 })
-  const response = Promise.withResolvers<unknown[]>()
-  let notifications = 0
-  const load = moduleLoader({
-    "@/common/apis/risk": { createNewsSkillTemplatesApi: async () => ({ grouping_skill_id: 1 }) },
-    "@@/apis/skills": { listSkillTreeApi: () => response.promise },
-    "@/common/apis/settings": {},
-    "@/pinia/stores/user": { useUserStore: () => user }
-  }, {
-    ...globals,
-    ElMessage: { success() {
-      notifications++
-    } }
-  })
-  const page = load("@/pages/home/index.vue").default.setup({}, { expose() {} })
-  page.settings.value = { grouping_skill_id: null }
-  const pending = page.createTemplates()
-  await setImmediate()
-  user.sessionVersion++
-  await vue.nextTick()
-  page.newsSkills.value = [{ id: 2, scope: "news", kind: "skill", name: "Current" }]
-  response.resolve([{ id: 1, scope: "news", kind: "skill", name: "Old" }])
-  await pending
-  assert.equal(page.newsSkills.value[0].id, 2)
-  assert.equal(notifications, 0)
-})
-
-test("三阶段思考强度独立保存，重建模板显式请求新版草稿", async () => {
-  let saved: Record<string, unknown> = {}
-  let refresh: unknown
-  const config = { enabled: false, model: "luna", reasoning_effort: null, second_reasoning_effort: null, third_reasoning_effort: null }
-  const load = moduleLoader({
-    "@/common/apis/risk": {
-      saveRiskSettingsApi: async (data: Record<string, unknown>) => saved = data,
-      getRiskOverviewApi: async () => ({ coverage: {}, counts: {} }),
-      listRiskEventsApi: async () => ({ items: [], total: 0 }),
-      createNewsSkillTemplatesApi: async (value: unknown) => {
-        refresh = value
-        return { grouping_skill_id: 1, analysis_skill_id: 2, outlook_skill_id: 3 }
-      }
-    },
-    "@@/apis/skills": { listSkillTreeApi: async () => [] },
-    "@/common/apis/settings": {},
-    "@/pinia/stores/user": { useUserStore: () => ({ sessionVersion: 1 }) }
-  }, globals)
-  const page = load("@/pages/home/index.vue").default.setup({}, { expose() {} })
-  page.settings.value = { ...config, reasoning_effort: "low", second_reasoning_effort: "high", third_reasoning_effort: "xhigh" }
-  await page.save(false)
-  assert.equal(saved.reasoning_effort, "low")
-  assert.equal(saved.second_reasoning_effort, "high")
-  assert.equal(saved.third_reasoning_effort, "xhigh")
-  page.settings.value.second_reasoning_effort = null
-  await page.save(false)
-  assert.equal(saved.reasoning_effort, "low")
-  assert.equal(saved.second_reasoning_effort, null)
-  assert.equal(saved.third_reasoning_effort, "xhigh")
-  await page.createTemplates()
-  assert.equal(refresh, true)
-  assert.equal(page.settings.value.analysis_skill_id, 2)
-})
-
 test("事件详情忽略旧请求与旧会话，失败可重试", async () => {
   const user = vue.reactive({ sessionVersion: 1 })
   const pending: ReturnType<typeof Promise.withResolvers>[] = []
@@ -835,52 +544,6 @@ test("重整理预览的旧会话完成不能解除新操作的忙碌状态", as
   await current
   assert.equal(page.busy.value, false)
   assert.equal(page.preview.value.articles, 2)
-})
-
-test("新闻并发独立保存保留模型草稿，重复点击和旧会话响应不影响新操作", async () => {
-  const user = vue.reactive({ sessionVersion: 1 })
-  const pending: ReturnType<typeof Promise.withResolvers>[] = []
-  const values: number[] = []
-  let reloads = 0
-  const load = moduleLoader({
-    "@@/apis/skills": { listSkillTreeApi: async () => [] },
-    "@/common/apis/settings": {},
-    "@/pinia/stores/user": { useUserStore: () => user },
-    "@/common/apis/risk": {
-      saveRiskConcurrencyApi: (value: number) => {
-        values.push(value)
-        const request = Promise.withResolvers()
-        pending.push(request)
-        return request.promise
-      },
-      getRiskOverviewApi: async () => {
-        reloads++
-        return { briefing: null }
-      },
-      listRiskEventsApi: async () => ({ items: [], total: 0 })
-    }
-  }, globals)
-  const page = load("@/pages/home/index.vue").default.setup({}, { expose() {} })
-  page.settings.value = { max_concurrency: 5, model: "unsaved-model" }
-  const first = page.saveConcurrency()
-  await page.saveConcurrency()
-  assert.deepEqual(values, [5])
-  pending[0].resolve({ max_concurrency: 5 })
-  await first
-  assert.equal(page.settings.value.model, "unsaved-model")
-  assert.equal(reloads, 1)
-  const old = page.saveConcurrency()
-  user.sessionVersion++
-  await vue.nextTick()
-  page.settings.value = { max_concurrency: 2, model: "new-session" }
-  const current = page.saveConcurrency()
-  pending[1].resolve({ max_concurrency: 5 })
-  await old
-  assert.equal(page.concurrencySaving.value, true)
-  assert.equal(page.settings.value.model, "new-session")
-  pending[2].resolve({ max_concurrency: 2 })
-  await current
-  assert.equal(page.concurrencySaving.value, false)
 })
 
 test("AI 队列隔离旧会话与旧筛选响应，轮询隐藏页面时暂停并在卸载后清理", async () => {
@@ -1049,4 +712,355 @@ test("回补明细刷新不抢占新选择，旧会话与旧请求不能覆盖�
   assert.equal(page.batch.value.id, 9)
   assert.equal(page.batchId.value, 9)
   assert.equal(page.batchPage.value, 1)
+})
+function researchPage(api: Record<string, unknown> = {}, user = vue.reactive({ sessionVersion: 1 }), extra: Record<string, unknown> = {}, dependencies: Record<string, unknown> = {}) {
+  const load = moduleLoader({
+    "@@/apis/news-research": { getSettingsApi: async () => ({ config: {}, enabled: false }), listEventsApi: async () => ({ items: [], total: 0 }), listPackagesApi: async () => ({ items: [], total: 0 }), ...api },
+    "@@/apis/skills": { listSkillTreeApi: async () => [] },
+    "@@/apis/settings": { listProvidersApi: async () => [], listProviderModelsApi: async () => [] },
+    "@/pinia/stores/user": { useUserStore: () => user },
+    ...dependencies
+  }, { ...globals, clearInterval, ...extra })
+  return load("@/pages/home/index.vue").default.setup({}, { expose() {} })
+}
+
+test("两阶段首页保留新查询结果，旧会话与卸载后的响应不写回", async () => {
+  const pending: ReturnType<typeof Promise.withResolvers>[] = []
+  const user = vue.reactive({ sessionVersion: 1 })
+  let unmount = () => {}
+  const page = researchPage({ listEventsApi: () => {
+    const p = Promise.withResolvers()
+    pending.push(p)
+    return p.promise
+  } }, user, { onBeforeUnmount: (fn: () => void) => unmount = fn })
+  const first = page.load()
+  const second = page.load()
+  pending[1].resolve({ items: [{ id: 2 }], total: 1 })
+  await second
+  pending[0].resolve({ items: [{ id: 1 }], total: 1 })
+  await first
+  assert.equal(page.events.value[0].id, 2)
+  const old = page.load()
+  user.sessionVersion++
+  await vue.nextTick()
+  pending[2].resolve({ items: [{ id: 3 }], total: 1 })
+  await old
+  assert.equal(page.events.value.length, 0)
+  unmount()
+  await page.load()
+  assert.equal(pending.length, 3)
+})
+
+for (const stage of ["index", "research"] as const) {
+  test(`${stage} 模型列表保持手填值并拒绝旧配置与关闭后的响应`, async () => {
+    const pending: ReturnType<typeof Promise.withResolvers>[] = []
+    const page = researchPage({}, undefined, {}, { "@@/apis/settings": { listProvidersApi: async () => [], listProviderModelsApi: () => {
+      const p = Promise.withResolvers()
+      pending.push(p)
+      return p.promise
+    } } })
+    page.config.value[stage].model = "manual"
+    page.settingsOpened.value = true
+    page.config.value[stage].provider_id = 1
+    await vue.nextTick()
+    page.config.value[stage].provider_id = 2
+    await vue.nextTick()
+    pending[1].resolve(["new"])
+    await setImmediate()
+    pending[0].resolve(["old"])
+    await setImmediate()
+    assert.deepEqual(Array.from(page.modelOptions.value[stage]), ["new"])
+    assert.equal(page.config.value[stage].model, "manual")
+    const closed = page.loadModels(stage)
+    page.settingsOpened.value = false
+    await vue.nextTick()
+    pending[2].resolve(["closed"])
+    await closed
+    assert.equal(page.modelOptions.value[stage].length, 0)
+  })
+}
+
+test("事件与包详情丢弃旧请求和关闭后响应，失败可重新读取", async () => {
+  for (const kind of ["Event", "Package"]) {
+    const pending: ReturnType<typeof Promise.withResolvers>[] = []
+    const page = researchPage({ [`get${kind}Api`]: () => {
+      const p = Promise.withResolvers()
+      pending.push(p)
+      return p.promise
+    } })
+    const first = page[`open${kind}`](1)
+    const second = page[`open${kind}`](2)
+    pending[1].resolve({ id: 2 })
+    await second
+    pending[0].resolve({ id: 1 })
+    await first
+    const ref = kind === "Event" ? page.detail : page.packageDetail
+    assert.equal(ref.value.id, 2)
+    const closed = page[`open${kind}`](3)
+    ;(kind === "Event" ? page.opened : page.packageOpened).value = false
+    await vue.nextTick()
+    pending[2].resolve({ id: 3 })
+    await closed
+    assert.equal(ref.value, null)
+    const failed = page[`open${kind}`](4)
+    pending[3].reject(new Error("unavailable"))
+    await failed
+    assert.equal((kind === "Event" ? page.detailError : page.packageError).value, true)
+    const retry = page[`open${kind}`](4)
+    pending[4].resolve({ id: 4 })
+    await retry
+    assert.equal(ref.value.id, 4)
+  }
+})
+
+test("两阶段保存各自思考强度，不提交第三阶段配置", async () => {
+  let saved: any
+  const page = researchPage({ saveSettingsApi: async (data: unknown) => {
+    saved = JSON.parse(JSON.stringify(data))
+  } })
+  page.config.value.index.reasoning_effort = "low"
+  page.config.value.research.reasoning_effort = "high"
+  await page.save()
+  assert.equal(saved.index.reasoning_effort, "low")
+  assert.equal(saved.research.reasoning_effort, "high")
+  assert.equal(Object.keys(saved).length, 3)
+  page.config.value.research.reasoning_effort = null
+  await page.save()
+  assert.equal(saved.research.reasoning_effort, null)
+  assert.equal(saved.index.reasoning_effort, "low")
+})
+
+test("Skill 草稿的旧会话响应不能替换当前列表或提示成功", async () => {
+  const pending = Promise.withResolvers()
+  const user = vue.reactive({ sessionVersion: 1 })
+  let notices = 0
+  const page = researchPage({ createSkillsApi: async () => ({ index: 1, research: 2 }) }, user, { ElMessage: { success() {
+    notices++
+  } } }, { "@@/apis/skills": { listSkillTreeApi: () => pending.promise } })
+  const old = page.prepareSkills()
+  await setImmediate()
+  user.sessionVersion++
+  await vue.nextTick()
+  page.skills.value = [{ id: 9 }]
+  pending.resolve([{ id: 1, scope: "news", kind: "skill" }])
+  await old
+  assert.equal(page.skills.value[0].id, 9)
+  assert.equal(notices, 0)
+})
+
+test("两阶段操作拒绝重复提交和旧会话操作，失败保留配置草稿", async () => {
+  const user = vue.reactive({ sessionVersion: 1 })
+  const pending = Promise.withResolvers()
+  let calls = 0
+  const page = researchPage({ saveSettingsApi: () => {
+    calls++
+    return pending.promise
+  } }, user)
+  page.config.value.index.model = "draft"
+  const first = page.save()
+  await page.save()
+  assert.equal(calls, 1)
+  pending.reject(new Error("save failed"))
+  await assert.rejects(first, /save failed/)
+  assert.equal(page.config.value.index.model, "draft")
+  assert.equal(page.busy.value, false)
+  user.sessionVersion++
+  await vue.nextTick()
+  await page.save()
+  assert.equal(calls, 1)
+})
+
+test("事件与新闻包分别分页查询，不调用第三阶段", async () => {
+  const queries: string[] = []
+  const page = researchPage({ listEventsApi: async () => {
+    queries.push("events")
+    return { items: [{ id: 1 }], total: 31 }
+  }, listPackagesApi: async () => {
+    queries.push("packages")
+    return { items: [{ id: 2 }], total: 30 }
+  } })
+  await page.load()
+  assert.equal(page.events.value[0].id, 1)
+  page.tab.value = "packages"
+  await vue.nextTick()
+  await setImmediate()
+  assert.equal(page.packages.value[0].id, 2)
+  assert.equal(page.total.value, 30)
+  assert.deepEqual(queries, ["events", "packages"])
+})
+
+for (const kind of ["Event", "Package"] as const) {
+  test(`${kind} 重试后刷新详情，轮询恢复读取失败并丢弃关闭后的响应`, async () => {
+    let state = "failed"
+    let reads = 0
+    let writes = 0
+    let failRead = false
+    const deferred = Promise.withResolvers()
+    let delay = false
+    const page = researchPage({
+      [`get${kind}Api`]: async (id: number) => {
+        reads++
+        if (delay) return deferred.promise
+        if (failRead) throw new Error("GET failed")
+        return { id, state, error: state === "failed" ? "Old error" : null, versions: state === "done" ? [1] : [] }
+      },
+      [`retry${kind}Api`]: async () => {
+        writes++
+        state = "pending"
+      }
+    })
+    const detail = kind === "Event" ? page.detail : page.packageDetail
+    const opened = kind === "Event" ? page.opened : page.packageOpened
+    const error = kind === "Event" ? page.detailError : page.packageError
+    await page[`open${kind}`](7)
+    await page[`retry${kind}`]()
+    assert.equal(detail.value.state, "pending")
+    assert.equal(detail.value.error, null)
+    state = "done"
+    failRead = true
+    await page.refresh()
+    assert.equal(detail.value.state, "pending")
+    assert.equal(error.value, true)
+    failRead = false
+    await page.refresh()
+    assert.equal(detail.value.state, "done")
+    assert.equal(detail.value.versions.length, 1)
+    assert.equal(error.value, false)
+    delay = true
+    const pending = page.refresh()
+    await setImmediate()
+    const count = reads
+    await page.refresh()
+    assert.equal(reads, count)
+    opened.value = false
+    await vue.nextTick()
+    deferred.resolve({ id: 7, state: "failed" })
+    await pending
+    assert.equal(detail.value.state, "done")
+    assert.equal(writes, 1)
+  })
+}
+
+test("固定版本读取丢弃旧请求及旧会话响应", async () => {
+  const first = Promise.withResolvers<any>()
+  const second = Promise.withResolvers<any>()
+  const user = vue.reactive({ sessionVersion: 1 })
+  const page = researchPage({ getEventVersionApi: (_event: number, version: number) => version === 1 ? first.promise : second.promise }, user)
+  const a = page.openVersion(8, 1)
+  const b = page.openVersion(8, 2)
+  second.resolve({ id: 2 })
+  await b
+  first.resolve({ id: 1 })
+  await a
+  assert.equal(page.versionDetail.value.id, 2)
+  user.sessionVersion++
+  await vue.nextTick()
+  assert.equal(page.versionDetail.value, null)
+  assert.equal(page.versionOpened.value, false)
+})
+
+test("词库读取不能打开新会话界面", async () => {
+  const pending = Promise.withResolvers<any>()
+  const user = vue.reactive({ sessionVersion: 1 })
+  const page = researchPage({ getVocabularyApi: () => pending.promise }, user)
+  const reading = page.openVocabulary()
+  user.sessionVersion++
+  await vue.nextTick()
+  pending.resolve({ revision: 1, entries: [] })
+  await reading
+  assert.equal(page.vocabularyOpened.value, false)
+})
+
+test("词库读取保留最新草稿，关闭和卸载后不接收迟到响应", async () => {
+  const pending: ReturnType<typeof Promise.withResolvers<any>>[] = []
+  let unmount = () => {}
+  const page = researchPage({ getVocabularyApi: () => {
+    const value = Promise.withResolvers<any>()
+    pending.push(value)
+    return value.promise
+  } }, undefined, { onBeforeUnmount: (fn: () => void) => unmount = fn })
+  const first = page.openVocabulary()
+  const second = page.openVocabulary()
+  pending[1].resolve({ revision: 2, entries: [{ canonical: "新词", aliases: [] }] })
+  await second
+  page.vocabulary.value.entries[0].canonical = "编辑草稿"
+  pending[0].resolve({ revision: 1, entries: [] })
+  await first
+  assert.equal(page.vocabulary.value.revision, 2)
+  assert.equal(page.vocabulary.value.entries[0].canonical, "编辑草稿")
+  const closed = page.openVocabulary()
+  page.vocabularyOpened.value = false
+  await vue.nextTick()
+  pending[2].resolve({ revision: 3, entries: [] })
+  await closed
+  assert.equal(page.vocabularyOpened.value, false)
+  const disposed = page.openVocabulary()
+  unmount()
+  pending[3].resolve({ revision: 4, entries: [] })
+  await disposed
+  assert.notEqual(page.vocabulary.value.revision, 4)
+  await page.openVocabulary()
+  assert.equal(pending.length, 4)
+})
+
+test("词库读取失败允许重试，未读取完成不能保存", async () => {
+  const pending = Promise.withResolvers<any>()
+  let reads = 0
+  let writes = 0
+  const page = researchPage({
+    getVocabularyApi: () => {
+      reads++
+      if (reads === 1) return pending.promise
+      return Promise.resolve({ revision: 2, entries: [] })
+    },
+    saveVocabularyApi: async () => {
+      writes++
+    }
+  })
+  const reading = page.openVocabulary()
+  await page.saveVocabulary()
+  assert.equal(writes, 0)
+  pending.reject(new Error("unavailable"))
+  await reading
+  assert.equal(page.vocabularyError.value, true)
+  assert.equal(page.vocabularyLoading.value, false)
+  await page.saveVocabulary()
+  assert.equal(writes, 0)
+  await page.openVocabulary()
+  assert.equal(page.vocabulary.value.revision, 2)
+  assert.equal(page.vocabularyError.value, false)
+})
+
+test("词库保存拒绝重复提交，关闭后的响应不覆盖草稿，失败保留编辑", async () => {
+  const pending = Promise.withResolvers<any>()
+  let reads = 0
+  let writes = 0
+  const page = researchPage({
+    getVocabularyApi: async () => ({ revision: ++reads, entries: [{ canonical: "词条", aliases: [] }] }),
+    saveVocabularyApi: () => {
+      writes++
+      if (writes === 1) return pending.promise
+      return Promise.reject(new Error("conflict"))
+    }
+  })
+  await page.openVocabulary()
+  const saving = page.saveVocabulary()
+  await page.saveVocabulary()
+  assert.equal(writes, 1)
+  page.vocabularyOpened.value = false
+  await vue.nextTick()
+  await page.openVocabulary()
+  assert.equal(reads, 1)
+  page.vocabulary.value.entries[0].canonical = "保留草稿"
+  pending.resolve({ revision: 2, entries: [] })
+  await saving
+  assert.equal(page.vocabularyOpened.value, false)
+  assert.equal(page.vocabulary.value.entries[0].canonical, "保留草稿")
+  assert.equal(page.vocabularyBusy.value, false)
+  await page.openVocabulary()
+  page.vocabulary.value.entries[0].canonical = "失败草稿"
+  await assert.rejects(page.saveVocabulary(), /conflict/)
+  assert.equal(page.vocabulary.value.entries[0].canonical, "失败草稿")
+  assert.equal(page.vocabularyOpened.value, true)
+  assert.equal(page.vocabularyBusy.value, false)
 })

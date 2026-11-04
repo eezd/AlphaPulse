@@ -6,9 +6,6 @@ import { useUserStore } from "@/pinia/stores/user"
 
 const emit = defineEmits<{ package: [id: number] }>()
 const user = useUserStore()
-const items = ref<Risk.NewsEvent[]>([])
-const total = ref(0)
-const page = ref(1)
 const detail = ref<Risk.EventDetail | null>(null)
 const opened = ref(false)
 const detailError = ref(false)
@@ -53,10 +50,8 @@ async function load() {
   const seq = ++sequence
   const version = user.sessionVersion
   try {
-    const [events, runs] = await Promise.all([api.listNewsEventsApi(page.value), api.listReprocessApi()])
+    const runs = await api.listReprocessApi()
     if (!active || seq !== sequence || version !== user.sessionVersion) return
-    items.value = events.items
-    total.value = events.total
     jobs.value = runs
     error.value = false
     if (batchId.value && !batchLoading.value) await openBatch(batchId.value, batchPage.value)
@@ -119,7 +114,6 @@ async function action(id: number, retry: boolean) {
 watch([range, modes], () => {
   preview.value = null
 })
-watch(page, load)
 watch(() => user.sessionVersion, () => {
   batchSequence++
   sequence++
@@ -127,7 +121,6 @@ watch(() => user.sessionVersion, () => {
   operation++
   busy.value = false
   detailError.value = false
-  items.value = []
   jobs.value = []
   batch.value = null
   batchId.value = 0
@@ -160,25 +153,12 @@ defineExpose({ open })
 <template>
   <el-card shadow="never">
     <template #header>
-      事件与时间线
+      AI 历史回补
     </template>
     <el-alert v-if="error" title="事件读取失败，可重试" type="warning" :closable="false" />
     <el-button link @click="load">
       刷新
     </el-button>
-    <div v-for="event in items" :key="event.id" class="my-3">
-      <el-button link @click="open(event.id)">
-        {{ event.title }}
-      </el-button>
-      <p>{{ event.result?.summary || '正在整理组成包的时间线' }}</p>
-      <p v-if="event.result">
-        重要性 {{ event.result.importance_stars }} 星 · 风险 {{ event.result.risk_stars }}X
-      </p>
-      <p v-if="event.error">
-        更新失败：{{ event.error }}；保留上一成功版本
-      </p>
-    </div>
-    <el-pagination v-model:current-page="page" :total="total" :page-size="20" layout="prev, pager, next" />
     <details class="mt-4">
       <summary>AI 历史回补</summary>
       <p>按新闻发布时间选择范围，使用现存最新修订。不会还原历史时点；共享包和事件可能同时更新。AI 暂停时任务等待。</p>
@@ -223,7 +203,7 @@ defineExpose({ open })
           成功 {{ job.counts.done ?? 0 }} · 处理中 {{ job.counts.processing ?? 0 }} · 待处理 {{ job.counts.pending ?? 0 }} · 失败 {{ job.counts.failed ?? 0 }} · 跳过 {{ job.counts.skipped ?? 0 }}
         </p>
         <p v-for="(counts, stage) in job.stages" :key="stage">
-          {{ stage === 'analysis' ? '包研判' : '事件时间线' }}：待处理 {{ counts.pending ?? 0 }} · 运行 {{ counts.processing ?? 0 }} · 完成 {{ counts.done ?? 0 }} · 失败 {{ counts.failed ?? 0 }}
+          {{ stage === 'analysis' ? '事件研判' : '事件研判' }}：待处理 {{ counts.pending ?? 0 }} · 运行 {{ counts.processing ?? 0 }} · 完成 {{ counts.done ?? 0 }} · 失败 {{ counts.failed ?? 0 }}
         </p>
         <el-button link @click="openBatch(job.id)">
           查看新闻明细
@@ -235,7 +215,7 @@ defineExpose({ open })
           重试失败项
         </el-button>
         <p v-for="failure in job.failures" :key="`${failure.stage}:${failure.id}`">
-          {{ ({ grouping: "新闻初筛", analysis: "包研判", events: "事件时间线", outlook: "阅读编排" })[failure.stage] }} #{{ failure.id }}：{{ failure.error }}
+          {{ ({ grouping: "新闻初筛", analysis: "事件研判", events: "事件研判", outlook: "阅读编排" })[failure.stage] }} #{{ failure.id }}：{{ failure.error }}
         </p>
       </div>
       <div v-if="batchId">
@@ -251,7 +231,7 @@ defineExpose({ open })
       </div>
     </details>
   </el-card>
-  <el-drawer v-model="opened" title="事件发展时间线" size="min(760px, 100vw)">
+  <el-drawer v-model="opened" title="事件研判与时间线" size="min(760px, 100vw)">
     <el-alert v-if="detailError" title="事件详情读取失败" type="warning" :closable="false" />
     <el-button v-if="detailError" @click="open(detailId)">
       重试
@@ -269,6 +249,7 @@ defineExpose({ open })
           {{ ref.quote }}
         </blockquote>
       </div>
+      <p>事实：{{ detail.result?.facts }}</p><p>市场影响：{{ detail.result?.asset_impacts }}</p><p>判断依据：{{ detail.result?.reasoning }}</p>
       <p>反证：{{ detail.result?.counter_evidence }}</p><p>不确定性：{{ detail.result?.uncertainty }}</p><p>意见：{{ detail.result?.opinions }}</p><p>关注：{{ detail.result?.watchpoints }}</p>
       <p>组成包</p>
       <div v-for="item in detail.packages" :key="item.id">
@@ -276,10 +257,15 @@ defineExpose({ open })
           {{ item.title }}
         </el-button>
       </div>
+      <p>核验记录</p>
+      <details v-for="record in detail.evidence" :key="record.id">
+        <summary>证据 #{{ record.id }} · {{ formatTime(record.fetched_at) }}</summary>
+        <pre class="whitespace-pre-wrap break-all">{{ record.data }}</pre>
+      </details>
       <p>版本历史</p>
       <details v-for="version in detail.versions" :key="version.id" class="my-2">
         <summary>v{{ version.revision }} · {{ version.state }} {{ version.error }}</summary>
-        <p>{{ version.result?.summary }}</p>
+        <p>{{ version.result?.summary }}</p><pre class="whitespace-pre-wrap break-all">{{ version.usage }}</pre>
         <p v-for="(point, index) in version.result?.timeline_points" :key="index">
           {{ point.time_text }} · {{ point.description }} · 包 #{{ point.package_id }} v{{ point.package_revision }}
         </p>

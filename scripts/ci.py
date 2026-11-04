@@ -181,11 +181,7 @@ def smoke(build, label):
         wait_command('docker', 'exec', names['api'], 'python', '-c',
                      'import urllib.request; urllib.request.urlopen("http://localhost:8000/api/health", timeout=3)')
         print(run('docker', 'exec', '-i', names['api'], 'python', '-',
-                  input=(ROOT / 'scripts/smoke_risk.py').read_text()), flush=True)
-        print(run('docker', 'exec', '-i', names['api'], 'python', '-',
-                  input=(ROOT / 'scripts/smoke_events.py').read_text()), flush=True)
-        print(run('docker', 'exec', '-i', names['api'], 'python', '-',
-                  input=(ROOT / 'scripts/smoke_backfill.py').read_text()), flush=True)
+                  input=(ROOT / 'scripts/smoke_news_research.py').read_text()), flush=True)
         print(run('docker', 'exec', '-i', names['api'], 'python', '-',
                   input=(ROOT / 'scripts/smoke_calendar.py').read_text()), flush=True)
         output = run('docker', 'exec', '-i', '-e', 'SMOKE_WEB=' + names['web'], names['api'], 'python', '-',

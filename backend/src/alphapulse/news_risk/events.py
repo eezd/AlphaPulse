@@ -56,11 +56,12 @@ def validate_timeline(result, packages):
 async def dirty_event(session, package_id, review_config=None):
     membership = await session.get(EventMember, package_id)
     if membership:
-        event = await session.get(NewsEvent, membership.event_id, with_for_update=True)
-        event.revision += 1
+        from alphapulse.news_risk.event_research import schedule
+        event = await session.get(NewsEvent, membership.event_id, with_for_update=True, populate_existing=True)
+        if event is None or event.state == 'retired':
+            raise ValueError('所属事件已失效')
+        schedule(event, datetime.now(UTC))
         event.review_config = review_config
-        event.state = 'pending'
-        event.due_at = datetime.now(UTC)+timedelta(seconds=60)
         if review_config and review_config.get('request'):
             from alphapulse.news_risk.backfill import target
             await target(session, review_config['job_id'], 'events', event)
@@ -168,20 +169,9 @@ async def organize(target_id=None):
 
 
 async def reading_inputs(session, cutoff):
-    packages = (await session.scalars(select(NewsSummary).where(func.jsonb_typeof(NewsSummary.result) == 'object', NewsSummary.replacement_ids == [], NewsSummary.state != 'withdrawn'))).all()
-    memberships = {m.package_id: m.event_id for m in (await session.scalars(select(EventMember))).all()}
-    events = {e.id: e for e in (await session.scalars(select(NewsEvent).where(func.jsonb_typeof(NewsEvent.result) == 'object', NewsEvent.state != 'retired'))).all()}
-    inputs, included = [], set()
-    for package in packages:
-        if package.updated_at < cutoff: continue
-        event = events.get(memberships.get(package.id))
-        if event and package.id in {point['package_id'] for point in event.result['timeline_points']}:
-            if event.id in included: continue
-            included.add(event.id)
-            importance = max(event.result['importance_stars'], *(p.importance_stars for p in packages if memberships.get(p.id) == event.id and p.updated_at >= cutoff))
-            inputs.append({'kind': 'event', 'id': event.id, 'revision': event.published_revision, 'importance_stars': importance,
-                'updated_at': event.updated_at.isoformat(), 'category': event.result['category'], 'tags': [], 'result': event.result})
-        else:
-            inputs.append({'kind': 'package', 'id': package.id, 'revision': package.published_revision, 'importance_stars': package.importance_stars,
-                'updated_at': package.updated_at.isoformat(), 'category': package.category, 'tags': package.tags, 'result': package.result})
-    return inputs
+    rows = (await session.scalars(select(NewsEvent).where(
+        func.jsonb_typeof(NewsEvent.result) == 'object', NewsEvent.state != 'retired',
+        NewsEvent.published_revision == NewsEvent.revision, NewsEvent.updated_at >= cutoff).execution_options(populate_existing=True))).all()
+    return [{'kind':'event','id':e.id,'revision':e.published_revision,
+        'importance_stars':e.result['importance_stars'], 'updated_at':e.updated_at.isoformat(),
+        'category':e.result['category'],'tags':e.tags,'result':e.result} for e in rows]

@@ -16,7 +16,8 @@ async def classification(session, news):
     article = await session.scalar(select(ArticleAnalysis).where(ArticleAnalysis.news_id == news.id, ArticleAnalysis.content_hash == news.content_hash))
     packages = [] if article is None else (await session.scalars(select(NewsSummary).join(SummaryArticle).where(
         SummaryArticle.analysis_id == article.id, SummaryArticle.active.is_(True), NewsSummary.replacement_ids == [], NewsSummary.state != 'withdrawn'))).all()
-    complete = bool(article and article.result and packages and all(p.result and p.published_revision == p.revision for p in packages))
+    events = (await session.scalars(select(NewsEvent).join(EventMember).where(EventMember.package_id.in_([p.id for p in packages])))).all()
+    complete = bool(article and article.result and packages and len(events)==len(packages) and all(e.result and e.state=='done' and e.published_revision==e.revision for e in events))
     return complete, article, packages
 
 
@@ -24,8 +25,9 @@ async def preview(session, start, end, modes, selection="range"):
     linked = select(NewsSummary.id).join(SummaryArticle).where(
         SummaryArticle.analysis_id == ArticleAnalysis.id, SummaryArticle.active.is_(True),
         NewsSummary.replacement_ids == [], NewsSummary.state != 'withdrawn')
-    incomplete = linked.where(or_(NewsSummary.result.is_(None), func.jsonb_typeof(NewsSummary.result) == 'null',
-        NewsSummary.published_revision != NewsSummary.revision))
+    finished_event = exists(select(NewsEvent.id).join(EventMember).where(EventMember.package_id==NewsSummary.id,
+        NewsEvent.state=='done', func.jsonb_typeof(NewsEvent.result)=='object', NewsEvent.published_revision==NewsEvent.revision))
+    incomplete = linked.where(~finished_event)
     complete = exists(select(ArticleAnalysis.id).where(ArticleAnalysis.news_id == NewsItem.id,
         ArticleAnalysis.content_hash == NewsItem.content_hash, ArticleAnalysis.result.is_not(None),
         func.jsonb_typeof(ArticleAnalysis.result) != 'null', exists(linked), ~exists(incomplete)))
@@ -129,15 +131,18 @@ async def process(identifier):
             news = await session.get(NewsItem,news_id,populate_existing=True)
             if news.content_hash != content_hash: raise ValueError('原文版本变化，请重新预览范围')
             _, _, packages = await classification(session,news)
-            for package in packages:
-                if package.result and package.published_revision == package.revision and mode == 'missing': continue
+            event_ids = set(await session.scalars(select(EventMember.event_id).where(EventMember.package_id.in_([p.id for p in packages]))))
+            for event_id in sorted(event_ids):
+                event = await session.get(NewsEvent,event_id,with_for_update=True)
+                if event.result and event.published_revision==event.revision and mode=='missing': continue
                 previous = await session.scalar(select(ReprocessTarget).where(ReprocessTarget.job_id==job.id,
-                    ReprocessTarget.kind=='analysis',ReprocessTarget.object_id==package.id))
-                if previous is None or package.revision > previous.revision:
-                    if package.state not in ('pending','processing'):
-                        worker.schedule(package,datetime.now(UTC),True)
-                    package.review_config = job.settings
-                    await target(session,job.id,'analysis',package)
+                    ReprocessTarget.kind=='events',ReprocessTarget.object_id==event.id))
+                if previous is None or event.revision > previous.revision:
+                    if event.state not in ('pending','processing'):
+                        from alphapulse.news_risk.event_research import schedule
+                        schedule(event,datetime.now(UTC),True)
+                    event.review_config = job.settings
+                    await target(session,job.id,'events',event)
             item = await session.get(ReprocessItem, identifier, populate_existing=True)
             item.state = 'done'; item.finished_at = datetime.now(UTC)
             await session.commit()
@@ -157,45 +162,11 @@ async def reconcile(session, job):
     failures = [{'stage':'grouping','id':i.news_id,'error':i.error} for i in items if i.state=='failed']
     waiting = False
     for row in targets:
-        obj = await session.get(NewsSummary if row.kind=='analysis' else NewsEvent,row.object_id)
-        if obj is None: continue
-        if row.kind=='analysis' and (obj.replacement_ids or obj.state=='withdrawn'):
-            for replacement in obj.replacement_ids:
-                linked=await session.get(NewsSummary,replacement)
-                await target(session,job.id,'analysis',linked)
-            if obj.replacement_ids:
-                await session.delete(row); waiting=True
-            continue
-        if obj.state=='retired': continue
-        if row.kind == 'events' and job.settings.get('request', {}).get('run_mode') == 'history_only':
-            # Retry busy members next pass instead of blocking their publication.
-            dependencies = (await session.scalars(select(NewsSummary).join(EventMember).where(
-                EventMember.event_id == obj.id, NewsSummary.replacement_ids == [], NewsSummary.state != 'withdrawn',
-                or_(NewsSummary.state != 'done', NewsSummary.result.is_(None), func.jsonb_typeof(NewsSummary.result) == 'null',
-                    NewsSummary.published_revision < NewsSummary.revision)).order_by(NewsSummary.id)
-                .with_for_update(of=NewsSummary, skip_locked=True))).all()
-            for package in dependencies:
-                # Only unfinished members of this event join the frozen batch.
-                package.review_config = job.settings
-                if package.state == 'done':
-                    from alphapulse.news_risk.worker import schedule
-                    schedule(package, datetime.now(UTC), True)
-                if package.state == 'pending': package.due_at = datetime.now(UTC)
-                await target(session, job.id, 'analysis', package)
-                if package.state == 'failed': failures.append({'stage':'analysis','id':package.id,'error':package.error})
-                else: waiting = True
-        if obj.state=='failed': failures.append({'stage':row.kind,'id':obj.id,'error':obj.error})
-        elif row.kind == 'events' and await session.scalar(select(NewsSummary.id).join(EventMember).where(
-            EventMember.event_id == obj.id, NewsSummary.state == 'failed', NewsSummary.replacement_ids == []).limit(1)):
-            failures.append({'stage':'events','id':obj.id,'error':'组成包研判失败，请先重试失败包'})
-        elif obj.state not in ('done','retired') or obj.published_revision < row.revision: waiting=True
-        if row.kind=='analysis':
-            membership=await session.get(EventMember,obj.id)
-            if membership:
-                event=await session.get(NewsEvent,membership.event_id)
-                await target(session,job.id,'events',event)
-                if not any(t.kind=='events' and t.object_id==event.id for t in targets): waiting=True
-                if event.state=='failed': failures.append({'stage':'events','id':event.id,'error':event.error})
+        if row.kind != 'events': continue
+        obj = await session.get(NewsEvent,row.object_id)
+        if obj is None or obj.state=='retired': continue
+        if obj.state=='failed': failures.append({'stage':'events','id':obj.id,'error':obj.error})
+        elif obj.state!='done' or obj.published_revision < row.revision: waiting=True
     if waiting: await session.commit(); return
     if not failures and job.settings.get('request', {}).get('run_mode') == 'history_only':
         from alphapulse.models.risk import RiskSnapshot

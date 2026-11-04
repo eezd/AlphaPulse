@@ -54,7 +54,7 @@ def test_unrelated_validation_does_not_retry(trading, monkeypatch):
     calls = []
     async def stream(*args):
         calls.append(args)
-        yield Completion(tool_calls=[{'id': '1', 'name': 'submit', 'arguments': {}}], usage={'output_tokens': 4})
+        yield Completion(tool_calls=[{'id': '1', 'name': 'submit', 'arguments': {'timeline_points': 'invalid'}}], usage={'output_tokens': 4})
     monkeypatch.setattr(service.llm, 'stream', stream)
     provider = SimpleNamespace(model='synthetic', reasoning_effort='low', max_tokens=100, context_window=200000)
     with pytest.raises(service.SubmissionFailure):
@@ -135,3 +135,29 @@ def test_summary_keeps_extraction_usage_when_compaction_fails(trading, monkeypat
     with pytest.raises(service.SubmissionFailure) as error:
         asyncio.run(pipeline.summarize_articles(SimpleNamespace(), 'rules', [], {'id': 1}))
     assert usage_tokens(error.value.usage) == 579
+
+
+@pytest.mark.parametrize('error_kind', ['missing', 'extra'])
+def test_structural_repair_submits_full_result_once(trading, monkeypatch, error_kind):
+    from pydantic import ConfigDict
+    from alphapulse.news_risk import service
+    from alphapulse.ai.llm import Completion
+    class Category(BaseModel):
+        model_config = ConfigDict(extra='forbid')
+        category: str
+    calls = []
+    async def stream(provider, system, messages, tools, effort):
+        calls.append(messages)
+        args = ({'category': '能源'} if error_kind == 'extra' else {}) if len(calls) == 1 else {'category': '能源'}
+        if len(calls) == 1 and error_kind == 'extra': args['wrong_level'] = 'reason'
+        yield Completion(tool_calls=[{'id': str(len(calls)), 'name': 'submit', 'arguments': args}], usage={'input_tokens': 7})
+    monkeypatch.setattr(service.llm, 'stream', stream)
+    provider = SimpleNamespace(model='synthetic', reasoning_effort='max', max_tokens=100, context_window=200000)
+    result, usage = asyncio.run(service.complete(provider, 'rules', {}, Category))
+    assert result.category == '能源' and len(calls) == 2
+    assert len(usage['rounds']) == 2
+    assert 'errors' in calls[1][-1]['result']
+    calls.clear()
+    with pytest.raises(service.SubmissionFailure):
+        asyncio.run(service.complete(provider, 'rules', {'correction': 'already corrected'}, Category))
+    assert len(calls) == 1

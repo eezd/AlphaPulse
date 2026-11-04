@@ -1,18 +1,15 @@
-"""Exercise event aggregation and correction transactions in the disposable CI DB."""
+"""Exercise atomic event and fact-package corrections in a disposable database."""
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 import os
-from types import SimpleNamespace
-from unittest.mock import patch
 from urllib.parse import urlparse
-import httpx
-from fastapi import FastAPI
-from sqlalchemy import select, func, delete, null
+from sqlalchemy import select, delete, func
 from alphapulse.core.db import SessionLocal, engine
-from alphapulse.models import AiProvider, NewsItem, SkillNode, SkillVersion
-from alphapulse.models.risk import NewsSummary, ArticleAnalysis, SummaryArticle, RiskSettings, NewsEvent, EventMember, EventVersion, ReprocessJob, PackageCorrection, GroupingVersion, SummaryVersion, PackageEvidence, RiskSnapshot, EventLink
-from alphapulse.ai.skills import create_node, add_version
-from alphapulse.news_risk import pipeline, events, reprocess, worker, briefing
+from alphapulse.models import NewsItem
+from alphapulse.models.risk import (NewsSummary, ArticleAnalysis, SummaryArticle, NewsEvent, EventMember,
+    EventCorrectionRecord, PackageCorrection, EventVersion, SummaryVersion)
+from alphapulse.news_risk import event_research, pipeline
+from alphapulse.news_risk.research import Research
 from alphapulse.news_risk.contracts import Correction
 from alphapulse.news_risk.corrections import apply_correction
 
@@ -20,232 +17,70 @@ from alphapulse.news_risk.corrections import apply_correction
 async def main():
     url=urlparse(os.environ['DATABASE_URL'])
     assert url.username=='ci' and url.password=='ci-only' and url.path=='/ci'
-    now=datetime.now(UTC)
-    async with SessionLocal() as session:
-        assert await session.scalar(select(func.count()).select_from(RiskSettings))==0
-        provider=AiProvider(name='event-ci',protocol='openai',base_url='https://example.invalid',api_key_encrypted=b'fake',api_key_hint='fake',model='shared',max_tokens=8192,context_window=200000)
-        session.add(provider); await session.flush()
-        ids={}
-        for role,(name,content) in pipeline.TEMPLATES.items():
-            node=await create_node(session,None,'skill',name,scope='news')
-            version=await add_version(session,node,content,'user','CI'); node.published_version_id=version.id
-            ids[role+'_skill_id']=node.id
-        settings=RiskSettings(id=1,enabled=True,start_at=now-timedelta(minutes=5),provider_id=provider.id,second_provider_id=provider.id,third_provider_id=provider.id,model='luna',second_model='reviewer',third_model='senior',**ids)
-        session.add(settings)
-        packages=[]; analyses=[]
-        for i in (1,2):
-            news=NewsItem(source_code='wscn_news',external_id='ci-event-'+str(i),url='https://example.invalid/'+str(i),title='Incident' if i==1 else 'Response',summary='',content_text='Original evidence '+str(i),content_hash=str(i),published_at=now)
-            session.add(news); await session.flush()
-            analysis=ArticleAnalysis(news_id=news.id,content_hash=news.content_hash,state='done',result={'previous':True},input={'title':news.title,'summary':'','content':news.content_text,'url':news.url,'source':'wscn_news','revision_no':1,'published_at':now.isoformat(),'progress_at':now.isoformat()})
-            session.add(analysis); await session.flush(); analyses.append(analysis)
-            result={'title':news.title,'summary':news.title,'importance_stars':4,'risk_stars':3,'category':'security','evidence_refs':[{'article_id':analysis.id,'quote':news.content_text}],'claims':[]}
-            package=NewsSummary(title=news.title,fact=news.title,category='security',tags=['exchange'],entities=['Exchange'],content_kind='report',published_at=now,updated_at=now,changed_at=now,due_at=now,state='done',revision=1,published_revision=1,result=result,importance_stars=4)
-            session.add(package); await session.flush(); packages.append(package)
-            session.add(SummaryArticle(summary_id=package.id,analysis_id=analysis.id,active=True,unit={'fact':news.title,'evidence':news.content_text}))
-        await session.flush()
-        result=SimpleNamespace(related_events=[],event_proposal=pipeline.EventProposal(title='Exchange incident',package_ids=[packages[0].id],reason='Official response to the same incident'))
-        await events.associate(session,packages[1],result,{packages[0].id})
-        event=await session.scalar(select(NewsEvent)); event.due_at=now
-        package_ids=[p.id for p in packages]; event_id=event.id
-        withdrawn = NewsSummary(title='Withdrawn',fact='Withdrawn',category='security',tags=['exchange'],entities=[],
-            content_kind='report',published_at=now,updated_at=now,changed_at=now,due_at=now,state='withdrawn',revision=1,published_revision=0)
-        session.add(withdrawn); await session.flush()
-        session.add(EventMember(package_id=withdrawn.id,event_id=event_id,reason='Previous member'))
-        await session.commit()
-    async with SessionLocal() as session:
-        nested = await session.begin_nested()
-        await session.execute(NewsEvent.__table__.update().where(NewsEvent.id == event_id).values(result=None))
-        await session.execute(NewsSummary.__table__.update().where(NewsSummary.id.in_(package_ids)).values(state='pending'))
-        for empty in (None, null()):
-            session.add(NewsSummary(title='Unreviewed',fact='Pending',category='security',entities=[],
-                published_at=now,updated_at=now,changed_at=now,due_at=now,state='pending',result=empty))
-            session.add(NewsEvent(title='Unreviewed',updated_at=now,due_at=now,state='pending',result=empty))
-        for empty in (None, null(), {'inputs':None}):
-            session.add(RiskSnapshot(state='done',result=empty,quotes={},model='synthetic'))
-        await session.flush()
-        inputs = await events.reading_inputs(session,now-timedelta(hours=72))
-        assert len(briefing.semantic_packages(inputs)) == 2
-        assert {(p['kind'],p['id']) for p in inputs} == {('package',i) for i in package_ids}
-        from alphapulse.api import risk as api
-        app = FastAPI()
-        app.include_router(api.router)
-        app.dependency_overrides[api.require_admin] = lambda: None
-        app.dependency_overrides[api.get_session] = lambda: session
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app),base_url='http://ci') as client:
-            for hours in (24,48,72,168):
-                response = await client.get('/api/risk/overview',params={'hours':hours})
-                assert response.status_code == 200, response.text
-                data = response.json()['data']
-                assert data['briefing'] is None and data['stale']
-                assert sum(data['counts'].values()) == 2
-            response = await client.get('/api/risk/summaries')
-            assert response.status_code == 200, response.text
-            data = response.json()['data']
-            assert data['total'] == 2 and {p['id'] for p in data['items']} == set(package_ids)
-        await nested.rollback()
-        print('Reading API: SQL NULL and JSON null results excluded; pending events preserve independent packages')
-    async def complete(provider,system,payload,schema):
-        points=[]
-        for p in payload['packages']:
-            points.append(events.TimelinePoint(occurred_at=None,time_precision='unknown',time_text='Time unknown',reported_at=now,description=p['result']['summary'],verification='partial',package_id=p['id'],package_revision=p['revision'],evidence_refs=p['result']['evidence_refs']))
-        return schema(title='Exchange incident',summary='Disclosure followed by response',category='security',importance_stars=4,risk_stars=3,uncertainty='Time unknown',opinions='Wait',counter_evidence='Unknown',watchpoints='Investigation',timeline_points=points),{}
-    with patch.object(events,'complete',complete):
-        await events.organize()
-        await events.organize()
-    async with SessionLocal() as session:
-        event=await session.get(NewsEvent,event_id)
-        assert event.state=='done' and len(event.result['timeline_points'])==2
-        inputs=await events.reading_inputs(session,now-timedelta(hours=72))
-        assert len(inputs)==1 and inputs[0]['kind']=='event'
-        assert await session.scalar(select(func.count()).select_from(EventVersion))==1
-        counts,_=await reprocess.preview(session,now-timedelta(seconds=1),now+timedelta(seconds=1))
-        assert counts=={'articles':2,'packages':2,'events':1}
-        started=await reprocess.start_job(session,now-timedelta(seconds=1),now+timedelta(seconds=1))
-        job=await session.get(ReprocessJob,started['id'])
-        assert len(job.items)==2
-        provider=await session.get(AiProvider,provider.id); provider.model='changed'; await session.commit()
-        frozen,_,_=await reprocess.frozen_configuration(session,job.settings,'grouping')
-        assert frozen.model=='luna'
-        job_id = job.id
-        await session.commit()
-    async with SessionLocal() as session:
-        event = await session.get(NewsEvent, event_id)
-        event.state = 'pending'; event.revision += 1; event.due_at = now
-        published = event.published_revision
-        await session.commit()
-    async def change_during_timeline(*args):
+    now=datetime.now(UTC); packages=[]; events=[]; news_ids=[]
+    try:
         async with SessionLocal() as session:
-            package = await session.get(NewsSummary, package_ids[0])
-            worker.schedule(package, now, True)
+            for i in (1,2):
+                news=NewsItem(source_code='wscn_news',external_id='ci-event-'+str(i),url='https://example.invalid/'+str(i),
+                    title='Incident '+str(i),summary='',content_text='Original '+str(i),content_hash=str(i),published_at=now)
+                session.add(news); await session.flush(); news_ids.append(news.id)
+                analysis=ArticleAnalysis(news_id=news.id,content_hash=news.content_hash,state='done',input={
+                    'title':news.title,'content':news.content_text,'published_at':now.isoformat(),'progress_at':now.isoformat()})
+                session.add(analysis); await session.flush()
+                package=NewsSummary(title=news.title,fact=news.title,category='安全',tags=['exchange'],entities=[],
+                    published_at=now,updated_at=now,changed_at=now,due_at=now,revision=1,state='done')
+                session.add(package); await session.flush(); packages.append(package.id)
+                session.add(SummaryArticle(summary_id=package.id,analysis_id=analysis.id,active=True))
+                await event_research.attach(session,package,pipeline.EventTarget(event_id=None,group_key=str(i),
+                    title=news.title,fact=news.title,reason='Separate until verified'),{},True,False,None)
+                await session.flush()
+                membership=await session.get(EventMember,package.id); events.append(membership.event_id)
             await session.commit()
-        return await complete(*args)
-    with patch.object(events, 'complete', change_during_timeline): await events.organize()
-    async with SessionLocal() as session:
-        event = await session.get(NewsEvent, event_id)
-        assert event.state == 'pending' and event.published_revision == published
-        latest = await session.scalar(select(EventVersion).order_by(EventVersion.id.desc()).limit(1))
-        assert latest.state == 'superseded'
-        package = await session.get(NewsSummary, package_ids[0])
-        package.state = 'done'; package.published_revision = package.revision
-        await session.commit()
-    with patch.object(events, 'complete', complete): await events.organize()
-    analyze = worker.analyze
-    async def pause_before_grouping(*args):
         async with SessionLocal() as session:
-            settings = await session.get(RiskSettings, 1); settings.enabled = False
+            original=[await session.get(NewsEvent,i) for i in events]
+            proposal=event_research.EventCorrection(events=[{'id':e.id,'revision':e.revision} for e in original],
+                replacements=[{'keep_id':min(events),'title':'Same concrete incident','fact':'Disclosure and response',
+                    'package_ids':packages,'reason':'Explicit response to disclosure'}],reason='Verified common event')
+            research=Research(); research.read_event_ids={max(events)}; research.read_event_versions={max(events):original[1].revision}
+            # No reader ID is enough without the actual version observed by the tool.
+            bad=Research(); bad.read_event_ids={max(events)}
+            try: await event_research.correct(session,proposal,min(events),bad,{})
+            except ValueError as error: assert '实际读取' in str(error)
+            else: raise AssertionError('Unobserved correction version accepted')
+            await event_research.correct(session,proposal,min(events),research,{})
             await session.commit()
-        return await analyze(*args)
-    with patch.object(worker, 'analyze', pause_before_grouping): await reprocess.process_job()
-    async with SessionLocal() as session:
-        job = await session.get(ReprocessJob, job_id)
-        assert job.position == 0 and not job.failures
-        assert (await session.get(ArticleAnalysis, analyses[0].id)).result == {'previous':True}
-        settings = await session.get(RiskSettings, 1); settings.enabled = True
-        await session.commit()
-    async def fail_grouping(*args):
-        from alphapulse.api.risk import reprocess_cancel
-        async with SessionLocal() as other:
-            job = await other.get(ReprocessJob, job_id)
-            if job.state != 'cancelled': await reprocess_cancel(job_id, other)
-        raise ValueError('Synthetic grouping failure during cancellation')
-    with patch.object(worker, 'complete', fail_grouping): await reprocess.process_job()
-    async with SessionLocal() as session:
-        job = await session.get(ReprocessJob, job_id)
-        assert job.state == 'cancelled' and job.position == 1 and len(job.failures) == 1
-        old = await session.get(ArticleAnalysis, analyses[0].id)
-        assert old.result == {'previous':True} and old.state == 'done' and old.error
-        assert await session.scalar(select(func.count()).select_from(SummaryArticle).where(SummaryArticle.active.is_(True))) == 2
-        assert await session.scalar(select(func.count()).select_from(GroupingVersion).where(GroupingVersion.state == 'failed')) == 1
-        second = await reprocess.start_job(session, now-timedelta(seconds=1), now+timedelta(seconds=1))
-        job = await session.get(ReprocessJob, second['id'])
-        job.state = 'running'; job.position = len(job.items)
-        package = await session.get(NewsSummary, package_ids[0])
-        package.review_config = job.settings; package.state = 'failed'; package.error = 'Synthetic review failure'
-        await session.commit()
-    await reprocess.process_job()
-    async with SessionLocal() as session:
-        job = await session.get(ReprocessJob, second['id'])
-        assert job.state == 'failed' and job.failures == [{'stage':'analysis','id':package_ids[0],'error':'Synthetic review failure'}]
-        from alphapulse.api.risk import reprocess_retry
-        await reprocess_retry(job.id, session)
-        assert job.position == len(job.items) and job.state == 'running'
-        assert (await session.get(NewsSummary, package_ids[1])).state == 'done'
-        assert (await session.get(NewsSummary, package_ids[0])).state == 'pending'
-        assert await session.scalar(select(func.count()).select_from(GroupingVersion)) == 1
-        job.state = 'cancelled'
-        package = await session.get(NewsSummary, package_ids[0])
-        package.state = 'done'; package.error = None; package.review_config = None
-        news = NewsItem(source_code='wscn_news', external_id='ci-event-repost', url='https://example.invalid/repost',
-            title='Incident', summary='', content_text='Original evidence 1', content_hash='repost', published_at=now)
-        session.add(news); await session.flush()
-        repost = ArticleAnalysis(news_id=news.id, content_hash=news.content_hash, state='pending', input={
-            'title':news.title,'summary':'','content':news.content_text,'url':news.url,'source':'wscn_news',
-            'revision_no':1,'published_at':now.isoformat(),'progress_at':now.isoformat()})
-        session.add(repost); await session.commit(); analyses.append(repost)
-        old_revision, old_progress = package.revision, package.updated_at
-    async def group_repost(provider, system, payload, schema):
-        return schema(reason='Same concrete fact', packages=[dict(package_id=package_ids[0], group_key=None,
-            title='Incident', category='security', entities=['Exchange'], fact='Incident', evidence='Original evidence 1',
-            urgent=False, tags=['exchange'], content_kind='report', change_kind='repost')]), {}
-    with patch.object(worker, 'complete', group_repost): await worker.analyze(repost.id)
-    async with SessionLocal() as session:
-        package = await session.get(NewsSummary, package_ids[0])
-        assert package.revision == old_revision and package.updated_at == old_progress and package.state == 'done'
-        third = await reprocess.start_job(session, now-timedelta(seconds=1), now+timedelta(seconds=1))
-        job = await session.get(ReprocessJob, third['id'])
-        job.state = 'running'; job.position = len(job.items)
-        await session.commit()
-    await reprocess.process_job()
-    async with SessionLocal() as session:
-        assert (await session.get(ReprocessJob, third['id'])).state == 'running'
-    async def senior(provider, system, payload, schema):
-        assert provider.model == 'senior'
-        if schema is briefing.Ranked:
-            return schema(reading=[dict(kind=p['kind'], id=p['id'], revision=p['revision'], priority=80, reason='Synthetic')
-                for p in payload['packages']], notes='Synthetic'), {}
-        trend = briefing.Trend(summary='Unknown', conditions='Unknown', counter_evidence='Unknown', watchpoints='Updates')
-        return schema(summary='Synthetic', market='Unknown', short_term=trend, medium_term=trend, references=[]), {}
-    async def failed_senior(*args): raise ValueError('Synthetic outlook failure')
-    with patch.object(briefing, 'complete', failed_senior): await worker.outlook()
-    await reprocess.process_job()
-    async with SessionLocal() as session:
-        job = await session.get(ReprocessJob, third['id'])
-        assert job.state == 'failed' and len(job.failures) == 1 and job.failures[0]['stage'] == 'outlook'
-        groups_before = await session.scalar(select(func.count()).select_from(GroupingVersion))
-        await reprocess_retry(job.id, session)
-        assert job.position == len(job.items) == 3
-    with patch.object(briefing, 'complete', senior): await worker.outlook()
-    await reprocess.process_job()
-    async with SessionLocal() as session:
-        assert (await session.get(ReprocessJob, third['id'])).state == 'done'
-        assert await session.scalar(select(func.count()).select_from(GroupingVersion)) == groups_before
-        packages=[await session.get(NewsSummary,i) for i in package_ids]
-        proposal=Correction(packages=[{'id':p.id,'revision':p.revision} for p in packages],replacements=[{'keep_id':min(package_ids),'title':'Corrected shared fact','fact':'Same fact','category':'security','tags':['exchange'],'content_kind':'report','assignments':[{'analysis_id':a.id,'evidence':a.input['content']} for a in analyses]}],reason='Synthetic duplicate correction')
-        output=await apply_correction(session,proposal,package_ids[0],{package_ids[1]},{'test':True})
-        await session.commit()
-        assert output==[min(package_ids)]
-        assert (await session.get(NewsSummary,max(package_ids))).replacement_ids==output
-        assert await session.scalar(select(func.count()).select_from(PackageCorrection))==1
-        assert await session.scalar(select(func.count()).select_from(SummaryArticle).where(SummaryArticle.active.is_(True)))==3
-        assert await session.scalar(select(func.count()).select_from(NewsItem).where(NewsItem.external_id.startswith('ci-event-')))==3
-    await events.organize()
-    async with SessionLocal() as session:
-        event=await session.get(NewsEvent,event_id); event.due_at=now; await session.commit()
-    await events.organize()
-    async with SessionLocal() as session:
-        assert (await session.get(NewsEvent,event_id)).state=='retired'
-        assert len(await events.reading_inputs(session,now-timedelta(hours=72)))==1
-    async with SessionLocal() as session:
-        for model in (EventLink, EventVersion, EventMember, NewsEvent, ReprocessJob, PackageCorrection,
-                      GroupingVersion, PackageEvidence, SummaryVersion, SummaryArticle, NewsSummary, ArticleAnalysis, RiskSnapshot, RiskSettings):
-            await session.execute(delete(model))
-        await session.execute(delete(NewsItem).where(NewsItem.external_id.startswith('ci-event-')))
-        await session.execute(delete(AiProvider).where(AiProvider.id == provider.id))
-        await session.execute(SkillNode.__table__.update().where(SkillNode.id.in_(ids.values())).values(published_version_id=None))
-        await session.execute(delete(SkillVersion).where(SkillVersion.skill_id.in_(ids.values())))
-        await session.execute(delete(SkillNode).where(SkillNode.id.in_(ids.values())))
-        await session.commit()
-    await engine.dispose()
-    print('Events: original evidence, independent packages, aggregation, timeline, preview, frozen config and atomic merge history passed')
+            assert (await session.get(NewsEvent,max(events))).state=='retired'
+            assert set(await session.scalars(select(EventMember.event_id)))=={min(events)}
+            assert (await session.get(NewsEvent,min(events))).revision==2
+            assert await session.scalar(select(func.count()).select_from(EventCorrectionRecord))==1
+            current=await session.get(NewsEvent,min(events))
+            split=event_research.EventCorrection(events=[{'id':current.id,'revision':current.revision}],replacements=[
+                {'keep_id':current.id,'title':'One','fact':'One','package_ids':[packages[0]],'reason':'Split'},
+                {'keep_id':None,'title':'Two','fact':'Two','package_ids':[packages[1]],'reason':'Split'}],reason='Repeat evidence')
+            try: await event_research.correct(session,split,current.id,research,{})
+            except ValueError as error: assert '反复拆合' in str(error)
+            else: raise AssertionError('Same-source correction loop accepted')
+            facts=[await session.get(NewsSummary,i) for i in packages]
+            analyses=list(await session.scalars(select(ArticleAnalysis).where(ArticleAnalysis.news_id.in_(news_ids))))
+            correction=Correction(packages=[{'id':p.id,'revision':p.revision} for p in facts],replacements=[{
+                'keep_id':min(packages),'title':'Same fact','fact':'Same fact','category':'安全','tags':['exchange'],'content_kind':'report',
+                'assignments':[{'analysis_id':a.id,'evidence':a.input['content']} for a in analyses]}],reason='Duplicate fact')
+            outputs=await apply_correction(session,correction,min(packages),{max(packages)},{'test':True})
+            await session.commit()
+            assert outputs==[min(packages)]
+            assert (await session.get(NewsSummary,max(packages))).replacement_ids==outputs
+            assert (await session.get(NewsSummary,min(packages))).state=='done'
+            assert (await session.get(NewsEvent,min(events))).state=='pending'
+            assert await session.scalar(select(func.count()).select_from(SummaryVersion))==0
+            assert await session.scalar(select(func.count()).select_from(EventVersion))==0
+            assert await session.scalar(select(func.count()).select_from(NewsItem).where(NewsItem.id.in_(news_ids)))==2
+        print('Corrections: single-package events, observed revisions, full assignment, canonical merge, repeat guard and fact-only package correction passed')
+    finally:
+        async with SessionLocal() as session:
+            for model in (EventCorrectionRecord,PackageCorrection,EventMember,NewsEvent,SummaryArticle,NewsSummary,ArticleAnalysis):
+                await session.execute(delete(model))
+            await session.execute(delete(NewsItem).where(NewsItem.id.in_(news_ids))); await session.commit()
+        await engine.dispose()
+
 
 asyncio.run(main())

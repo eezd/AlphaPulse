@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select, text, func, BigInteger
 from alphapulse.core.db import SessionLocal
 from alphapulse.core.redis import redis
-from alphapulse.models.risk import RiskSettings, NewsSummary, NewsEvent, ArticleAnalysis, ReprocessJob, ReprocessItem
+from alphapulse.models.risk import RiskSettings, NewsEvent, ArticleAnalysis, ReprocessJob, ReprocessItem
 
 logger = logging.getLogger(__name__)
 GATE = 20261102
@@ -42,7 +42,7 @@ class Pool:
 
 
 async def candidate(active, cursor, allow_outlook=True):
-    from alphapulse.news_risk import worker, events, reprocess
+    from alphapulse.news_risk import worker, reprocess
     from alphapulse.models import NewsItem
     async with SessionLocal() as session:
         settings = await session.get(RiskSettings, 1)
@@ -61,12 +61,12 @@ async def candidate(active, cursor, allow_outlook=True):
             if kind == 'history' and identity[1] >= 0:
                 job = await session.get(ReprocessJob, identity[0])
                 history_news.append(job.items[identity[1]]['id'])
-        stages = ('grouping', 'analysis', 'events', 'outlook')
+        stages = ('grouping', 'events', 'outlook')
         for historical in (False, True):
             for offset in range(len(stages)):
                 stage = stages[(cursor + offset) % len(stages)]
                 if historical and stage in ('grouping', 'outlook'): continue
-                if exclusive and (stage == 'grouping' or grouping_open or (stage in ('analysis','events') and not historical)): continue
+                if exclusive and (stage == 'grouping' or grouping_open or (stage == 'events' and not historical)): continue
                 busy = [key[1] for key in active if key[0] == stage]
                 if stage == 'outlook':
                     if not busy and allow_outlook:
@@ -75,9 +75,9 @@ async def candidate(active, cursor, allow_outlook=True):
                         except ValueError:
                             logger.exception('阅读编排配置检查失败')
                             ready = False
-                        if ready: return (stage, 0), worker.outlook, (cursor + offset + 1) % 4
+                        if ready: return (stage, 0), worker.outlook, (cursor + offset + 1) % 3
                     continue
-                model = {'grouping': ArticleAnalysis, 'analysis': NewsSummary, 'events': NewsEvent}[stage]
+                model = {'grouping': ArticleAnalysis, 'events': NewsEvent}[stage]
                 query = select(model.id).where(model.state == 'pending', model.id.not_in(busy))
                 if stage == 'grouping':
                     query = query.join(NewsItem).where(model.content_hash == NewsItem.content_hash, NewsItem.id.not_in(history_news)).order_by(NewsItem.published_at.desc())
@@ -85,16 +85,11 @@ async def candidate(active, cursor, allow_outlook=True):
                     realtime = model.review_config.is_(None) | (func.jsonb_typeof(model.review_config) == 'null')
                     if exclusive: query = query.where(model.review_config['job_id'].astext.cast(BigInteger) == exclusive.id)
                     query = query.where(~realtime if historical else realtime, model.due_at <= datetime.now(UTC)).order_by(model.due_at, model.id)
-                    if stage == 'events':
-                        from alphapulse.models.risk import EventMember
-                        blocked = select(EventMember.event_id).join(NewsSummary, NewsSummary.id == EventMember.package_id).where(
-                            NewsSummary.replacement_ids == [], NewsSummary.state != 'withdrawn',
-                            (NewsSummary.state != 'done') | NewsSummary.result.is_(None))
-                        query = query.where(model.id.not_in(blocked))
                 identifier = await session.scalar(query.limit(1))
                 if identifier is not None:
-                    action = {'grouping': worker.analyze, 'analysis': worker.summarize, 'events': events.organize}[stage]
-                    return (stage, identifier), lambda action=action, identifier=identifier: action(identifier), (cursor + offset + 1) % 4
+                    from alphapulse.news_risk.event_research import review
+                    action = {'grouping': worker.analyze, 'events': review}[stage]
+                    return (stage, identifier), lambda action=action, identifier=identifier: action(identifier), (cursor + offset + 1) % 3
         job = await session.scalar(select(ReprocessJob).where(ReprocessJob.state.in_(['pending', 'running'])).order_by(ReprocessJob.id).limit(1))
         if job and job.settings.get('request'):
             from alphapulse.news_risk.backfill import process
@@ -174,7 +169,7 @@ async def run(lock):
                 for job in jobs:
                     if job.settings.get('request'): await reconcile(session,job)
             now = datetime.now(UTC).isoformat()
-            counts = {stage: sum(k[0] == stage for k in pool.tasks.values()) for stage in ('grouping', 'analysis', 'events', 'outlook', 'history', 'backfill')}
+            counts = {stage: sum(k[0] == stage for k in pool.tasks.values()) for stage in ('grouping', 'events', 'outlook', 'history', 'backfill')}
             try:
                 from alphapulse.news_risk.progress import active
                 await redis.set('ap:risk:active', json.dumps(list(active.values())), ex=15)

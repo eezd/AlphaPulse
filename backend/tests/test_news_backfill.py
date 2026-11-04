@@ -18,9 +18,9 @@ def test_progress_is_scoped_and_removed_on_failure():
 
 
 @pytest.mark.parametrize('published,revisions,expected', [(True,(2,2),True),(True,(1,2),False),(False,(2,2),False)])
-def test_all_current_packages_require_published_results(trading,published,revisions,expected):
+def test_all_member_events_require_published_results(trading,published,revisions,expected):
     from alphapulse.news_risk.backfill import classification
-    package=N(result={'summary':'ok'} if published else None,published_revision=revisions[0],revision=revisions[1])
+    package=N(id=1,state='done',result={'summary':'ok'} if published else None,published_revision=revisions[0],revision=revisions[1])
     session=N(scalar=AsyncMock(return_value=N(id=3,result={'packages':[]})),scalars=AsyncMock(return_value=N(all=lambda:[package])))
     actual,_,_=asyncio.run(classification(session,N(id=1,content_hash='current')))
     assert actual is expected

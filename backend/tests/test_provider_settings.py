@@ -59,7 +59,7 @@ def test_delete_provider_handles_news_risk_reference(trading, monkeypatch, enabl
     from alphapulse.api import settings
     reference = SimpleNamespace(enabled=enabled, provider_id=1, second_provider_id=1, third_provider_id=1)
     provider = SimpleNamespace(id=1, is_default=False)
-    session = SimpleNamespace(scalar=AsyncMock(return_value=reference), delete=AsyncMock(),
+    session = SimpleNamespace(scalar=AsyncMock(side_effect=[None, reference]), delete=AsyncMock(),
         flush=AsyncMock(), commit=AsyncMock())
     monkeypatch.setattr(settings, 'get_provider', AsyncMock(return_value=provider))
     if enabled:
@@ -154,3 +154,14 @@ def test_provider_model_catalog_http_contract(trading, monkeypatch, failure):
             assert response.status_code == ({None: 200, 'unavailable': 502, 'missing': 404}[failure])
             if failure is None: assert response.json()['data'] == ['model-a', 'model-b']
     asyncio.run(check())
+
+
+def test_delete_provider_rejects_two_stage_binding_even_when_paused(trading, monkeypatch):
+    from fastapi import HTTPException
+    from alphapulse.api import settings
+    session=SimpleNamespace(scalar=AsyncMock(return_value=SimpleNamespace(enabled=False)),delete=AsyncMock())
+    monkeypatch.setattr(settings,'get_provider',AsyncMock(return_value=SimpleNamespace(id=1)))
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(settings.delete_provider(1,session))
+    assert error.value.status_code==409
+    session.delete.assert_not_awaited()

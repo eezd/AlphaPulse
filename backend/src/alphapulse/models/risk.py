@@ -156,6 +156,10 @@ class NewsEvent(Base):
     published_revision: Mapped[int] = mapped_column(Integer, default=0)
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     title: Mapped[str] = mapped_column(Text)
+    fact: Mapped[str] = mapped_column(Text, default='', server_default='')
+    category: Mapped[str] = mapped_column(String(64), default='其他', server_default='其他')
+    tags: Mapped[list] = mapped_column(JSONB, default=list, server_default='[]')
+    dirty_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     state: Mapped[str] = mapped_column(String(16), default='pending')
     revision: Mapped[int] = mapped_column(Integer, default=1)
     result: Mapped[dict | None] = mapped_column(JSONB)
@@ -184,6 +188,22 @@ class EventVersion(Base):
     error: Mapped[str | None] = mapped_column(Text)
     usage: Mapped[dict | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class EventEvidence(Base):
+    __tablename__ = 'news_ai_event_evidence'
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    version_id: Mapped[int] = mapped_column(ForeignKey('news_ai_event_versions.id'), index=True)
+    data: Mapped[dict] = mapped_column(JSONB)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class EventCorrectionRecord(Base):
+    __tablename__ = 'news_ai_event_corrections'
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    fingerprint: Mapped[str] = mapped_column(String(64), unique=True)
+    input: Mapped[dict] = mapped_column(JSONB)
+    result: Mapped[dict] = mapped_column(JSONB)
 
 
 class GroupingVersion(Base):

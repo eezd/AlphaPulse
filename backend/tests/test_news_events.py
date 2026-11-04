@@ -41,18 +41,16 @@ def test_reading_distinguishes_event_and_package_with_same_id(trading, monkeypat
     assert {r['kind'] for r in result['reading']}=={'event','package'}
 
 
-def test_members_are_aggregated_once_and_old_independent_package_expires(trading):
+def test_reading_uses_event_rating_and_never_package_fallback(trading):
     from alphapulse.news_risk.events import reading_inputs
     now=datetime.now(UTC)
-    packages=[SimpleNamespace(id=i,updated_at=now if i<3 else now-timedelta(days=4),importance_stars=4,
-        result={'title':str(i)},published_revision=2,category='security',tags=[]) for i in (1,2,3)]
-    event=SimpleNamespace(id=1,updated_at=now,published_revision=2,result={'title':'Incident','importance_stars':2,'category':'security','timeline_points':[{'package_id':i} for i in (1,2)]})
+    event=SimpleNamespace(id=1,updated_at=now,published_revision=2,tags=['security'],
+        result={'title':'Incident','importance_stars':2,'category':'security'})
     session=AsyncMock()
-    values=[packages,[SimpleNamespace(package_id=i,event_id=1) for i in (1,2)],[event]]
-    session.scalars.side_effect=[SimpleNamespace(all=lambda rows=rows:rows) for rows in values]
-    session.scalar.return_value=SimpleNamespace(revision=2)
+    session.scalars.return_value=SimpleNamespace(all=lambda:[event])
     inputs=asyncio.run(reading_inputs(session,now-timedelta(hours=72)))
-    assert len(inputs)==1 and inputs[0]['kind']=='event' and inputs[0]['importance_stars']==4
+    assert len(inputs)==1 and inputs[0]['kind']=='event' and inputs[0]['importance_stars']==2
+    assert session.scalars.await_count==1
 
 
 def test_reprocess_range_requires_order_and_timezone(trading):
@@ -72,18 +70,13 @@ def test_event_timeline_cannot_omit_a_member_or_invent_known_times(trading):
     with pytest.raises(ValueError, match='已核验时间点'): validate_timeline(result,packages[:1])
 
 
-def test_new_member_remains_readable_until_event_represents_it(trading):
+def test_unpublished_events_do_not_emit_independent_packages(trading):
     from alphapulse.news_risk.events import reading_inputs
-    now=datetime.now(UTC)
-    packages=[SimpleNamespace(id=i,updated_at=now,importance_stars=4,result={'title':str(i)},published_revision=1,
-        category='security',tags=[]) for i in (1,2,3)]
-    event=SimpleNamespace(id=1,updated_at=now,published_revision=1,result={'title':'Incident','importance_stars':4,'category':'security',
-        'timeline_points':[{'package_id':1},{'package_id':2}]})
     session=AsyncMock()
-    rows=[packages,[SimpleNamespace(package_id=i,event_id=1) for i in (1,2,3)],[event]]
-    session.scalars.side_effect=[SimpleNamespace(all=lambda rows=rows:rows) for rows in rows]
-    inputs=asyncio.run(reading_inputs(session,now-timedelta(hours=72)))
-    assert [(p['kind'],p['id']) for p in inputs]==[('event',1),('package',3)]
+    session.scalars.return_value=SimpleNamespace(all=lambda:[])
+    assert asyncio.run(reading_inputs(session,datetime.now(UTC)-timedelta(hours=72)))==[]
+    sql=str(session.scalars.call_args.args[0])
+    assert 'published_revision = news_ai_events.revision' in sql
 
 
 @pytest.mark.parametrize('withdraw_during_call', [False, True])

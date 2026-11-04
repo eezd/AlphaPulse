@@ -161,33 +161,24 @@ def test_exclusive_start_persists_dispatch_start_and_preserves_existing_boundary
     assert picked[0]==('backfill',1)
 
 
-@pytest.mark.parametrize('dependency_state', ['pending','failed','done'])
-def test_exclusive_event_enrolls_only_unfinished_dependencies_and_preserves_failures(trading,monkeypatch,dependency_state):
+@pytest.mark.parametrize('event_state', ['pending','processing','failed'])
+def test_exclusive_batch_tracks_event_without_package_research(trading,monkeypatch,event_state):
     from alphapulse.news_risk import backfill
     from alphapulse.models.risk import ReprocessJob,NewsEvent,RiskSettings
     config={'request':{'run_mode':'history_only'}}
     job=N(id=7,state='running',settings=config,failures=[])
-    event=N(id=9,state='pending',published_revision=0)
-    dependency=N(id=2,state=dependency_state,revision=2,published_revision=1,result=None,
-        review_config=None,error='Synthetic' if dependency_state=='failed' else None,dirty_since=None)
-    target=N(kind='events',object_id=9,revision=1)
+    event=N(id=9,state=event_state,published_revision=0,error='Synthetic')
     settings=N(enabled=True)
     session=MagicMock()
     session.get=AsyncMock(side_effect=lambda model,*a,**k:{ReprocessJob:job,NewsEvent:event,RiskSettings:settings}[model])
-    session.scalar=AsyncMock(side_effect=[None,2 if dependency_state=='failed' else None])
-    session.scalars=AsyncMock(side_effect=[N(all=lambda:[]),N(all=lambda:[target]),N(all=lambda:[dependency])])
+    session.scalar=AsyncMock(return_value=None)
+    session.scalars=AsyncMock(side_effect=[N(all=lambda:[]),N(all=lambda:[N(kind='events',object_id=9,revision=1)])])
     session.commit=AsyncMock()
     enroll=AsyncMock();monkeypatch.setattr(backfill,'target',enroll)
     asyncio.run(backfill.reconcile(session,job))
-    assert dependency.review_config==config
-    enroll.assert_awaited_once_with(session,7,'analysis',dependency)
-    if dependency_state=='failed':
-        assert dependency.state=='failed' and job.state=='failed' and not settings.enabled
-        assert any(f['stage']=='analysis' and f['id']==2 for f in job.failures)
-    else:
-        assert dependency.state=='pending' and job.state=='running' and settings.enabled
-        assert dependency.due_at<=datetime.now(UTC)
-        assert dependency.revision==(3 if dependency_state=='done' else 2)
+    enroll.assert_not_awaited()
+    assert job.state==('failed' if event_state=='failed' else 'running')
+    assert settings.enabled == (event_state!='failed')
 
 
 def test_exclusive_batch_finishes_after_event_dependency_is_published(trading,monkeypatch):
@@ -202,7 +193,7 @@ def test_exclusive_batch_finishes_after_event_dependency_is_published(trading,mo
     session=MagicMock()
     session.get=AsyncMock(side_effect=lambda model,*a,**k:{
         ReprocessJob:job,NewsEvent:event,NewsSummary:dependency,RiskSettings:settings,EventMember:None}[model])
-    session.scalar=AsyncMock(side_effect=[None,None,N(id=3,state='done',quotes={})])
+    session.scalar=AsyncMock(side_effect=[None,N(id=3,state='done',quotes={})])
     session.scalars=AsyncMock(side_effect=[N(all=lambda:[]),N(all=lambda:targets),N(all=lambda:[])])
     session.commit=AsyncMock()
     monkeypatch.setattr(events,'reading_inputs',AsyncMock(return_value=[]))
@@ -210,7 +201,7 @@ def test_exclusive_batch_finishes_after_event_dependency_is_published(trading,mo
     assert job.state=='done' and not settings.enabled
 
 
-@pytest.mark.parametrize('failed_stage', ['grouping','analysis','events',None])
+@pytest.mark.parametrize('failed_stage', ['grouping','events',None])
 @pytest.mark.parametrize('prepare_only', [True,False])
 def test_exclusive_outlook_never_admits_failed_batch_results(trading,monkeypatch,failed_stage,prepare_only):
     from alphapulse.news_risk import worker,events,reprocess

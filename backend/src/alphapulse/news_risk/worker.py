@@ -2,12 +2,12 @@
 import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
-from sqlalchemy import BigInteger, select, update, func, exists, text, case
+from sqlalchemy import BigInteger, select, update, func, exists, case
 from sqlalchemy.dialects.postgresql import insert
-from alphapulse.core.db import SessionLocal, engine
+from alphapulse.core.db import SessionLocal
 from alphapulse.models import NewsItem
-from alphapulse.models.risk import RiskSettings, RiskSnapshot, ArticleAnalysis, NewsSummary, SummaryArticle, SummaryVersion, PackageEvidence, GroupingVersion
-from alphapulse.news_risk.service import complete
+from alphapulse.models.risk import RiskSettings, RiskSnapshot, ArticleAnalysis, NewsSummary, SummaryArticle, SummaryVersion, PackageEvidence, GroupingVersion, NewsEvent, EventMember
+from alphapulse.news_risk.service import complete, accumulate_usage
 from alphapulse.news_risk.pipeline import configuration, Grouping, summarize_articles, validate_evidence, Evidence, grouping_payload, pack_candidates
 from alphapulse.news_risk.research import Research
 from alphapulse.news_risk import briefing
@@ -66,18 +66,27 @@ async def _analyze(target_id=None, frozen=None):
         catalog = await session.scalar(select(func.max(NewsSummary.id)))
         tag_score = sum((case((NewsSummary.tags.contains([tag.strip().casefold()]), 1), else_=0) for tag in row.input.get('source_tags', [])[:8] if isinstance(tag, str)), 0)
         from alphapulse.news_risk.retrieval import terms_for, matching
-        _, keyword_score = matching(NewsSummary, terms_for(row.input['title'], row.input.get('source_tags', [])[:6]))
+        # Untitled news still has source text; bound retrieval without changing model inputs.
+        query = (row.input['title'].strip() or (row.input.get('summary') or '').strip() or (row.input.get('content') or '').strip())[:256]
+        _, keyword_score = matching(NewsSummary, terms_for(query, row.input.get('source_tags', [])[:6]))
         candidates = (await session.scalars(select(NewsSummary).where(NewsSummary.replacement_ids == [], NewsSummary.state != 'withdrawn').order_by(
-            (func.greatest(func.similarity(NewsSummary.title, row.input['title']), func.similarity(NewsSummary.fact, row.input['title'])) + tag_score + keyword_score).desc(), NewsSummary.updated_at.desc()).limit(80))).all()
-        candidate_inputs = [{'id': e.id, 'title': e.title, 'published_at': e.published_at.isoformat(), 'entities': e.entities, 'tags': e.tags, 'fact': e.fact, 'content_kind': e.content_kind} for e in candidates]
+            (func.greatest(func.similarity(NewsSummary.title, query), func.similarity(NewsSummary.fact, query)) + tag_score + keyword_score).desc(), NewsSummary.updated_at.desc()).limit(80))).all()
+        memberships = dict((await session.execute(select(EventMember.package_id, EventMember.event_id).where(EventMember.package_id.in_([p.id for p in candidates])))).all())
+        event_catalog = await session.scalar(select(func.max(NewsEvent.id)))
+        event_candidates = list(await session.scalars(select(NewsEvent).where(NewsEvent.state != 'retired').order_by(
+            func.similarity(NewsEvent.fact, query).desc(), NewsEvent.updated_at.desc()).limit(60)))
+        event_inputs = [{'id':e.id,'title':e.title,'fact':e.fact,'tags':e.tags,'revision':e.revision} for e in event_candidates]
+        candidate_inputs = [{'main_event_id': memberships.get(e.id), 'id': e.id, 'title': e.title, 'published_at': e.published_at.isoformat(), 'entities': e.entities, 'tags': e.tags, 'fact': e.fact, 'content_kind': e.content_kind} for e in candidates]
         had_success = row.result is not None
+        previous_usage = row.usage
         row.state = 'processing'; row.started_at = datetime.now(UTC); row.rules = rules; row.model = provider.model
         await session.commit()
         row_id = row.id
         row_input = row.input
+        usages = []
         try:
             step('提取与归并新闻')
-            payload, usages = await grouping_payload(provider, system, {'id': row.id, **row.input}, candidate_inputs)
+            payload, usages = await grouping_payload(provider, system, {'id': row.id, **row.input}, candidate_inputs, event_inputs)
             for attempt in range(2):
                 try:
                     result, usage = await complete(provider, system, payload, Grouping)
@@ -85,29 +94,35 @@ async def _analyze(target_id=None, frozen=None):
                     for match in result.packages:
                         if match.package_id is not None and match.package_id not in {e['id'] for e in payload['candidates']}:
                             raise ValueError('模型引用未知候选包')
+                        if match.event.event_id is not None and match.event.event_id not in {e['id'] for e in payload['events']} | {e.get('main_event_id') for e in payload['candidates']}:
+                            raise ValueError('模型引用未知候选事件')
                         validate_evidence([Evidence(article_id=row.id, quote=match.evidence)], {row.id: row.input})
                     break
                 except ValueError as error:
-                    if attempt:
+                    if attempt or getattr(error, "correction_attempted", False) or any(
+                            isinstance(u, dict) and len(u.get("rounds", [])) > 1 for u in usages):
                         raise
+                    if getattr(error,'usage',None): usages.append(error.usage)
                     payload = pack_candidates(provider, system, {**payload, 'correction': str(error)}, payload['candidates'])
             step('校验并保存分包结果')
             async with publication_lock:
                 # Check the article again before changing event membership.
                 current = await session.get(NewsItem, row.news_id, populate_existing=True)
                 if current.content_hash != row.content_hash:
-                    row.state = 'superseded'; await session.commit(); return 'superseded'
-                if any(m.package_id is None for m in result.packages) and catalog != await session.scalar(select(func.max(NewsSummary.id))):
-                    row.state = 'reprocess' if frozen else 'pending'; await session.commit(); return 'deferred'
+                    row.state = 'superseded'; row.usage=accumulate_usage(previous_usage,{'attempts':usages}); await session.commit(); return 'superseded'
+                if (any(m.package_id is None for m in result.packages) and catalog != await session.scalar(select(func.max(NewsSummary.id)))) or (any(m.event.event_id is None for m in result.packages) and event_catalog != await session.scalar(select(func.max(NewsEvent.id)))):
+                    row.state = 'reprocess' if frozen else 'pending'; row.usage=accumulate_usage(previous_usage,{'attempts':usages}); await session.commit(); return 'deferred'
                 now = datetime.now(UTC)
                 old_ids = select(SummaryArticle.summary_id).join(ArticleAnalysis).where(ArticleAnalysis.news_id == row.news_id)
-                old_events = (await session.scalars(select(NewsSummary).where(NewsSummary.id.in_(old_ids))
+                old_events = (await session.scalars(select(NewsSummary).where(NewsSummary.id.in_(old_ids), NewsSummary.replacement_ids==[], NewsSummary.state!="withdrawn")
                     .order_by(NewsSummary.id).with_for_update().execution_options(populate_existing=True))).all()
                 touched = {e.id: e for e in old_events}
                 previous_ids = set(touched)
                 await session.execute(update(SummaryArticle).where(SummaryArticle.analysis_id == row.id).values(active=False))
                 groups = {}
+                event_groups = {}
                 changed = set()
+                assigned = set()
                 for match in result.packages:
                     event = await session.get(NewsSummary, match.package_id, with_for_update=True, populate_existing=True) if match.package_id else groups.get(match.group_key)
                     if event is not None and (event.replacement_ids or event.state == 'withdrawn'):
@@ -129,20 +144,30 @@ async def _analyze(target_id=None, frozen=None):
                     if link is None:
                         link = SummaryArticle(summary_id=event.id, analysis_id=row.id); session.add(link)
                     link.active = True; link.unit = match.model_dump()
-                    if match.change_kind != 'repost' or event.result is None or row.input['revision_no'] > 1:
+                    if match.change_kind != 'repost' or event.revision == 0 or row.input['revision_no'] > 1:
                         changed.add(event.id)
                     touched[event.id] = event
-                if target_id or row.input['revision_no'] > 1:
-                    changed.update(previous_ids)
+                    assigned.add(event.id)
+                    from alphapulse.news_risk.event_research import attach
+                    await attach(session, event, match.event, event_groups, event.id in changed, match.urgent, frozen)
+                    await session.flush()
+                changed.update(previous_ids - assigned)
+                if row.input['revision_no'] > 1: changed.update(previous_ids)
                 for event in touched.values():
                     if event.id in changed:
-                        event.review_config = frozen
-                        schedule(event, now, any(m.urgent for m in result.packages))
-                        if frozen and frozen.get('request'):
-                            from alphapulse.news_risk.backfill import target
-                            await target(session, frozen['job_id'], 'analysis', event)
+                        event.revision += 1
+                        event.changed_at = now
+                        event.state = 'done'
+                        await session.flush()
+                        active = await session.scalar(select(SummaryArticle.analysis_id).join(ArticleAnalysis).join(NewsItem).where(
+                            SummaryArticle.summary_id==event.id, SummaryArticle.active.is_(True), ArticleAnalysis.content_hash==NewsItem.content_hash).limit(1))
+                        if active is None: event.state='withdrawn'
+                        # Removed/revised originals also invalidate the owning event.
+                        if event.id in previous_ids - assigned:
+                            from alphapulse.news_risk.events import dirty_event
+                            await dirty_event(session, event.id, frozen)
                 session.add(GroupingVersion(analysis_id=row.id, input=row.input, result=result.model_dump(mode='json'), rules=rules, state='done'))
-                row.result = result.model_dump(mode='json'); row.usage = {'attempts': usages}; row.state = 'done'
+                row.result = result.model_dump(mode='json'); row.usage = accumulate_usage(previous_usage,{'attempts':usages}); row.state = 'done'
                 row.error = None; row.finished_at = now
                 await session.commit()
             return 'done'
@@ -150,7 +175,7 @@ async def _analyze(target_id=None, frozen=None):
             await session.rollback()
             session.add(GroupingVersion(analysis_id=row_id, input=row_input, result=None, rules=rules, state='failed', error=str(error)[:2000]))
             await session.execute(update(ArticleAnalysis).where(ArticleAnalysis.id == row_id).values(
-                state='done' if had_success else 'failed', error=str(error)[:2000], finished_at=datetime.now(UTC)))
+                state='done' if had_success else 'failed', error=str(error)[:2000], usage=accumulate_usage(previous_usage,{'attempts':usages,'failed':getattr(error,'usage',None)}), finished_at=datetime.now(UTC)))
             await session.commit()
             logger.exception('新闻初筛失败')
             return 'failed'
@@ -180,9 +205,10 @@ async def summarize(target_id=None):
         rows = (await session.scalars(select(ArticleAnalysis).join(SummaryArticle).join(NewsItem).where(
             SummaryArticle.summary_id == event.id, SummaryArticle.active.is_(True), ArticleAnalysis.content_hash == NewsItem.content_hash,
             ArticleAnalysis.state == 'done').order_by(ArticleAnalysis.id))).all()
-        articles = [{'id': r.id, **r.input} for r in rows]
+        articles = [{'id': r.id, 'news_id': r.news_id, 'content_hash': r.content_hash, **r.input} for r in rows]
         package = {key: getattr(event, key) for key in ('id', 'title', 'fact', 'category', 'tags', 'content_kind', 'revision')}
         package['previous'] = event.result
+        package['sources'] = [{'analysis_id': r.id, 'news_id': r.news_id, 'content_hash': r.content_hash} for r in rows]
         if not articles:
             from alphapulse.news_risk.events import dirty_event
             await dirty_event(session, event.id, event.review_config)
@@ -202,7 +228,7 @@ async def summarize(target_id=None):
         event.state = 'processing'
         await session.commit()
         identifier, event_id, revision = version.id, event.id, version.revision
-        research = Research()
+        research = Research(package)
         evidence_rows = (await session.scalars(select(PackageEvidence).where(PackageEvidence.version_id == identifier).order_by(PackageEvidence.id))).all()
         research.restore([r.data for r in evidence_rows])
         await session.commit()
@@ -269,9 +295,11 @@ async def outlook(prepare_only=False):
         if job and job.position < len(job.items):
             if requested and requested.quotes.get('job_id') == job.id: return
             job = None
+        if not inputs and latest is not None and job is None:
+            waiting = await session.scalar(select(NewsEvent.id).where(NewsEvent.updated_at >= now-timedelta(hours=72),
+                NewsEvent.state.in_(['pending','processing','failed']), NewsEvent.published_revision != NewsEvent.revision).limit(1))
+            if waiting is not None: return
         if job:
-            from alphapulse.models.risk import NewsEvent
-            if await session.scalar(select(NewsSummary.id).where(NewsSummary.state.in_(['pending', 'processing', 'failed']), NewsSummary.review_config['job_id'].astext.cast(BigInteger) == job.id).limit(1)): return
             if await session.scalar(select(NewsEvent.id).where(NewsEvent.state.in_(['pending', 'processing', 'failed']), NewsEvent.review_config['job_id'].astext.cast(BigInteger) == job.id).limit(1)): return
             from alphapulse.news_risk.reprocess import frozen_configuration
             provider, system, rules = await frozen_configuration(session, job.settings, 'outlook')
@@ -306,6 +334,7 @@ async def outlook(prepare_only=False):
         snapshot = RiskSnapshot(state='processing', model=provider.model, quotes={'fingerprint': key, 'important': important, **({'job_id': job.id} if job else {})})
         session.add(snapshot); await session.commit()
         step('生成阅读与趋势', object_id=snapshot.id)
+        ranked, expansion = {}, {}
         try:
             main = [p for p in inputs if p['importance_stars'] >= 3]
             low = [p for p in inputs if p['importance_stars'] < 3]
@@ -324,32 +353,21 @@ async def outlook(prepare_only=False):
             snapshot.result = {**result, 'reading': ranked['reading'], 'expansion': extra, 'inputs': inputs, 'rules': rules,
                 'usage': ranked['usage']+result['usage'], 'expansion_usage': expansion['usage'], 'as_of': now.isoformat()}
             step('保存阅读与趋势')
-            snapshot.state = 'done'
+            async with publication_lock:
+                fresh = await reading_inputs(session,datetime.now(UTC)-timedelta(hours=72))
+                snapshot.state = 'done' if briefing.semantic_packages(fresh)==briefing.semantic_packages(inputs) else 'superseded'
         except Exception as error:
             snapshot.state = 'failed'; snapshot.error = str(error)[:2000]
+            snapshot.quotes = {**snapshot.quotes, 'failed_usage': getattr(error, 'usage', None),
+                'completed_usage': ranked.get('usage', []) + expansion.get('usage', [])}
             logger.exception('阅读编排失败')
         if requested: requested.quotes = {k: v for k, v in requested.quotes.items() if k != 'retry_requested'}
         await session.commit()
 
 
 async def main():
-    async with engine.connect() as lock:
-        if not await lock.scalar(text('SELECT pg_try_advisory_lock(20261030, 1)')):
-            raise RuntimeError('新闻AI worker 已运行')
-        async with SessionLocal() as session:
-            await session.execute(update(ArticleAnalysis).where(ArticleAnalysis.state == 'processing').values(state='pending'))
-            await session.execute(update(NewsSummary).where(NewsSummary.state == 'processing').values(state='pending'))
-            await session.execute(update(SummaryVersion).where(SummaryVersion.state == 'processing').values(state='pending'))
-            await session.commit()
-            await session.execute(update(RiskSnapshot).where(RiskSnapshot.state == 'processing').values(state='failed', error='进程中断，请重试'))
-            await session.commit()
-        from alphapulse.models.risk import NewsEvent, EventVersion
-        async with SessionLocal() as session:
-            await session.execute(update(NewsEvent).where(NewsEvent.state == 'processing').values(state='pending'))
-            await session.execute(update(EventVersion).where(EventVersion.state == 'processing').values(state='failed', error='进程中断'))
-            await session.commit()
-        from alphapulse.news_risk.scheduler import run
-        await run(lock)
+    from alphapulse.news_research.worker import run
+    await run()
 
 
 if __name__ == '__main__':
