@@ -115,10 +115,10 @@ def test_news_search_matches_topics_across_languages_and_keeps_literal_queries(t
             connection.execute(text("INSERT INTO news_items VALUES (:id, :source, :title, :body)"), [
                 {"id": i, "source": source, "title": title, "body": body}
                 for i, source, title, body in [
-                    (1, "cls_telegraph", "比特币消息", ""), (2, "coindesk", "Bitcoin market update", ""),
+                    (1, "wscn_live", "比特币消息", ""), (2, "coindesk", "Bitcoin market update", ""),
                     (3, "coindesk", "Network update", "Ethereum update"),
                     (4, "wscn_live", "美联储声明", ""), (5, "fed", "Federal Reserve statement", ""),
-                    (6, "bls", "Consumer Price Index", ""), (7, "cls_telegraph", "消费者价格指数公布", ""),
+                    (6, "bls", "Consumer Price Index", ""), (7, "wscn_live", "消费者价格指数公布", ""),
                     (8, "bls", "Employment Situation", ""), (9, "bea", "Gross Domestic Product", ""),
                     (10, "bea", "Personal Income and Outlays", "Personal consumption expenditures"),
                     (11, "coindesk", "50%_profit", ""), (12, "coindesk", "50xxx_profit", ""),

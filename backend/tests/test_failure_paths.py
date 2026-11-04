@@ -242,7 +242,7 @@ def test_news_updates_metadata_without_creating_content_revision(trading, monkey
         "content_text": "正文", "author": "原作者", "tags": ["旧标签"], "is_paywalled": False,
         "published_at": datetime(2026, 10, 20, tzinfo=UTC), "source_updated_at": None, "extra": {},
     }
-    news = NewsItem(id=1, source_code="cls_telegraph", external_id="1", revision_no=1,
+    news = NewsItem(id=1, source_code="wscn_live", external_id="1", revision_no=1,
                     content_hash=pipelines.content_hash(original), **original)
     incoming = dict(original)
     if change != "unchanged":
@@ -272,7 +272,7 @@ def test_news_updates_metadata_without_creating_content_revision(trading, monkey
 
     async def check():
         for _ in range(2):
-            await pipeline.process_item({**incoming, "source_code": "cls_telegraph", "external_id": "1", "raw_response_id": 10})
+            await pipeline.process_item({**incoming, "source_code": "wscn_live", "external_id": "1", "raw_response_id": 10})
         assert {key: getattr(news, key) for key in pipelines.UPDATABLE_FIELDS} == incoming
         assert news.content_hash == pipelines.content_hash(incoming)
         assert news.revision_no == (2 if change == "content" else 1)
@@ -280,7 +280,7 @@ def test_news_updates_metadata_without_creating_content_revision(trading, monkey
         if change == "content":
             assert len(revisions) == run.items_revised == 1
             assert revisions[0].revision_no == 2 and revisions[0].content_html == incoming["content_html"]
-            assert events == [{"id": 1, "source_code": "cls_telegraph", "kind": "revised"}]
+            assert events == [{"id": 1, "source_code": "wscn_live", "kind": "revised"}]
         else:
             assert not revisions and not events and run.items_revised == 0
     asyncio.run(check())

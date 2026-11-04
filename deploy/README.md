@@ -185,3 +185,19 @@ Each complete daily response withdraws missing records only within its own day a
 Official and Jin10 observations retain separate identities and revisions. The read API merges only verified indicator IDs, definitions, units, reference periods, release stages and exact publication times. Official nonmissing fields win independently; Jin10 fills missing fields and market forecasts with explicit provenance. Unverified definitions remain distinct records. Original and revised previous values remain separate. Forecast observations captured after publication are displayed with that limitation and excluded from historical surprise judgments. Jin10's gold/USD direction flags are not BTC/ETH signals. Tentative times and all-day holidays never display an invented exact midnight time.
 
 CI acceptance runs `scripts/smoke_calendar.py` against the isolated database using public fixtures and synthetic account material. It never starts a browser collector or connects a real Jin10 account. Local unit tests likewise isolate all external I/O. The live database migration, credential import/reconnection, history collection and dev deployment are separate operator actions; ordinary local validation does not authorize them.
+
+## CLS retirement and full news-AI reset
+
+CLS collection and automatic standalone news-signal labeling are retired. Original
+historical migrations remain intact; the retirement migration removes source rows
+only after their dependent records have been explicitly cleaned.
+
+Preview with `python3 scripts/deploy.py remove-cls --build /path/to/build.json`.
+With task-specific production authorization, append `--execute` to stop application
+writers under the deployment lock, delete CLS originals/revisions/captures/logs and
+all current/legacy news-AI results, migrate, then deploy the accepted version.
+Other originals, shared response bodies, Skills, vocabulary and model settings are
+retained. News AI remains paused. No new archive is created. Transaction failures
+roll back database changes; image rollback cannot recover committed deletions.
+If cleanup or migration fails, services remain stopped for inspection; do not start
+old workers, which still contain automatic news labeling.

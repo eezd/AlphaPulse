@@ -18,7 +18,7 @@ FEEDS = {
     "destatis": ("https://www.destatis.de/SiteGlobals/Functions/RSSFeed/DE/RSSNewsfeed/Aktuell.xml",),
     "insee": ("https://www.insee.fr/fr/flux/3",),
 }
-REGIONS = {"wscn_news": "CN", "wscn_live": "CN", "cls_depth": "CN", "cls_telegraph": "CN", "coindesk": "GLOBAL",
+REGIONS = {"wscn_news": "CN", "wscn_live": "CN", "coindesk": "GLOBAL",
            "bls": "US", "bea": "US", "fed": "US", "umich": "US", "dol": "US", "eia": "US", "adp": "US", "ecb": "EA", "eurostat": "EA", "boe": "GB", "ons": "GB", "destatis": "DE", "insee": "FR", "jin10": "GLOBAL"}
 HOSTS = {"ecb": {"www.ecb.europa.eu"}, "eurostat": {"ec.europa.eu"}, "boe": {"www.bankofengland.co.uk"},
          "ons": {"www.ons.gov.uk"}, "destatis": {"www.destatis.de"}, "insee": {"www.insee.fr"}}

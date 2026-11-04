@@ -172,13 +172,13 @@ def deploy(build, directory=INSTANCE):
             containers = inspect_services(old_command)
             require(not any(c['State'].get('Paused') for c in containers), 'Recover paused services before deploying')
             previous_running = [c['Config']['Labels']['com.docker.compose.service'] for c in containers if c['State']['Running']]
-            for _ in range(60):
+            for _ in range(60) if previous_running else range(0):
                 idle = json.loads(run('docker', 'exec', '-i', 'AlphaPulse-dev-api', 'python', '-', input=IDLE))
                 if not idle['busy']:
                     break
                 time.sleep(5)
             else:
-                raise RuntimeError('Chat or trading analysis did not become idle within five minutes')
+                require(not previous_running, 'Chat or trading analysis did not become idle within five minutes')
         # Recheck after pulls and waiting; only a current dev commit can mutate the instance.
         if branch_head() != build['commit']:
             print('Skipped: dev advanced while preparing deployment')
@@ -259,6 +259,37 @@ def restore(directory, pending):
 
 
 
+def remove_cls(build, execute=False):
+    """Retire CLS and reset all news AI using an accepted image and the instance lock."""
+    with locked(INSTANCE / '.deploy.lock'):
+        require(not (INSTANCE / 'deployment.pending.json').exists(), 'Recover the pending deployment first')
+        require(branch_head() == build['commit'], 'Expected the current dev build')
+        validate_images(build)
+        command = ['docker', 'run', '--rm', '-i', '--network', 'dev_default', '--env-file', str(INSTANCE / '.env'),
+                   IMAGES['backend'] + ':' + build['version']]
+        if execute:
+            current = json.loads((INSTANCE / 'deployment.json').read_text())
+            old_command = compose(INSTANCE, current)
+            for _ in range(60):
+                idle = json.loads(run('docker', 'exec', '-i', 'AlphaPulse-dev-api', 'python', '-', input=IDLE))
+                if not idle['busy']:
+                    break
+                time.sleep(5)
+            else:
+                raise RuntimeError('Chat or trading analysis remained busy')
+            run('docker', 'pause', 'AlphaPulse-dev-trader')
+            idle = json.loads(run('docker', 'exec', '-i', 'AlphaPulse-dev-api', 'python', '-', input=IDLE))
+            if idle['busy']:
+                run('docker', 'unpause', 'AlphaPulse-dev-trader')
+                raise RuntimeError('Analysis became active; retry after it completes')
+            run(*old_command, 'stop')
+        print(run(*command, 'python', '-m', 'alphapulse.crawler.remove_cls', *(['--execute'] if execute else [])), flush=True)
+        if execute:
+            print(run(*command, 'alembic', 'upgrade', 'head'), flush=True)
+    if execute:
+        deploy(build)
+
+
 def reset_news_ai(build, confirmed=False):
     """Preview or clear only legacy news AI records under the deployment lock."""
     validate_images(build)
@@ -315,14 +346,17 @@ def reset_news_derived(build, execute=False, acceptance=None, baseline=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('update', 'recover', 'rollback', 'reset-news-ai', 'reset-news-derived', 'install-entrypoints'))
+    parser.add_argument('command', choices=('update', 'recover', 'rollback', 'reset-news-ai', 'reset-news-derived', 'install-entrypoints', 'remove-cls'))
+    parser.add_argument('--execute', action='store_true')
     parser.add_argument('--build', type=Path, default=ROOT / 'build.json')
     parser.add_argument('--confirm-delete-old-news-ai', action='store_true')
     parser.add_argument('--confirm-reset-news-derived', action='store_true')
     parser.add_argument('--acceptance', type=Path)
     parser.add_argument('--baseline', type=Path)
     args = parser.parse_args()
-    if args.command == 'install-entrypoints':
+    if args.command == 'remove-cls':
+        remove_cls(json.loads(args.build.read_text()), args.execute)
+    elif args.command == 'install-entrypoints':
         with locked(INSTANCE / '.deploy.lock'):
             require(not (INSTANCE / 'deployment.pending.json').exists(), 'Recover the pending deployment first')
             install_entrypoints(INSTANCE)

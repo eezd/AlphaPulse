@@ -4,7 +4,6 @@
 前向记录只看标注时还没发生的行情，用来确认或否定这条线索。只记录，不下单。
 """
 
-import asyncio
 import json
 import logging
 import re
@@ -64,8 +63,8 @@ def news_text():
 
 
 def clean(text: str) -> str:
-    # 去掉「财联社10月7日电，」之类的日期前缀，减少模型联想到具体日期
-    return re.sub(r"^(财联社)?\d{1,2}月\d{1,2}日电[，,]?", "", text).strip()[:200]
+    # Remove date prefixes to avoid anchoring labels to a calendar date.
+    return re.sub(r"^\d{1,2}月\d{1,2}日电[，,]?", "", text).strip()[:200]
 
 
 def is_forward_sample(published_at: datetime, labeled_at: datetime) -> bool:
@@ -151,15 +150,3 @@ async def fill_prices() -> int:
                 filled += 1
         await session.commit()
     return filled
-
-
-async def news_signal_loop() -> None:
-    while True:
-        try:
-            labeled = await label_new()
-            filled = await fill_prices()
-            if labeled or filled:
-                logger.info("新闻信号：标注 %d 条，回填价格 %d 条", labeled, filled)
-        except Exception:
-            logger.exception("新闻信号记录出错，稍后重试")
-        await asyncio.sleep(LOOP_SECONDS)
