@@ -270,18 +270,20 @@ def remove_cls(build, execute=False):
         if execute:
             current = json.loads((INSTANCE / 'deployment.json').read_text())
             old_command = compose(INSTANCE, current)
-            for _ in range(60):
+            running = any(container['State']['Running'] for container in inspect_services(old_command))
+            if running:
+                for _ in range(60):
+                    idle = json.loads(run('docker', 'exec', '-i', 'AlphaPulse-dev-api', 'python', '-', input=IDLE))
+                    if not idle['busy']:
+                        break
+                    time.sleep(5)
+                else:
+                    raise RuntimeError('Chat or trading analysis remained busy')
+                run('docker', 'pause', 'AlphaPulse-dev-trader')
                 idle = json.loads(run('docker', 'exec', '-i', 'AlphaPulse-dev-api', 'python', '-', input=IDLE))
-                if not idle['busy']:
-                    break
-                time.sleep(5)
-            else:
-                raise RuntimeError('Chat or trading analysis remained busy')
-            run('docker', 'pause', 'AlphaPulse-dev-trader')
-            idle = json.loads(run('docker', 'exec', '-i', 'AlphaPulse-dev-api', 'python', '-', input=IDLE))
-            if idle['busy']:
-                run('docker', 'unpause', 'AlphaPulse-dev-trader')
-                raise RuntimeError('Analysis became active; retry after it completes')
+                if idle['busy']:
+                    run('docker', 'unpause', 'AlphaPulse-dev-trader')
+                    raise RuntimeError('Analysis became active; retry after it completes')
             run(*old_command, 'stop')
         print(run(*command, 'python', '-m', 'alphapulse.crawler.remove_cls', *(['--execute'] if execute else [])), flush=True)
         if execute:

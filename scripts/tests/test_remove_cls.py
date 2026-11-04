@@ -9,7 +9,7 @@ import deploy
 
 
 class RemoveClsTests(unittest.TestCase):
-    def exercise(self, execute, failure=False):
+    def exercise(self, execute, failure=False, running=True):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             build = {'commit': 'a'*40, 'version': '20261104-aaaaaaaa'}
@@ -26,6 +26,7 @@ class RemoveClsTests(unittest.TestCase):
 
             with patch.object(deploy, 'INSTANCE', directory), patch.object(deploy, 'validate_images'), \
                     patch.object(deploy, 'branch_head', return_value=build['commit']), \
+                    patch.object(deploy, 'inspect_services', return_value=[{'State': {'Running': running}}]), \
                     patch.object(deploy, 'run', side_effect=command), patch.object(deploy, 'deploy') as update:
                 if failure:
                     with self.assertRaisesRegex(RuntimeError, 'cleanup failed'):
@@ -54,3 +55,8 @@ class RemoveClsTests(unittest.TestCase):
         calls = self.exercise(True, True)
         self.assertTrue(any('stop' in args for args in calls))
         self.assertFalse(any('up' in args or 'alembic' in args for args in calls))
+
+    def test_execute_resumes_with_all_writers_stopped(self):
+        calls = self.exercise(True, running=False)
+        self.assertFalse(any(args[:2] == ('docker', 'pause') for args in calls))
+        self.assertTrue(any('--execute' in args for args in calls))

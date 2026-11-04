@@ -64,6 +64,15 @@ async def cleanup(connection, execute=False):
                    for table in SOURCE_TABLES})
     counts['news_revisions'] = await connection.scalar(text('''SELECT count(*) FROM news_revisions
         WHERE news_id IN (SELECT id FROM news_items WHERE source_code = ANY(:sources))'''), params)
+    cleanup_indexes = {
+        'cleanup_cls_revisions_raw': ('news_revisions', 'raw_response_id'),
+        'cleanup_cls_economic_raw': ('economic_revisions', 'raw_response_id'),
+        'cleanup_cls_series_raw': ('economic_series_values', 'raw_response_id'),
+        'cleanup_cls_response_body': ('raw_responses', 'body_sha256'),
+    }
+    if execute:
+        for name, (table, column) in cleanup_indexes.items():
+            await connection.execute(text(f'CREATE INDEX {name} ON {table} ({column})'))
     before = await retained_news(connection)
     protected = await protected_records(connection)
     if execute:
@@ -83,6 +92,8 @@ async def cleanup(connection, execute=False):
             WHERE body.sha256 = removed.body_sha256 AND NOT EXISTS
             (SELECT 1 FROM raw_responses response WHERE response.body_sha256 = body.sha256)'''))
         counts['unreferenced_raw_bodies'] = result.rowcount
+        for name in cleanup_indexes:
+            await connection.execute(text('DROP INDEX ' + name))
         if protected != await protected_records(connection):
             raise RuntimeError('保留业务数据校验失败，清理已回滚')
         if before != await retained_news(connection):
