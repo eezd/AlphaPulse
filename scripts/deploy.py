@@ -153,82 +153,98 @@ def deploy(build, directory=INSTANCE):
     directory = Path(directory).resolve(strict=True)
     require(directory == INSTANCE, 'Unexpected instance directory')
     with locked(directory / '.deploy.lock'):
-        require(not (directory / 'deployment.pending.json').exists(), 'Resolve the previous pending deployment with recover first')
-        if branch_head() != build['commit']:
-            print('Skipped: dev has advanced')
-            return
-        validate_images(build)
-        run('docker', 'pull', SEARXNG_IMAGE)
-        validate_search_image()
-        # Only this read-only schema guard receives the existing application environment.
-        print(run('docker', 'run', '--rm', '-i', '--network', 'dev_default', '--env-file', directory / '.env',
-                  IMAGES['backend'] + ':' + build['version'], 'python', '-', input=SCHEMA), flush=True)
-        previous_file = directory / 'deployment.json'
-        previous = json.loads(previous_file.read_text()) if previous_file.exists() else None
-        old_compose = (directory / 'compose.yml').read_text() if previous else None
-        previous_running = []
-        if previous:
-            old_command = compose(directory, previous)
-            containers = inspect_services(old_command)
-            require(not any(c['State'].get('Paused') for c in containers), 'Recover paused services before deploying')
-            previous_running = [c['Config']['Labels']['com.docker.compose.service'] for c in containers if c['State']['Running']]
-            for _ in range(60) if previous_running else range(0):
-                idle = json.loads(run('docker', 'exec', '-i', 'AlphaPulse-dev-api', 'python', '-', input=IDLE))
-                if not idle['busy']:
-                    break
-                time.sleep(5)
-            else:
-                require(not previous_running, 'Chat or trading analysis did not become idle within five minutes')
-        # Recheck after pulls and waiting; only a current dev commit can mutate the instance.
-        if branch_head() != build['commit']:
-            print('Skipped: dev advanced while preparing deployment')
-            return
-        install_entrypoints(directory)
-        pending = {'build': build, 'previous': previous, 'previous_compose': old_compose,
-                   'previous_running': previous_running, 'started_at': time.time(), 'phase': 'preparing'}
-        save(directory / 'deployment.pending.json', pending)
-        try:
-            if previous and 'trader' in previous_running:
-                run('docker', 'pause', 'AlphaPulse-dev-trader')
-                idle = json.loads(run('docker', 'exec', '-i', 'AlphaPulse-dev-api', 'python', '-', input=IDLE))
-                require(not idle['busy'], 'Analysis became active during preparation; retry after it completes')
-            # Persist the transition before stopping any existing service.
-            save(directory / 'deployment.pending.json', {**pending, 'phase': 'updating'})
-            pending['phase'] = 'updating'
-            if previous:
-                # Docker unpauses a paused container before delivering the stop signal.
-                run(*old_command, 'stop', 'trader')
-                run(*old_command, 'stop', *[service for service in previous_running if service != 'trader'])
-            (directory / 'compose.yml').write_text((ROOT / 'deploy/docker-compose.yml').read_text())
-            search_config = directory / 'searxng.yml'
-            if not search_config.exists():
-                search_config.write_text((ROOT / 'deploy/searxng.yml').read_text().replace('@SEARXNG_SECRET@', secrets.token_hex(32)))
-                search_config.chmod(0o644)
-            command = compose(directory, build)
-            run(*command, 'config', '--quiet')
-            run(*command, 'up', '-d', '--no-build', '--pull', 'never', '--wait', '--wait-timeout', '120', 'api', 'web')
-            run(*command, 'up', '-d', '--no-build', '--pull', 'never', 'market', 'crawler', 'calendar', 'trader', 'news-risk', 'jin10-calendar', 'searxng')
+        deploy_locked(build, directory)
+
+
+def deploy_locked(build, directory, maintenance=None):
+    """Caller holds the instance lock throughout preparation and activation."""
+    require(maintenance is not None or not (directory / 'deployment.pending.json').exists(),
+            'Resolve the previous pending deployment with recover first')
+    current_head = branch_head()
+    if maintenance is not None:
+        require(current_head == build['commit'], 'Maintenance build is stale; services remain stopped')
+    if current_head != build['commit']:
+        print('Skipped: dev has advanced')
+        return
+    validate_images(build)
+    run('docker', 'pull', SEARXNG_IMAGE)
+    validate_search_image()
+    # Only this read-only schema guard receives the existing application environment.
+    print(run('docker', 'run', '--rm', '-i', '--network', 'dev_default', '--env-file', directory / '.env',
+              IMAGES['backend'] + ':' + build['version'], 'python', '-', input=SCHEMA), flush=True)
+    previous_file = directory / 'deployment.json'
+    previous = json.loads(previous_file.read_text()) if previous_file.exists() else None
+    old_compose = (directory / 'compose.yml').read_text() if previous else None
+    previous_running = []
+    if previous:
+        old_command = compose(directory, previous)
+        containers = inspect_services(old_command)
+        require(not any(c['State'].get('Paused') for c in containers), 'Recover paused services before deploying')
+        previous_running = [c['Config']['Labels']['com.docker.compose.service'] for c in containers if c['State']['Running']]
+        for _ in range(60) if previous_running else range(0):
+            idle = json.loads(run('docker', 'exec', '-i', 'AlphaPulse-dev-api', 'python', '-', input=IDLE))
+            if not idle['busy']:
+                break
             time.sleep(5)
-            health(command, build)
-            if previous:
-                save(directory / 'deployment.previous.json', previous)
-                (directory / 'compose.previous.yml').write_text(old_compose)
-            save(previous_file, build)
-            (directory / 'deployment.pending.json').unlink()
-        except BaseException:
-            if pending['phase'] == 'preparing':
-                restore(directory, pending)
-                raise
-            # Never roll back or reset business data. A pending marker blocks subsequent jobs.
-            subprocess.run(['docker', 'compose', '--project-name', 'alphapulse-dev', '--env-file', str(directory / 'images.env'),
-                            '-f', str(directory / 'compose.yml'), 'stop'], capture_output=True)
-            if previous:
-                restore(directory, pending)
+        else:
+            require(not previous_running, 'Chat or trading analysis did not become idle within five minutes')
+    # Recheck after pulls and waiting; only a current dev commit can mutate the instance.
+    current_head = branch_head()
+    if maintenance is not None:
+        require(current_head == build['commit'], 'Maintenance build is stale; services remain stopped')
+    if current_head != build['commit']:
+        print('Skipped: dev advanced while preparing deployment')
+        return
+    install_entrypoints(directory)
+    pending = {'build': build, 'previous': previous, 'previous_compose': old_compose,
+               'previous_running': previous_running, 'started_at': time.time(), 'phase': 'preparing'}
+    if maintenance is not None:
+        pending.update(operation='remove-cls', phase='updating')
+    save(directory / 'deployment.pending.json', pending)
+    try:
+        if previous and 'trader' in previous_running:
+            run('docker', 'pause', 'AlphaPulse-dev-trader')
+            idle = json.loads(run('docker', 'exec', '-i', 'AlphaPulse-dev-api', 'python', '-', input=IDLE))
+            require(not idle['busy'], 'Analysis became active during preparation; retry after it completes')
+        # Persist the transition before stopping any existing service.
+        save(directory / 'deployment.pending.json', {**pending, 'phase': 'updating'})
+        pending['phase'] = 'updating'
+        if previous:
+            # Docker unpauses a paused container before delivering the stop signal.
+            run(*old_command, 'stop', 'trader')
+            run(*old_command, 'stop', *[service for service in previous_running if service != 'trader'])
+        (directory / 'compose.yml').write_text((ROOT / 'deploy/docker-compose.yml').read_text())
+        search_config = directory / 'searxng.yml'
+        if not search_config.exists():
+            search_config.write_text((ROOT / 'deploy/searxng.yml').read_text().replace('@SEARXNG_SECRET@', secrets.token_hex(32)))
+            search_config.chmod(0o644)
+        command = compose(directory, build)
+        run(*command, 'config', '--quiet')
+        run(*command, 'up', '-d', '--no-build', '--pull', 'never', '--wait', '--wait-timeout', '120', 'api', 'web')
+        run(*command, 'up', '-d', '--no-build', '--pull', 'never', 'market', 'crawler', 'calendar', 'trader', 'news-risk', 'jin10-calendar', 'searxng')
+        time.sleep(5)
+        health(command, build)
+        if previous:
+            save(directory / 'deployment.previous.json', previous)
+            (directory / 'compose.previous.yml').write_text(old_compose)
+        save(previous_file, build)
+        (directory / 'deployment.pending.json').unlink()
+    except BaseException:
+        if pending['phase'] == 'preparing':
+            restore(directory, pending)
             raise
-        print('All application services now run the accepted development version tags', flush=True)
+        # Never roll back or reset business data. A pending marker blocks subsequent jobs.
+        subprocess.run(['docker', 'compose', '--project-name', 'alphapulse-dev', '--env-file', str(directory / 'images.env'),
+                        '-f', str(directory / 'compose.yml'), 'stop'], capture_output=True)
+        if previous and maintenance is None:
+            restore(directory, pending)
+        raise
+    print('All application services now run the accepted development version tags', flush=True)
 
 
 def restore(directory, pending):
+    require(pending.get('operation') != 'remove-cls' or pending.get('phase') == 'preparing',
+            'CLS maintenance is incomplete; retry remove-cls with a current accepted build; services must remain stopped')
     previous = pending['previous']
     require(previous is not None, 'No previous deployment exists; inspect the pending first-start failure')
     trader = run('docker', 'ps', '-aq', '--filter', 'name=^/AlphaPulse-dev-trader$')
@@ -249,47 +265,75 @@ def restore(directory, pending):
         validate_search_image()
     (directory / 'compose.yml').write_text(previous_compose)
     command = compose(directory, previous)
-    run(*command, 'up', '-d', '--no-build', '--pull', 'never', '--remove-orphans', '--wait', '--wait-timeout', '120', *pending['previous_running'])
+    if pending['previous_running']:
+        run(*command, 'up', '-d', '--no-build', '--pull', 'never', '--remove-orphans', '--wait', '--wait-timeout', '120', *pending['previous_running'])
+    else:
+        run(*command, 'stop')
     previous_services = re.findall(r'^  ([a-z][a-z0-9-]*):$', pending['previous_compose'], re.M)
-    if set(pending['previous_running']) == set(previous_services):
+    if pending['previous_running'] and set(pending['previous_running']) == set(previous_services):
         health(command, previous, previous_services)
     save(directory / 'deployment.json', previous)
     (directory / 'deployment.pending.json').unlink()
     print('Restored previous images and configuration; business data was retained', flush=True)
 
 
-
 def remove_cls(build, execute=False):
-    """Retire CLS and reset all news AI using an accepted image and the instance lock."""
+    """Retire CLS under one lock, retaining a durable marker until activation succeeds."""
     with locked(INSTANCE / '.deploy.lock'):
-        require(not (INSTANCE / 'deployment.pending.json').exists(), 'Recover the pending deployment first')
+        marker = INSTANCE / 'deployment.pending.json'
+        pending = json.loads(marker.read_text()) if marker.exists() else None
+        require(pending is None or (execute and pending.get('operation') == 'remove-cls'),
+                'Recover the pending deployment first')
         require(branch_head() == build['commit'], 'Expected the current dev build')
         validate_images(build)
         command = ['docker', 'run', '--rm', '-i', '--network', 'dev_default', '--env-file', str(INSTANCE / '.env'),
                    IMAGES['backend'] + ':' + build['version']]
-        if execute:
-            current = json.loads((INSTANCE / 'deployment.json').read_text())
-            old_command = compose(INSTANCE, current)
-            running = any(container['State']['Running'] for container in inspect_services(old_command))
-            if running:
-                for _ in range(60):
+        if not execute:
+            print(run(*command, 'python', '-m', 'alphapulse.crawler.remove_cls'), flush=True)
+            return
+        current = json.loads((INSTANCE / 'deployment.json').read_text())
+        old_command = compose(INSTANCE, current)
+        if pending is None:
+            pending = {'operation': 'remove-cls', 'build': build, 'previous': current,
+                       'phase': 'preparing', 'started_at': time.time()}
+            save(marker, pending)
+        elif pending['build'] != build:
+            # A newer accepted dev build may resume completed destructive stages.
+            pending['build'] = build
+            save(marker, pending)
+        if pending['phase'] == 'preparing':
+            # Preparation recovery only unpauses; destructive stages always remain stopped.
+            try:
+                running = any(container['State']['Running'] for container in inspect_services(old_command))
+                if running:
+                    for _ in range(60):
+                        idle = json.loads(run('docker', 'exec', '-i', 'AlphaPulse-dev-api', 'python', '-', input=IDLE))
+                        if not idle['busy']:
+                            break
+                        time.sleep(5)
+                    else:
+                        raise RuntimeError('Chat or trading analysis remained busy')
+                    run('docker', 'pause', 'AlphaPulse-dev-trader')
                     idle = json.loads(run('docker', 'exec', '-i', 'AlphaPulse-dev-api', 'python', '-', input=IDLE))
-                    if not idle['busy']:
-                        break
-                    time.sleep(5)
-                else:
-                    raise RuntimeError('Chat or trading analysis remained busy')
-                run('docker', 'pause', 'AlphaPulse-dev-trader')
-                idle = json.loads(run('docker', 'exec', '-i', 'AlphaPulse-dev-api', 'python', '-', input=IDLE))
-                if idle['busy']:
-                    run('docker', 'unpause', 'AlphaPulse-dev-trader')
-                    raise RuntimeError('Analysis became active; retry after it completes')
-            run(*old_command, 'stop')
-        print(run(*command, 'python', '-m', 'alphapulse.crawler.remove_cls', *(['--execute'] if execute else [])), flush=True)
-        if execute:
+                    require(not idle['busy'], 'Analysis became active; retry after it completes')
+                save(marker, {**pending, 'phase': 'stopping'})
+            except BaseException:
+                restore(INSTANCE, pending)
+                raise
+            pending['phase'] = 'stopping'
+        # Also stop partially activated candidate services when resuming a failed deployment.
+        run(*old_command, 'stop')
+        if pending['phase'] in ('stopping', 'cleanup'):
+            pending['phase'] = 'cleanup'
+            save(marker, pending)
+            print(run(*command, 'python', '-m', 'alphapulse.crawler.remove_cls', '--execute'), flush=True)
+            pending['phase'] = 'migration'
+            save(marker, pending)
+        if pending['phase'] == 'migration':
             print(run(*command, 'alembic', 'upgrade', 'head'), flush=True)
-    if execute:
-        deploy(build)
+            pending['phase'] = 'deploy-ready'
+            save(marker, pending)
+        deploy_locked(build, INSTANCE, maintenance=pending)
 
 
 def reset_news_ai(build, confirmed=False):

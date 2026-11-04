@@ -199,5 +199,13 @@ all current/legacy news-AI results, migrate, then deploy the accepted version.
 Other originals, shared response bodies, Skills, vocabulary and model settings are
 retained. News AI remains paused. No new archive is created. Transaction failures
 roll back database changes; image rollback cannot recover committed deletions.
-If cleanup or migration fails, services remain stopped for inspection; do not start
-old workers, which still contain automatic news labeling.
+The lock is held through cleanup, migration and activation. A durable
+`deployment.pending.json` marker blocks ordinary start, update and rollback while
+maintenance is incomplete. Preparation failures unpause the trader without
+replacing services; `recover` can retry that unpause if it fails.
+Once stopping begins, cleanup, migration or activation failures retain the marker
+and do not restore old workers, which still contain automatic news labeling.
+With production authorization, retry `remove-cls --execute --build /path/to/build.json`
+using an accepted current dev build. Completed cleanup and migration stages are
+not repeated; failed stages are retried. A newer accepted build can resume if dev
+has advanced. Ordinary `recover` refuses restoration after maintenance has begun.

@@ -137,7 +137,7 @@ class EntrypointTests(unittest.TestCase):
 
     def test_pending_and_shared_lock(self):
         pending = self.directory / 'deployment.pending.json'
-        pending.write_text('{}')
+        pending.write_text('{"operation":"remove-cls","phase":"cleanup"}')
         self.assertEqual(self.invoke(code=1), [])
         calls = self.invoke('stop')
         self.assertEqual(calls[-1]['args'][-1], 'stop')

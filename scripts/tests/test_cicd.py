@@ -178,6 +178,20 @@ class NewsResetTests(unittest.TestCase):
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_empty_previous_running_list_keeps_all_services_stopped(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            ci.save(directory / 'deployment.pending.json', {})
+            previous = {'version': '20261101-aaaaaaaa'}
+            compose = 'services:\n  api:\n  news-labeling:\n'
+            with patch.object(deploy, 'run', return_value='') as run, \
+                    patch.object(deploy, 'validate_images'), patch.object(deploy, 'health') as health:
+                deploy.restore(directory, {'previous': previous, 'previous_compose': compose, 'previous_running': []})
+                self.assertFalse(any('up' in call.args for call in run.call_args_list))
+                self.assertTrue(any('stop' in call.args for call in run.call_args_list))
+                health.assert_not_called()
+            self.assertFalse((directory / 'deployment.pending.json').exists())
+
     def test_rollback_removes_new_calendar_worker_and_checks_previous_services(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
