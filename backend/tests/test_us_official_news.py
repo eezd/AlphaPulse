@@ -122,6 +122,23 @@ def test_summary_scope_tests_do_not_hide_fed_enrichment(trading):
     assert len(SOURCES['fed'].entries) >= 8
 
 
+def test_fed_entries_match_real_archives_and_discover_documents(trading):
+    import gzip
+    from pathlib import Path
+    samples = json.loads(gzip.decompress((Path(__file__).parent / 'fixtures/us_news/fed_archives.json.gz').read_bytes()))
+    for sample in samples:
+        assert sample['url'] in SOURCES['fed'].entries
+        obj = spider(trading, 'fed')
+        obj.cursor['history']['entry'] = SOURCES['fed'].entries.index(sample['url'])
+        request, = obj.advance('history')
+        assert request.url == sample['url']
+        document, = obj.parse_listing(response(request.url, sample['body'], lane='history'))
+        assert document.meta['document']['kind'] == 'article'
+        assert document.url not in SOURCES['fed'].entries
+        assert document.url.startswith('https://www.federalreserve.gov/')
+        assert obj.run.stats['discovered'] > 0
+
+
 def test_fifty_real_public_documents_parse_without_io():
     import gzip
     from pathlib import Path

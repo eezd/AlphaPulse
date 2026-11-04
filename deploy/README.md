@@ -284,8 +284,12 @@ Validation without production credentials:
   `ci`, password `ci-only`, database `ci`, host `127.0.0.1`; it creates its own
   news tables and must run in an empty disposable database. Redis publication is mocked.
 
-The 50 public HTML fixtures cover eight publishers. Additional API/PDF fixtures
-cover three 2025 DOJ institutional cases (OPA and USAO), their four attachments,
+The 50 public HTML fixtures cover eight publishers. Eight additional Fed
+discovery responses were captured on 2026-11-04: the 2025/2026
+press, speech and testimony archives, FOMC calendars and H.4.1 release dates.
+Their offline regression checks configured entry URLs and article discovery;
+Fed speech archives use the singular `speech/` directory.
+Additional API/PDF fixtures cover three 2025 DOJ institutional cases (OPA and USAO), their four attachments,
 one excluded personal crime case, and a Federal Register daily XML containing 106
 unique document numbers. The isolated database smoke checks idempotency and
 revisions after API-package edits. Three additional
