@@ -93,7 +93,7 @@ async def save_schedule(session: AsyncSession, source: str, url: str, events: li
                     row.stage = event.stage
                 if row.release_url is None and event.release_url is not None:
                     row.release_url = event.release_url
-                row.next_check_at = max(now, event.at)
+                row.next_check_at = max(row.next_check_at, now, event.at) if getattr(row, "collection_failures", 0) else max(now, event.at)
                 row.revision_no += 1
                 record_revision(session, row, raw_id)
     # 仅撤回尚未公布的未来事件；过去记录不因官网滚动窗口而被删除。

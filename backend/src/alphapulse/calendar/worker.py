@@ -178,13 +178,17 @@ class CalendarWorker:
         urls += [("eia", eia.SCHEDULE)]
         urls += [("adp", adp.INDEX)]
         async with SessionLocal() as session:
-            disabled = set(await session.scalars(select(Source.code).where(Source.code.in_(BOUNDED_SOURCES), Source.enabled.is_(False))))
+            controls = list(await session.scalars(select(Source).where(Source.code.in_(BOUNDED_SOURCES))))
+            disabled = {source.code for source in controls if not source.enabled}
+            paused = {source.code for source in controls if source.paused_until and source.paused_until > now}
         urls = [(s, u) for s, u in urls if s not in disabled]
         checked = {}
         # 启动时明确各来源尚未就绪；月份滚动后移除不再检查的旧月状态。
         self.sources = {url: self.sources.get(url, {"source": source, "checked_at": now.isoformat(), "error": "尚未同步"})
                         for source, url in urls}
         for source, url in urls:
+            if source in paused:
+                continue
             retry_at = self.sources[url].get("retry_at")
             if retry_at and datetime.fromisoformat(retry_at) > datetime.now(UTC):
                 continue
@@ -263,9 +267,13 @@ class CalendarWorker:
                     source.consecutive_failures = 0
                     source.last_success_at = datetime.now(UTC)
                     source.last_error = None
+                    source.paused_until = None
                 else:
                     source.consecutive_failures += 1
                     source.last_error = outcomes[0]
+                    deadlines = [datetime.fromisoformat(state['retry_at']) for state in self.sources.values()
+                                 if state['source'] == code and state.get('retry_at')]
+                    source.paused_until = max([datetime.now(UTC) + timedelta(hours=1), *deadlines])
                     if source.consecutive_failures >= 3:
                         source.enabled = False
             await session.commit()

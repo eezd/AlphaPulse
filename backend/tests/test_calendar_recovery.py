@@ -249,3 +249,22 @@ def test_dol_lagging_index_uses_only_expected_official_archive(trading):
             await worker.http.aclose()
             await worker.bls.aclose()
     asyncio.run(run())
+
+
+def test_restart_honors_persisted_source_pause(trading, monkeypatch):
+    from alphapulse.calendar import worker as module
+    session = AsyncMock()
+    session.__aenter__.return_value = session
+    session.scalars.return_value = [SimpleNamespace(code='adp', enabled=True, paused_until=datetime.now(UTC) + timedelta(hours=1))]
+    session.get.return_value = None
+    monkeypatch.setattr(module, 'SessionLocal', lambda: session)
+    async def run():
+        worker = module.CalendarWorker()
+        worker.fetch = AsyncMock(side_effect=httpx.ConnectError('offline'))
+        try:
+            await worker.schedules()
+            assert all(call.args[0] != 'adp' for call in worker.fetch.await_args_list)
+        finally:
+            await worker.http.aclose()
+            await worker.bls.aclose()
+    asyncio.run(run())
