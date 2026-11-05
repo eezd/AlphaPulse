@@ -37,6 +37,7 @@ export interface SourceInfo {
 }
 
 export interface CollectionRetry {
+  retired_at?: string
   document: { url: string, canonical?: string }
   attempts: number
   next_at: number
@@ -51,6 +52,8 @@ export interface SourcesInfo {
 }
 
 export interface CalendarSourceInfo {
+  enabled: boolean
+  retired_count: number
   code: string
   name: string
   region_code: string

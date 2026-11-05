@@ -77,7 +77,7 @@ def archive_links(body: str, start: date, end: date) -> list[str]:
 
 def csv_link(body: str, base: str) -> str:
     links = [urljoin(base, link) for link in Selector(text=body).css("a[href]::attr(href)").getall()
-             if link == "download/table1.csv"]
+             if link in ("download/table1.csv", "csv/table1.csv")]
     if len(set(links)) != 1:
         raise ValueError("EIA 归档未唯一列示 Table 1 CSV")
     return links[0]

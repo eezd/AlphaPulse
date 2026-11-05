@@ -102,3 +102,32 @@ test("gap links preserve canonical pages and do not rewrite unrelated URLs", () 
     assert.equal(collectionGaps(source)[0].url, url)
   }
 })
+
+test("retired gaps retain evidence without an active warning", () => {
+  const source = {
+    enabled: true,
+    consecutive_failures: 0,
+    code: "doj",
+    name: "DOJ",
+    region_code: "US",
+    list_url: "https://www.justice.gov/",
+    interval_seconds: 60,
+    backfill_hours: 72,
+    last_success_at: null,
+    last_error: null,
+    paused_until: null,
+    supports_history: true,
+    history_target: null,
+    history_position: null,
+    history_done: false,
+    today_new: 0,
+    today_revised: 0,
+    total_items: 0,
+    process: { state: "running", pid: 1, started_at: null, next_run_at: "2026-11-05T00:00:00Z" },
+    collection_stats: { active_gaps: 0, document_gaps: 1, retired_count: 1 },
+    history_cursor: { document_retries: { old: { document: { url: "https://www.justice.gov/old" }, attempts: 3, next_at: 1, error: "HTTP 503", retired_at: "2026-11-05T00:00:00Z" } } }
+  } as SourceInfo
+  assert.equal(sourceStatus(source).text, "等待调度")
+  assert.equal(collectionGaps(source)[0].retired, true)
+  assert.equal(collectionGaps(source)[0].error, "HTTP 503")
+})

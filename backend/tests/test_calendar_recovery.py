@@ -203,3 +203,49 @@ def test_missing_archive_checks_latest_without_accepting_wrong_week(trading, mon
             await worker.http.aclose()
             await worker.bls.aclose()
     asyncio.run(run())
+
+
+def test_result_retirement_is_persistent_and_cooling_does_not_spend_budget(trading, monkeypatch):
+    from alphapulse.calendar import worker as module
+
+    async def run():
+        row = SimpleNamespace(source='umich', collection_failures=0, collection_retired_at=None,
+                              scheduled_at=datetime(2026, 10, 9, tzinfo=UTC), first_received_at=None,
+                              family='umich', error=None)
+        session = AsyncMock()
+        session.scalar.return_value = row
+        session.__aenter__.return_value = session
+        monkeypatch.setattr(module, 'SessionLocal', lambda: session)
+        worker = module.CalendarWorker()
+        try:
+            worker.result_page = AsyncMock(side_effect=module.SourceCooling('example', datetime.now(UTC) + timedelta(hours=2)))
+            await worker.poll_one(1)
+            assert row.collection_failures == 0
+            assert row.next_check_at > datetime.now(UTC) + timedelta(hours=1)
+            worker.result_page.side_effect = ValueError('official archive missing')
+            for _ in range(3):
+                await worker.poll_one(1)
+            assert row.collection_failures == 3 and row.collection_retired_at is not None
+            calls = worker.result_page.await_count
+            await worker.poll_one(1)
+            assert worker.result_page.await_count == calls
+        finally:
+            await worker.http.aclose()
+            await worker.bls.aclose()
+    asyncio.run(run())
+
+
+def test_dol_lagging_index_uses_only_expected_official_archive(trading):
+    from alphapulse.calendar.worker import CalendarWorker
+    async def run():
+        worker = CalendarWorker()
+        response = lambda url, body: httpx.Response(200, text=body, request=httpx.Request('GET', url))
+        worker.index = AsyncMock(return_value=(response('https://oui.doleta.gov/unemploy/archive.asp', '<a href="/press/2025/010225.pdf">old</a>'), 1))
+        worker.fetch = AsyncMock(return_value=(response('https://oui.doleta.gov/press/2026/102926.pdf', 'PDF'), 2))
+        try:
+            await worker.archive_page(SimpleNamespace(source='dol', scheduled_at=datetime(2026, 10, 29, 12, 30, tzinfo=UTC)))
+            worker.fetch.assert_awaited_once_with('dol', 'https://oui.doleta.gov/press/2026/102926.pdf')
+        finally:
+            await worker.http.aclose()
+            await worker.bls.aclose()
+    asyncio.run(run())

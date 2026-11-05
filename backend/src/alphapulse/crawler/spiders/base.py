@@ -253,16 +253,22 @@ class NewsSpider(RedisSpider):
             if history_saved:
                 source.history_position = run.history_position
                 source.history_done = run.history_done
-            if failed:
+            bounded = self.name in ('sec', 'doj', 'congress')
+            source_failed = failed and (not bounded or not run.stats.get('source_readable'))
+            if source_failed:
                 source.consecutive_failures += 1
                 delay = min(BACKOFF_BASE_SECONDS * 2 ** (source.consecutive_failures - 1), BACKOFF_MAX_SECONDS)
                 if run.cooldown_until:
                     delay = max(delay, int((run.cooldown_until - now).total_seconds()) + 1)
+                if bounded:
+                    delay = max(delay, 3600)
+                    if source.consecutive_failures >= 3:
+                        source.enabled = False
                 source.paused_until = now + timedelta(seconds=delay)
                 source.last_error = run.errors[0][:1000]
             else:
                 source.consecutive_failures = 0
-                source.paused_until = None
+                source.paused_until = run.cooldown_until if bounded else None
                 source.last_error = None
                 source.last_success_at = now
             await session.commit()
@@ -270,6 +276,7 @@ class NewsSpider(RedisSpider):
         elapsed = (now - run.started_at).total_seconds()
         summary = f"请求 {run.requests}，条目 {run.items_seen}，新增 {run.items_new}，修订 {run.items_revised}，用时 {elapsed:.1f}s"
         if failed:
+            delay = max(0, int((source.paused_until - now).total_seconds())) if source.paused_until else 0
             self.logger.error("本轮失败：%s；错误 %d 个，暂停 %ds", summary, len(run.errors), delay)
         else:
             self.logger.info("本轮完成：%s", summary)

@@ -11,20 +11,21 @@ import httpx
 from parsel import Selector
 from sqlalchemy import select
 
-from alphapulse.calendar.catalog import SCHEDULE_URLS, UMICH_CSV, UMICH_HISTORY, UMICH_HOME, UMICH_INFO
+from alphapulse.calendar.catalog import SCHEDULE_URLS, UMICH_CSV, UMICH_HISTORY, UMICH_HOME, UMICH_INFO, UMICH_REPORTS
 from alphapulse.calendar import adp, dol, eia, europe
-from alphapulse.calendar.archives import ArchiveMissing
+from alphapulse.calendar.archives import ArchiveMissing, parse_umich_report
 from alphapulse.calendar.parsers import EASTERN, MONTHS, bea_release_link, parse_fed_calendar, parse_ics, parse_values, release_date, bls_periods, release_metadata
 from alphapulse.calendar.service import apply_bls_periods, record_revision, next_poll, save_raw, save_result, save_schedule, save_series
-from alphapulse.calendar.umich import current_result, document_links, monthly_series, parse_schedule, pdf_text
+from alphapulse.calendar.umich import current_result, document_links, monthly_series, parse_schedule, pdf_text, report_links
 from alphapulse.core.db import SessionLocal
 from alphapulse.core.official_sources import FEEDS, HOSTS, feed_entries
 from alphapulse.core.redis import KEY_PREFIX, redis
-from alphapulse.models import EconomicRelease
+from alphapulse.models import EconomicRelease, Source
 
 logger = logging.getLogger("alphapulse.calendar")
 STATUS_KEY = f"{KEY_PREFIX}calendar:status"
 HISTORY_DAYS = 45
+BOUNDED_SOURCES = frozenset({"dol", "eia", "umich", "adp"})
 
 
 def retry_after_at(value: str | None, now: datetime) -> datetime | None:
@@ -95,12 +96,13 @@ class CalendarWorker:
         self.index_cache[source, url] = (datetime.now(UTC) + timedelta(hours=1), page)
         return page
 
-    async def adp_links(self, start, end):
+    async def adp_links(self, start, end, first_page=None):
         url, visited = adp.INDEX, set()
         for _ in range(8):
             if url in visited: raise ValueError('ADP 官方分页形成循环')
             visited.add(url)
-            response, _ = await self.index('adp', url)
+            response, _ = first_page if first_page is not None else await self.index('adp', url)
+            first_page = None
             links, following = adp.release_links(response.text, url, start, end)
             if links or not following: return links
             url = following
@@ -112,7 +114,13 @@ class CalendarWorker:
         module = dol if source == 'dol' else eia
         index_url = dol.SCHEDULE if source == 'dol' else eia.ARCHIVE
         response, _ = await self.index(source, index_url)
-        links = module.archive_links(response.text, day, day)
+        try:
+            links = module.archive_links(response.text, day, day)
+        except ArchiveMissing:
+            if source != 'dol':
+                raise
+            # The index can lag behind published PDFs; validate the PDF date below.
+            links = [f'https://oui.doleta.gov/press/{day:%Y}/{day:%m%d%y}.pdf']
         if len(links) != 1: raise ValueError(f'{source} 当期官方归档不唯一')
         url = links[0]
         if source == 'eia':
@@ -140,7 +148,7 @@ class CalendarWorker:
             if delay > 0: await asyncio.sleep(delay)
             async with self.fetch_slots:
                 client = self.bls if source == "bls" else self.http
-                response = await client.post(url, json=query) if query is not None else await client.get(url)
+                response = await client.post(url, json=query) if query is not None else await client.get(url, **({"timeout": httpx.Timeout(20, connect=8)} if source == "adp" else {}))
             now = datetime.now(UTC)
             self.host_ready[host] = now + timedelta(seconds=1)
             if response.status_code in (403, 429, 503):
@@ -169,6 +177,10 @@ class CalendarWorker:
         urls += [("dol", dol.SCHEDULE)]
         urls += [("eia", eia.SCHEDULE)]
         urls += [("adp", adp.INDEX)]
+        async with SessionLocal() as session:
+            disabled = set(await session.scalars(select(Source.code).where(Source.code.in_(BOUNDED_SOURCES), Source.enabled.is_(False))))
+        urls = [(s, u) for s, u in urls if s not in disabled]
+        checked = {}
         # 启动时明确各来源尚未就绪；月份滚动后移除不再检查的旧月状态。
         self.sources = {url: self.sources.get(url, {"source": source, "checked_at": now.isoformat(), "error": "尚未同步"})
                         for source, url in urls}
@@ -184,7 +196,7 @@ class CalendarWorker:
                     response, raw_id = await self.fetch(source, fetch_url, query=europe.INSEE_QUERY if source == "insee" else None)
                 response.raise_for_status()
                 if source == "adp":
-                    links = await self.adp_links(datetime.min.date(), now.astimezone(EASTERN).date())
+                    links = await self.adp_links(datetime.min.date(), now.astimezone(EASTERN).date(), (response, raw_id))
                     if not links:
                         raise ValueError("ADP 官方新闻索引缺少近期月报")
                     report, evidence = await self.fetch(source, links[0])
@@ -223,8 +235,11 @@ class CalendarWorker:
                     async with SessionLocal() as session:
                         await save_schedule(session, source, url, events, raw_id, datetime.now(UTC))
                         await session.commit()
+                checked.setdefault(source, []).append(None)
                 self.sources[url] = {"source": source, "checked_at": datetime.now(UTC).isoformat(), "error": None}
             except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError, StopIteration) as exc:
+                if not isinstance(exc, SourceCooling):
+                    checked.setdefault(source, []).append(str(exc))
                 state = {"source": source, "checked_at": datetime.now(UTC).isoformat(), "error": str(exc)}
                 retry_at = getattr(exc, 'retry_at', None)
                 if isinstance(exc, httpx.HTTPStatusError):
@@ -236,6 +251,24 @@ class CalendarWorker:
                     state['error'] += f"；下次尝试 {retry_at.isoformat()}"
                 self.sources[url] = state
                 logger.exception("日程采集失败：%s", url)
+
+        async with SessionLocal() as session:
+            for code, outcomes in checked.items():
+                if code not in BOUNDED_SOURCES:
+                    continue
+                source = await session.get(Source, code, with_for_update=True)
+                if source is None:
+                    continue
+                if None in outcomes:
+                    source.consecutive_failures = 0
+                    source.last_success_at = datetime.now(UTC)
+                    source.last_error = None
+                else:
+                    source.consecutive_failures += 1
+                    source.last_error = outcomes[0]
+                    if source.consecutive_failures >= 3:
+                        source.enabled = False
+            await session.commit()
 
     async def umich_schedule(self, info: str, now: datetime) -> None:
         history, _ = await self.fetch("umich", UMICH_HISTORY)
@@ -351,7 +384,17 @@ class CalendarWorker:
                 return None
             if row.first_received_at is not None:
                 return None  # 最新页已换期；保留已取得的当期值，不误报历史缺口。
-            raise ValueError("密歇根当前页已晚于所选历史期次，未取得当期公告")
+            index, _ = await self.index('umich', f'{UMICH_REPORTS}?year={row.period[:4]}')
+            url = report_links(index.text, int(row.period[:4])).get((row.period, row.stage))
+            if url is None:
+                raise ArchiveMissing("密歇根官方年度归档尚未列出所选期次")
+            response, raw_id = await self.fetch('umich', url)
+            response.raise_for_status()
+            announcement = parse_umich_report(await asyncio.to_thread(pdf_text, response.content))
+            if (announcement.at, announcement.period, announcement.stage) != (row.scheduled_at, row.period, row.stage):
+                raise ValueError("密歇根归档日期、月份或阶段与所选期次不符")
+            response.extensions['calendar_announcement'] = announcement
+            return response, raw_id
         if row.source == "bls":
             code = "empsit" if row.family == "jobs" else row.family
             # 本机 BLS archive 路径返回 403，最新公告页可访问；下面必须核对正式发布日期。
@@ -439,6 +482,8 @@ class CalendarWorker:
     async def poll_one(self, release_id: int) -> None:
         async with SessionLocal() as session:
             row = await session.scalar(select(EconomicRelease).where(EconomicRelease.id == release_id).with_for_update())
+            if row is None or row.collection_retired_at is not None:
+                return
             now = datetime.now(UTC)
             retry_at = None
             try:
@@ -458,18 +503,29 @@ class CalendarWorker:
                         announcement = europe.parse_announcement(row.family, response.text)
                         period, stage, values = announcement.period, announcement.stage, announcement.values
                     elif row.family == "umich":
-                        period, stage, values = current_result(response.text)
+                        if announcement := response.extensions.get('calendar_announcement'):
+                            period, stage, values = announcement.period, announcement.stage, announcement.values
+                        else:
+                            period, stage, values = current_result(response.text)
                     else:
                         values = parse_values(row.family, response.text)
                         text = " ".join(Selector(text=response.text).css("h1,#bodytext").xpath("string(.)").getall())
                         period, stage = release_metadata(row.family, text)
                     save_result(session, row, values, response.extensions.get("calendar_url", str(response.url)), raw_id, datetime.now(UTC), period=period, stage=stage)
+                if page is not None:
+                    row.collection_failures = 0
                 row.error = None
             except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError) as exc:
                 row.error = f"{type(exc).__name__}: {exc}"
-                retry_at = getattr(exc, 'retry_at', None)
+                if row.source in BOUNDED_SOURCES and not isinstance(exc, SourceCooling):
+                    row.collection_failures += 1
+                    if row.collection_failures >= 3:
+                        row.collection_retired_at = datetime.now(UTC)
+                if row.source in BOUNDED_SOURCES:
+                    retry_at = datetime.now(UTC) + timedelta(hours=1)
+                retry_at = max(filter(None, (retry_at, getattr(exc, 'retry_at', None))), default=None)
                 if isinstance(exc, httpx.HTTPStatusError):
-                    retry_at = self.cooldowns.get(exc.request.url.host, retry_at)
+                    retry_at = max(filter(None, (retry_at, self.cooldowns.get(exc.request.url.host))), default=None)
                 if retry_at: row.error += f"；下次尝试 {retry_at.isoformat()}"
                 if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (429, 503):
                     retry_at = max(retry_at or datetime.now(UTC), retry_after_at(exc.response.headers.get("Retry-After"), datetime.now(UTC)) or datetime.now(UTC))
@@ -483,7 +539,8 @@ class CalendarWorker:
     async def results(self) -> None:
         now = datetime.now(UTC)
         async with SessionLocal() as session:
-            ids = list(await session.scalars(select(EconomicRelease.id).where(
+            ids = list(await session.scalars(select(EconomicRelease.id).join(Source, Source.code == EconomicRelease.source).where(
+                Source.enabled.is_(True), EconomicRelease.collection_retired_at.is_(None),
                 EconomicRelease.source != "jin10",
                 EconomicRelease.schedule_status == "scheduled", EconomicRelease.scheduled_at <= now,
                 EconomicRelease.scheduled_at >= now - timedelta(days=HISTORY_DAYS), EconomicRelease.next_check_at <= now,

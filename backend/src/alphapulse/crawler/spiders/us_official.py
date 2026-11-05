@@ -6,6 +6,7 @@ import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from html import escape, unescape
+from email.utils import parsedate_to_datetime
 
 from lxml import etree
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -155,6 +156,8 @@ class USOfficialSpider(NewsSpider):
     def request_for(self, url, callback, lane, **meta):
         url = official_url(self.name, url)
         request = self.request(url, callback, lane=lane, official_source=self.name, **meta)
+        if self.name in ('sec', 'doj', 'congress'):
+            request.meta['dont_retry'] = True
         request.priority = 10 if lane == 'realtime' else -10
         # Credentials never travel to document hosts or into persisted URLs.
         if urlsplit(url).hostname == 'api.congress.gov':
@@ -317,6 +320,7 @@ class USOfficialSpider(NewsSpider):
             docs = list({d['url']: d for d in docs}.values())
             if not docs:
                 raise ValueError('官方列表未发现文档，不能认定历史遍历完成')
+        self.run.stats['source_readable'] = 1
         if self.name == 'fed':
             begin = self.run.history_target if lane == 'history' else self.run.cutoff
             def in_range(doc):
@@ -380,11 +384,23 @@ class USOfficialSpider(NewsSpider):
         self.run.errors.append(error)
         self.logger.error('文档缺口：%s；%s', doc['url'], error)
         state['pending'].pop(0)
+        self.retire_exhausted()
         return self.advance(request.meta['lane'])
 
     def on_request_error(self, failure):
         status = failure.value.response.status if failure.check(HttpError) else None
-        if status not in (403, 429):
+        if self.name in ('sec', 'doj', 'congress') and status in (403, 429, 503):
+            if status in (403, 429):
+                self.block_until(datetime.now(UTC) + timedelta(hours=1))
+            value = failure.value.response.headers.get('Retry-After', b'').decode('ascii', errors='ignore')
+            if value:
+                try:
+                    until = datetime.now(UTC) + timedelta(seconds=int(value)) if value.isdigit() else parsedate_to_datetime(value)
+                    if until.tzinfo is not None:
+                        self.block_until(until)
+                except (ValueError, TypeError, OverflowError):
+                    self.logger.warning('忽略无效 Retry-After 响应头')
+        if status not in (403, 429) or self.name in ('sec', 'doj', 'congress'):
             requests = self.document_failed(failure.request, f'请求失败 {failure.request.url}：{status or repr(failure.value)}')
             if requests is not None:
                 return requests
@@ -539,6 +555,10 @@ class USOfficialSpider(NewsSpider):
                     file_id = attachment['file']['id']
                     if not str(file_id).isdigit():
                         raise ValueError('DOJ API 附件编号无效')
+                    if (f'/media/{file_id}' in (record.get('image') or '') and
+                            re.match(r'Photo[-\s]', attachment.get('alt', ''), re.I) and
+                            'left to right' in attachment.get('alt', '').lower()):
+                        continue  # Explicitly captioned illustration, not a text document.
                     api_attachments.append({'url': f'https://www.justice.gov/media/{file_id}/dl', 'title': attachment.get('description') or 'Official attachment', 'status': 'pending'})
                 attachment_html = ''
             elif not isinstance(attachment_html, str):
@@ -623,18 +643,23 @@ class USOfficialSpider(NewsSpider):
             retries.pop(context['url'], None)
             if not context['reasons']:
                 self.run.stats['excluded'] = self.run.stats.get('excluded', 0) + 1
+        self.retire_exhausted()
         self.run.stats['unresolved_bills'] = len(retries)
         self.cursor[lane]['pending'].pop(0)
         if lane == 'realtime':
             self.cursor.setdefault('checked', {})[context['document_url']] = self.run.started_at.timestamp()
 
     def attach_or_finish(self, parsed, lane):
+        if self.cursor.get('attachment_retries', {}).get(parsed['url'], {}).get('retired_at'):
+            yield from self.complete(lane)
+            return
         pending = next((a for a in parsed['extra']['attachments'] if a['status'] == 'pending'), None)
         if pending:
             request = self.request_for(pending['url'], self.parse_attachment, lane, parsed=parsed)
             request.meta['handle_httpstatus_list'] = [404, 410]
             yield request
             return
+        self.retire_exhausted()
         text = html_to_text(parsed['content_html'])
         reasons = selection(self.name, parsed['title'], text) or parsed['extra'].get('selection_reasons', [])
         incomplete = any(a['status'] != 'complete' for a in parsed['extra']['attachments'])
@@ -646,6 +671,7 @@ class USOfficialSpider(NewsSpider):
             retries[parsed['url']] = {'document': retry_doc, 'attempts': previous.get('attempts', 0) + 1, 'next_at': (datetime.now(UTC) + timedelta(hours=1)).timestamp(), 'error': error}
         elif not incomplete:
             retries.pop(parsed['url'], None)
+        self.retire_exhausted()
         if reasons:
             parsed['extra']['selection_reasons'] = reasons
             parsed['extra']['content_scope'] = 'partial' if incomplete else 'article'
@@ -675,6 +701,14 @@ class USOfficialSpider(NewsSpider):
             attachment.update(status='unavailable', error=str(exc))
             self.logger.warning('附件缺口：%s', response.url)
         yield from self.attach_or_finish(parsed, response.meta['lane'])
+
+    def retire_exhausted(self):
+        if self.name not in ('sec', 'doj', 'congress'):
+            return
+        for key in ('document_retries', 'attachment_retries', 'bill_retries'):
+            for entry in self.cursor.get(key, {}).values():
+                if entry['attempts'] >= 3:
+                    entry.setdefault('retired_at', datetime.now(UTC).isoformat())
 
     def complete(self, lane):
         doc = self.cursor[lane]['pending'].pop(0)

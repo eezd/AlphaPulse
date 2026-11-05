@@ -65,6 +65,8 @@ class CalendarSourceOut(BaseModel):
     code: str
     name: str
     region_code: str
+    enabled: bool
+    retired_count: int
     worker_alive: bool
     heartbeat_at: datetime | None
     schedule_checked_at: datetime | None
@@ -124,13 +126,14 @@ async def calendar_sources(session: AsyncSession) -> list[CalendarSourceOut]:
     now = datetime.now(UTC)
     raw = await redis.get(f"{KEY_PREFIX}calendar:status")
     heartbeat = json.loads(raw) if raw else None
-    pending = EconomicRelease.first_received_at.is_(None) & (EconomicRelease.schedule_status == "scheduled")
+    pending = EconomicRelease.first_received_at.is_(None) & (EconomicRelease.schedule_status == "scheduled") & EconomicRelease.collection_retired_at.is_(None)
     published = EconomicRelease.first_received_at.is_not(None)
     rows = (await session.execute(select(
         EconomicRelease.source,
         func.max(EconomicRelease.schedule_checked_at).label("schedule_success_at"),
         func.max(EconomicRelease.first_received_at).label("latest_result_at"),
         func.min(EconomicRelease.scheduled_at).filter(pending & (EconomicRelease.scheduled_at > now)).label("next_event_at"),
+        func.count().filter(EconomicRelease.collection_retired_at.is_not(None)).label("retired_count"),
         func.count().filter(pending & EconomicRelease.scheduled_at.between(now - timedelta(days=45), now)).label("overdue_count"),
         func.min(EconomicRelease.scheduled_at).filter(published).label("history_start"),
         func.max(EconomicRelease.scheduled_at).filter(published).label("history_end"),
@@ -138,7 +141,7 @@ async def calendar_sources(session: AsyncSession) -> list[CalendarSourceOut]:
     stats = {row["source"]: dict(row) for row in rows}
     result_errors = {}
     for source, error in await session.execute(select(EconomicRelease.source, EconomicRelease.error).where(
-        EconomicRelease.error.is_not(None), EconomicRelease.schedule_status == "scheduled",
+        EconomicRelease.error.is_not(None), EconomicRelease.collection_retired_at.is_(None), EconomicRelease.schedule_status == "scheduled",
         EconomicRelease.scheduled_at >= now - timedelta(days=45),
     ).order_by(EconomicRelease.last_checked_at.desc())):
         result_errors.setdefault(source, error)
@@ -158,9 +161,12 @@ async def calendar_sources(session: AsyncSession) -> list[CalendarSourceOut]:
         errors = [s["error"] for s in checks if s["error"]]
         if source.code in result_errors:
             errors.append(result_errors[source.code])
+        if not source.enabled and source.last_error:
+            errors.append(source.last_error)
         data = stats.get(source.code, {})
         output.append(CalendarSourceOut(
             code=source.code, name=source.name, region_code=REGIONS[source.code], worker_alive=source_alive,
+            enabled=source.enabled, retired_count=data.get("retired_count", 0),
             heartbeat_at=current_heartbeat["at"] if current_heartbeat else None,
             schedule_checked_at=max((s["checked_at"] for s in checks), default=None),
             **{key: data.get(key) for key in ("schedule_success_at", "latest_result_at", "next_event_at", "history_start", "history_end")},
@@ -197,6 +203,8 @@ async def list_sources(session: Annotated[AsyncSession, Depends(get_session)]) -
         bills = (source.history_cursor or {}).get('bill_retries', {})
         bill_pending = sum(value['attempts'] < 3 for value in bills.values())
         attachment_stats[source.code] = {
+            'retired_count': sum(bool(v.get('retired_at')) for group in (retries, documents, bills) for v in group.values()),
+            'active_gaps': sum(not v.get('retired_at') for group in (retries, documents, bills) for v in group.values()),
             'attachment_gaps': len(retries),
             'attachment_retry_pending': pending,
             'attachment_retry_exhausted': len(retries) - pending,

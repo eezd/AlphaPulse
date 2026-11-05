@@ -12,7 +12,7 @@ export interface CalendarItem {
   unit: string | null
   importance: number
   scheduled_at: string
-  status: "scheduled" | "waiting" | "delayed" | "released" | "withdrawn" | "error" | "historical" | "unavailable" | "recorded"
+  status: "retired" | "scheduled" | "waiting" | "delayed" | "released" | "withdrawn" | "error" | "historical" | "unavailable" | "recorded"
   actual: string | null
   previous: string | null
   forecast: string | null

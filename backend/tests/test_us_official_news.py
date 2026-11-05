@@ -1343,3 +1343,36 @@ def test_real_congress_api_fixture_replays_with_visible_source_gap(trading, tmp_
     assert sum(a['status'] == 'complete' for a in attachments) == 14
     assert sum(a['status'] == 'unavailable' for a in attachments) == 1
     assert any(item['extra']['content_scope'] == 'official_action' for item in items)
+
+
+def test_terminal_news_gap_survives_rediscovery(trading):
+    obj = spider(trading, 'doj')
+    url = 'https://www.justice.gov/opa/pr/example'
+    obj.cursor['attachment_retries'] = {url: {'attempts': 3, 'error': 'unsupported image'}}
+    obj.retire_exhausted()
+    assert obj.cursor['attachment_retries'][url]['retired_at']
+    obj.complete = lambda lane: []
+    assert list(obj.attach_or_finish({'url': url}, 'realtime')) == []
+
+
+def test_selected_news_requests_have_one_retry_owner(trading):
+    obj = spider(trading, 'doj')
+    req = obj.request_for(SOURCES['doj'].entries[0], obj.parse_listing, 'realtime')
+    assert req.meta['dont_retry'] is True
+
+
+def test_doj_captioned_photo_is_not_a_document_gap(trading):
+    obj = spider(trading, 'doj')
+    obj.run.history_deadline = time.monotonic() - 1
+    identifier = str(uuid.uuid4())
+    doc = {'url': f'https://www.justice.gov/api/v1/press_releases/{identifier}.json', 'kind': 'doj'}
+    obj.cursor['history']['pending'] = [doc]
+    record = {'uuid': identifier, 'url': 'https://www.justice.gov/opa/pr/test', 'date': '1735732800',
+              'title': 'Cryptocurrency exchange settlement', 'body': '<p>The cryptocurrency exchange pleaded guilty to violations of financial regulations.</p>',
+              'image': '<a href="/usao-sd/media/1470086">award.png</a>',
+              'attachment': [{'file': {'id': '1470086'}, 'alt': 'Photo- Left to right: award recipients.'}]}
+    async def collect():
+        return [v async for v in obj.parse_document(response(doc['url'], json.dumps({'metadata': {'responseInfo': {'status': 200}}, 'results': [record]}), lane='history', document=doc))]
+    item, = asyncio.run(collect())
+    assert item['extra']['attachments'] == []
+    assert not obj.cursor.get('attachment_retries')

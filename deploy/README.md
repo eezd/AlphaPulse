@@ -413,3 +413,21 @@ callback chain finished, including explicit partial packages; it does not mean
 full source quality passed. Exhausted candidate/request budgets remain incomplete.
 Mocked tests and real captured responses are separate evidence; neither proves
 complete 2025 coverage or authorizes production activation.
+
+### Bounded collection failures (November 2026)
+
+SEC, DOJ and Congress use one durable retry layer (three failed attempts, at least
+one hour apart). EIA, DOL, Michigan and ADP retain the same budget per calendar
+release in `collection_failures` / `collection_retired_at`. Cooling does not spend
+an attempt. Retirement retains evidence and values; new releases are independent.
+A source is disabled only after three failed discovery/schedule checks, not for
+one document gap. Explicit official photo captions can exclude illustrations from
+text extraction. Missing official dates are never replaced by update timestamps.
+
+Migration `db2345678901` is additive and must precede activation. With the crawler
+stopped under the deployment lock, preview `python -m
+alphapulse.crawler.repair_collection`; append `--execute` once to establish the
+repair budget for existing news gaps. It preserves the previous retry evidence
+and records a durable initialization marker. Repeating it cannot renew the budget.
+Set the authorized SEC contact in the private instance environment before enabling
+SEC; do not put the address or credentials in tracked configuration.

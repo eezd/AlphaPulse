@@ -109,6 +109,8 @@ def save_result(session: AsyncSession, row: EconomicRelease, values: dict, url: 
     if ((period is not None and row.period is not None and period != row.period)
             or (stage is not None and row.stage is not None and stage != row.stage)):
         raise ValueError("公告统计期或发布阶段与日历不符")
+    row.collection_failures = 0
+    row.collection_retired_at = None
     if row.values != values or row.release_url != url or (period is not None and row.period != period) or (stage is not None and row.stage != stage):
         row.values = values
         row.release_url = url
@@ -177,6 +179,8 @@ def release_rows(row: EconomicRelease, now: datetime) -> list[dict]:
         state = "withdrawn"
     elif row.first_received_at is not None:
         state = "released"
+    elif getattr(row, "collection_retired_at", None) is not None:
+        state = "retired"
     elif now - row.scheduled_at > timedelta(days=45):
         state = "historical"
     elif row.error:
@@ -214,7 +218,7 @@ def release_rows(row: EconomicRelease, now: datetime) -> list[dict]:
                        "impact_basis": "forecast" if forecast is not None else "previous" if previous is not None else None,
                        "impact": direction, "explanation": explanation, "release_url": row.release_url,
                        "schedule_url": row.schedule_url, "first_received_at": row.first_received_at,
-                       "last_checked_at": row.last_checked_at, "error": row.error, "revision_no": row.revision_no})
+                       "last_checked_at": row.last_checked_at, "collection_retired_at": getattr(row, "collection_retired_at", None), "error": row.error, "revision_no": row.revision_no})
     return result
 
 

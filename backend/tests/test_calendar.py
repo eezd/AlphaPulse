@@ -178,7 +178,7 @@ def test_rolling_page_rollover_preserves_received_result_without_source_error(tr
     async def check():
         first_received = datetime(2026, 9, 24, 14, tzinfo=UTC)
         values = {"cpi_yoy" if source == "bls" else "umich_sentiment": {"actual": "2.5", "previous": "2.4"}}
-        row = SimpleNamespace(id=1, source=source, family="cpi" if source == "bls" else "umich",
+        row = SimpleNamespace(id=1, collection_failures=0, collection_retired_at=None, source=source, family="cpi" if source == "bls" else "umich",
                               scheduled_at=first_received, first_received_at=first_received,
                               period="2026-09", stage="final" if source == "umich" else None,
                               values=values.copy(), revision_no=3, error="旧的采集错误")
@@ -275,7 +275,7 @@ def test_calendar_api_requires_auth_validates_range_and_exposes_unavailable_work
     asyncio.run(check())
 
 
-def test_worker_initializes_all_sources_and_drops_expired_month_status(trading):
+def test_worker_initializes_all_sources_and_drops_expired_month_status(trading, schedule_session):
     import httpx
     from alphapulse.calendar.worker import CalendarWorker
     async def check():
@@ -313,7 +313,7 @@ def test_limited_result_preserves_response_and_defers_single_poll(trading, monke
 
     async def check():
         now = datetime.now(UTC)
-        row = SimpleNamespace(id=1, source="eurostat", family="ea_hicp", scheduled_at=now,
+        row = SimpleNamespace(id=1, collection_failures=0, collection_retired_at=None, source="eurostat", family="ea_hicp", scheduled_at=now,
                               first_received_at=None, release_url="https://ec.europa.eu/eurostat/product?code=2-16102026-ap")
         session = SimpleNamespace(scalar=AsyncMock(return_value=row), commit=AsyncMock())
         class Context:
@@ -344,7 +344,7 @@ def test_limited_result_preserves_response_and_defers_single_poll(trading, monke
     asyncio.run(check())
 
 
-def test_schedule_honors_server_pause_without_blocking_other_sources(trading):
+def test_schedule_honors_server_pause_without_blocking_other_sources(trading, schedule_session):
     import httpx
     from alphapulse.calendar.worker import CalendarWorker
     async def check():
@@ -367,3 +367,14 @@ def test_schedule_honors_server_pause_without_blocking_other_sources(trading):
             await worker.http.aclose()
             await worker.bls.aclose()
     asyncio.run(check())
+
+
+@pytest.fixture
+def schedule_session(trading, monkeypatch):
+    from alphapulse.calendar import worker as module
+    session = AsyncMock()
+    session.scalars.return_value = []
+    session.get.return_value = None
+    session.__aenter__.return_value = session
+    monkeypatch.setattr(module, 'SessionLocal', lambda: session)
+    return session

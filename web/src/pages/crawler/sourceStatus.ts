@@ -15,7 +15,7 @@ export function sourceStatus(source: SourceInfo, restarting = false, now = Date.
     return { type: "primary", text: "采集中" } as const
   if (source.consecutive_failures)
     return { type: "danger", text: "失败待重试" } as const
-  if (source.collection_stats?.document_gaps || source.collection_stats?.attachment_gaps || source.collection_stats?.unresolved_bills)
+  if ((source.collection_stats?.active_gaps ?? (source.collection_stats?.document_gaps || source.collection_stats?.attachment_gaps || source.collection_stats?.unresolved_bills)))
     return { type: "warning", text: "存在采集缺口" } as const
   return { type: "info", text: "等待调度" } as const
 }
@@ -49,6 +49,7 @@ export function collectionGaps(source: Pick<SourceInfo, "history_cursor">) {
     url: originalUrl(retry.document.canonical ?? retry.document.url),
     error: retry.error || "历史记录未保存具体原因，请核对原文",
     attempts: retry.attempts,
+    retired: !!retry.retired_at,
     exhausted: retry.attempts >= 3,
     nextAt: new Date(retry.next_at * 1000).toISOString()
   })))

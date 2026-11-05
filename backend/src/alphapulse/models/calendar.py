@@ -27,6 +27,8 @@ class EconomicRelease(Base):
     first_received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     next_check_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    collection_failures: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    collection_retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error: Mapped[str | None] = mapped_column(Text)
     # 按指标代码保存实际值、官方报告内前值和引用；数字以十进制字符串存储。
     values: Mapped[dict] = mapped_column(JSONB, default=dict)

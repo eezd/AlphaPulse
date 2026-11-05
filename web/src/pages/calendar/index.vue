@@ -26,7 +26,7 @@ const detail = ref<CalendarItem | null>(null)
 const country = ref("")
 const impactLabels = { pending: "待公布", bullish: "利多", bearish: "利空", neutral: "影响较小", uncertain: "待判断" }
 const countries = computed(() => data.value?.countries ?? [])
-const labels = { scheduled: "待公布", waiting: "获取中", delayed: "取数延迟", released: "已公布", withdrawn: "已撤回", error: "采集异常", historical: "仅有日程", unavailable: "官方未公布", recorded: "已收录" }
+const labels = { retired: "已停止采集", scheduled: "待公布", waiting: "获取中", delayed: "取数延迟", released: "已公布", withdrawn: "已撤回", error: "采集异常", historical: "仅有日程", unavailable: "官方未公布", recorded: "已收录" }
 const formatted = (time: string) => dayjs(time).tz(zone).format("MM-DD HH:mm:ss")
 const groups = computed(() => {
   const result = new Map<string, CalendarItem[]>()

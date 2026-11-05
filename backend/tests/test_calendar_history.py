@@ -220,7 +220,8 @@ def test_umich_poll_waits_for_final_instead_of_reusing_preliminary(trading):
         try:
             assert await worker.result_page(row) is None
             row.period = "2026-09"
-            with pytest.raises(ValueError, match="历史期次"):
+            worker.index = AsyncMock(return_value=(httpx.Response(200, text='<div id="report_heading"><span class="title">2026 Reports</span></div><a href="fetchdoc.php?docid=1">August Final Results</a>', request=httpx.Request('GET', 'https://data.sca.isr.umich.edu/reports.php?year=2026')), 2))
+            with pytest.raises(ValueError, match="年度归档"):
                 await worker.result_page(row)
         finally:
             await worker.http.aclose()

@@ -16,12 +16,13 @@ const date = (at: string | null) => at ? formatTime(at) : "尚无记录"
           日历
         </el-tag>
         <div class="flex-1" />
-        <el-tag :type="!source.worker_alive ? 'danger' : source.errors.length ? 'warning' : source.schedule_success_at ? 'success' : 'info'" size="small">
-          {{ !source.worker_alive ? "进程离线" : source.errors.length ? "采集异常" : source.schedule_success_at ? "同步正常" : "待同步" }}
+        <el-tag :type="!source.enabled ? 'info' : !source.worker_alive ? 'danger' : source.errors.length ? 'warning' : source.schedule_success_at ? 'success' : 'info'" size="small">
+          {{ !source.enabled ? "已停用" : !source.worker_alive ? "进程离线" : source.errors.length ? "采集异常" : source.schedule_success_at ? "同步正常" : "待同步" }}
         </el-tag>
       </div>
     </template>
     <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 text-xs text-slate-500">
+      <dt>已停止采集</dt><dd>{{ source.retired_count }} 场（历史资料保留）</dd>
       <dt>进程心跳</dt><dd>{{ date(source.heartbeat_at) }}</dd>
       <dt>日程最近检查</dt><dd>{{ date(source.schedule_checked_at) }}</dd>
       <dt>日程最近成功</dt><dd>{{ date(source.schedule_success_at) }}</dd>

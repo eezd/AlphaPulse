@@ -144,21 +144,24 @@ onMounted(loadLatest)
         </div>
       </div>
     </div>
-    <div v-if="source.collection_stats?.unresolved_bills" class="text-xs text-amber-600">
+    <div v-if="source.collection_stats?.active_gaps !== 0 && source.collection_stats?.unresolved_bills" class="text-xs text-amber-600">
       待核验法案 {{ source.collection_stats.unresolved_bills }}；待重试 {{ source.collection_stats.bill_retry_pending }}；重试已耗尽 {{ source.collection_stats.bill_retry_exhausted }}
     </div>
-    <div v-if="source.collection_stats?.attachment_gaps" class="text-xs text-amber-600">
+    <div v-if="source.collection_stats?.active_gaps !== 0 && source.collection_stats?.attachment_gaps" class="text-xs text-amber-600">
       附件待核验文档 {{ source.collection_stats.attachment_gaps }}；待重试 {{ source.collection_stats.attachment_retry_pending }}；重试已耗尽 {{ source.collection_stats.attachment_retry_exhausted }}，请核对原文
     </div>
-    <div v-if="source.collection_stats?.document_gaps" class="text-xs text-amber-600">
+    <div v-if="source.collection_stats?.active_gaps !== 0 && source.collection_stats?.document_gaps" class="text-xs text-amber-600">
       正文待核验 {{ source.collection_stats.document_gaps }}；待重试 {{ source.collection_stats.document_retry_pending }}；重试已耗尽 {{ source.collection_stats.document_retry_exhausted }}，请核对来源日志
     </div>
+    <p v-if="source.collection_stats?.retired_count" class="text-xs text-slate-500">
+      已停止采集 {{ source.collection_stats.retired_count }} 条，原因及原文保留在详情中。
+    </p>
     <details v-if="gaps.length" class="text-xs text-amber-700">
       <summary class="cursor-pointer">
         缺口详情（{{ gaps.length }}）
       </summary>
       <div v-for="gap in gaps" :key="gap.key" class="mt-2 border border-amber-200 rounded border-solid p-2">
-        <div>{{ gap.label }}；已尝试 {{ gap.attempts }} 次；{{ gap.exhausted ? "重试已耗尽" : `下次重试不早于 ${formatTime(gap.nextAt)}` }}</div>
+        <div>{{ gap.label }}；已尝试 {{ gap.attempts }} 次；{{ gap.retired ? "已停止采集" : gap.exhausted ? "重试已耗尽" : `下次重试不早于 ${formatTime(gap.nextAt)}` }}</div>
         <div class="my-1 whitespace-pre-wrap break-words">
           {{ gap.error }}
         </div>

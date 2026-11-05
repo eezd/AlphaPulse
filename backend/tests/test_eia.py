@@ -123,3 +123,10 @@ def test_history_preview_requires_matching_archive_date_without_writes(trading, 
     assert result["announcements"].get("eia_stocks", 0) == int(valid)
     assert bool(result["errors"]) != valid
     save.assert_not_awaited()
+
+
+def test_current_official_archive_csv_directory():
+    url = 'https://www.eia.gov/petroleum/supply/weekly/archive/2026/2026_10_15/wpsr_2026_10_15.php'
+    assert eia.csv_link('<a href="csv/table1.csv">CSV</a>', url) == url.rsplit('/', 1)[0] + '/csv/table1.csv'
+    with pytest.raises(ValueError):
+        eia.csv_link('<a href="csv/table1.csv">A</a><a href="download/table1.csv">B</a>', url)
