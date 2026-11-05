@@ -263,9 +263,26 @@ list traversal does not prove complete bodies or attachments. Attachment failure
 remain visible on the news item, with up to three scheduled attempts one hour apart;
 exhausted gaps require explicit investigation or another traversal.
 
+Article and DOJ document failures also remain explicit gaps, with at most three
+scheduled attempts one hour apart, measured from the actual failure time.
+Real-time and history lanes share the document retry quota; a document retry is
+requested only once per round. Due body and attachment retries remain eligible
+after their document leaves the real-time lookback window.
+A failed round may reuse completed document
+reads and retain retry evidence, but cannot advance its lane or history position;
+a pipeline error prevents saving completed reads. HTTP 403/429 and detected
+challenge pages stop the round for at least fifteen minutes; a longer valid
+`Retry-After` is honored and subsequent blocks cannot shorten that deadline.
+CFTC document requests are serialized with a three-second
+delay. The console distinguishes active collection, scheduled waiting, failure
+backoff, stopped processes and unresolved document gaps.
+
 Real-time discovery follows pagination, including every Federal Register page
 within a day. Only verified descending feeds stop early at a fully dated page
 outside the lookback window; unknown ordering is traversed conservatively.
+Treasury currently returns the first page again for subsequent page requests.
+A dated real-time page can end discovery at the lookback boundary; a repeated
+historical page still fails explicitly and cannot establish historical coverage.
 Congress screening reads subjects, CRS summaries, and available text before
 excluding a bill whose title alone is inconclusive. Missing bill evidence remains
 an unresolved gap, retried at most three times one hour apart per official update;

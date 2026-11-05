@@ -7,6 +7,7 @@ import uuid
 from collections.abc import Callable, Coroutine, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -67,6 +68,9 @@ class RunState:
     history_deadline: float = 0
     official_cursor: dict | None = None
     stats: dict = field(default_factory=dict)
+    completed_documents_safe: bool = False
+    cooldown_until: datetime | None = None
+    document_retries_started: set[str] = field(default_factory=set)
 
     @property
     def full_scan(self) -> bool:
@@ -188,6 +192,7 @@ class NewsSpider(RedisSpider):
 
     def _on_item_error(self, failure: Failure) -> None:
         if self.run:
+            self.run.completed_documents_safe = False
             self.run.errors.append(f"新闻处理或落库失败：{failure.value!r}")
 
     async def _on_closed(self) -> None:
@@ -238,12 +243,21 @@ class NewsSpider(RedisSpider):
                 if history_saved:
                     cursor["history"] = run.official_cursor.get("history", {})
                 source.history_cursor = cursor
+            elif failed and run.official_cursor is not None and run.completed_documents_safe:
+                # Retain completed reads and explicit gaps, never failed lane positions.
+                cursor = dict(source.history_cursor or {})
+                for key in ('checked', 'document_retries', 'attachment_retries', 'bill_retries'):
+                    if key in run.official_cursor:
+                        cursor[key] = run.official_cursor[key]
+                source.history_cursor = cursor
             if history_saved:
                 source.history_position = run.history_position
                 source.history_done = run.history_done
             if failed:
                 source.consecutive_failures += 1
                 delay = min(BACKOFF_BASE_SECONDS * 2 ** (source.consecutive_failures - 1), BACKOFF_MAX_SECONDS)
+                if run.cooldown_until:
+                    delay = max(delay, int((run.cooldown_until - now).total_seconds()) + 1)
                 source.paused_until = now + timedelta(seconds=delay)
                 source.last_error = run.errors[0][:1000]
             else:
@@ -293,10 +307,22 @@ class NewsSpider(RedisSpider):
             headers=getattr(self, "request_headers", None),
         )
 
+    def block_until(self, until: datetime) -> None:
+        self.run.blocked = True
+        self.run.cooldown_until = max(self.run.cooldown_until or until, until)
+
     def on_request_error(self, failure: Failure) -> None:
         status = failure.value.response.status if failure.check(HttpError) else None
         if status in (403, 429):
-            self.run.blocked = True
+            now = datetime.now(UTC)
+            self.block_until(now + timedelta(seconds=BACKOFF_MAX_SECONDS))
+            retry_after = failure.value.response.headers.get('Retry-After', b'').decode('ascii', errors='ignore')
+            if retry_after:
+                try:
+                    until = now + timedelta(seconds=int(retry_after)) if retry_after.isdigit() else parsedate_to_datetime(retry_after)
+                    self.block_until(until)
+                except (ValueError, TypeError, OverflowError):
+                    self.logger.warning('忽略无效 Retry-After 响应头')
         message = f"请求失败 {failure.request.url}：{status or repr(failure.value)}"
         self.run.errors.append(message)
         self.logger.error(message)

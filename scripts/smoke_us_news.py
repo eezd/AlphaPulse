@@ -178,13 +178,11 @@ async def main():
     assert captured[0]['external_id'] == 'legacy-rss-guid'
     captured.clear()
     invalid = HtmlResponse(sample['url'], body=b'<h1>Just a moment...</h1><p>Enable JavaScript and cookies to continue.</p>', encoding='utf-8', request=request)
-    try:
-        async for item in obj.parse_document(invalid):
-            await pipeline.process_item(item)
-    except ValueError:
-        pass
-    else:
-        raise AssertionError('Challenge must fail before the pipeline')
+    obj.cursor['history']['pending'] = [doc]
+    assert not [item async for item in obj.parse_document(invalid)]
+    assert obj.run.errors and obj.run.blocked
+    assert obj.cursor['document_retries'][doc['url']]['attempts'] == 1
+    assert not captured
     async with SessionLocal() as session:
         news = await session.scalar(select(NewsItem).where(NewsItem.external_id == 'legacy-rss-guid'))
         assert (news.content_hash, news.revision_no) == baseline
@@ -216,6 +214,31 @@ async def main():
         saved = await session.get(CrawlRun, original_id)
         assert saved.status == 'success'
         assert (await session.get(Source, 'ofac')).history_cursor['checkpoint_probe'] == 'committed'
+    # A failed document preserves safe reads and explicit gaps, not lane positions.
+    async with SessionLocal() as session:
+        before_cursor = copy.deepcopy((await session.get(Source, 'ofac')).history_cursor)
+    completed = {'https://ofac.treasury.gov/recent-actions/20261104': obj.run.started_at.timestamp()}
+    gap_url = 'https://ofac.treasury.gov/recent-actions/20261103'
+    gaps = {gap_url: {'document': {'url': gap_url, 'kind': 'article'}, 'attempts': 1, 'next_at': obj.run.started_at.timestamp()+3600, 'error': 'HTTP503'}}
+    failed_run = copy.deepcopy(obj.run)
+    failed_run.id = uuid.uuid4()
+    failed_run.errors = ['document unavailable']
+    failed_run.completed_documents_safe = True
+    failed_run.official_cursor = {'checked': completed, 'document_retries': gaps, 'realtime': {'entry': 99}, 'history': {'entry': 99}}
+    await obj._finish_run(failed_run)
+    async with SessionLocal() as session:
+        cursor = (await session.get(Source, 'ofac')).history_cursor
+        assert cursor['checked'] == completed and cursor['document_retries'] == gaps
+        assert cursor.get('history') == before_cursor.get('history')
+        assert cursor.get('realtime') == before_cursor.get('realtime')
+        assert (await session.get(CrawlRun, failed_run.id)).status == 'failed'
+    unsafe_run = copy.deepcopy(failed_run)
+    unsafe_run.id = uuid.uuid4()
+    unsafe_run.completed_documents_safe = False
+    unsafe_run.official_cursor['checked'] = {'must-not-be-skipped': 1}
+    await obj._finish_run(unsafe_run)
+    async with SessionLocal() as session:
+        assert (await session.get(Source, 'ofac')).history_cursor['checked'] == completed
     # API/PDF packages use the real parser and database revision pipeline too.
     api_items = await public_api_items() + await congress_reference_items() + await congress_api_items()
     with patch.object(pipelines, 'redis', SimpleNamespace(publish=AsyncMock())):
@@ -235,7 +258,7 @@ async def main():
     async with SessionLocal() as session:
         assert await session.scalar(select(func.count()).select_from(NewsRevision)) == baseline_count + 1
     await engine.dispose()
-    print('US source migration, HTML, API/PDF, GovInfo and Congress packages, API/PDF replay and revision, negative screening, daily XML, RSS identity, challenge rejection and checkpoint recovery passed')
+    print('US source migration, HTML, API/PDF, GovInfo and Congress packages, API/PDF replay and revision, negative screening, daily XML, RSS identity, challenge rejection, checkpoint recovery and failed-document persistence passed')
 
 
 if __name__ == '__main__':

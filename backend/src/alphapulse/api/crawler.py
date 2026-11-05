@@ -185,17 +185,22 @@ async def list_sources(session: Annotated[AsyncSession, Depends(get_session)]) -
         select(NewsItem.source_code, func.count()).group_by(NewsItem.source_code)
     )).all())
     latest_runs = (await session.scalars(select(CrawlRun).order_by(CrawlRun.source_code, CrawlRun.started_at.desc()).distinct(CrawlRun.source_code))).all()
-    run_stats = {run.source_code: run.stats for run in latest_runs}
+    run_stats = {run.source_code: {**run.stats, 'round_running': int(run.status == 'running')} for run in latest_runs}
     statuses = await redis.hgetall(STATUS_KEY)
     db_size = await session.scalar(select(func.pg_database_size(func.current_database())))
     attachment_stats = {}
     for source in sources:
         retries = (source.history_cursor or {}).get('attachment_retries', {})
         pending = sum(value['attempts'] < 3 for value in retries.values())
+        documents = (source.history_cursor or {}).get('document_retries', {})
+        document_pending = sum(value['attempts'] < 3 for value in documents.values())
         attachment_stats[source.code] = {
             'attachment_gaps': len(retries),
             'attachment_retry_pending': pending,
             'attachment_retry_exhausted': len(retries) - pending,
+            'document_gaps': len(documents),
+            'document_retry_pending': document_pending,
+            'document_retry_exhausted': len(documents) - document_pending,
         }
     return success(SourcesOut(
         manager_alive=bool(statuses),

@@ -7,6 +7,7 @@ import { useSessionScope } from "@@/composables/useSessionScope"
 import { formatTime } from "@@/utils/text"
 import { CircleCheck, RefreshRight } from "@element-plus/icons-vue"
 import dayjs from "dayjs"
+import { sourceStatus } from "../sourceStatus"
 
 /** logs 只用来发现「本轮完成」以刷新最新入库；alert 为连续失败达到告警阈值 */
 const props = defineProps<{
@@ -87,22 +88,7 @@ async function cancelHistory() {
   emit("changed")
 }
 
-const statusTag = computed(() => {
-  if (props.source.configuration_error)
-    return { type: "warning", text: props.source.configuration_error } as const
-  const process = props.source.process
-  if (props.restarting || process?.state === "restarting")
-    return { type: "warning", text: "重启中" } as const
-  if (!process)
-    return { type: "danger", text: "管理进程未运行" } as const
-  if (process.state === "stopped")
-    return { type: "danger", text: "子进程未运行" } as const
-  if (!props.source.enabled)
-    return { type: "info", text: "已停用" } as const
-  if (props.source.paused_until && new Date(props.source.paused_until) > new Date())
-    return { type: "warning", text: "失败退避中" } as const
-  return { type: "success", text: "运行中" } as const
-})
+const statusTag = computed(() => sourceStatus(props.source, props.restarting))
 
 onMounted(loadLatest)
 </script>
@@ -162,6 +148,9 @@ onMounted(loadLatest)
     </div>
     <div v-if="source.collection_stats?.attachment_gaps" class="text-xs text-amber-600">
       附件待核验文档 {{ source.collection_stats.attachment_gaps }}；待重试 {{ source.collection_stats.attachment_retry_pending }}；重试已耗尽 {{ source.collection_stats.attachment_retry_exhausted }}，请核对原文
+    </div>
+    <div v-if="source.collection_stats?.document_gaps" class="text-xs text-amber-600">
+      正文待核验 {{ source.collection_stats.document_gaps }}；待重试 {{ source.collection_stats.document_retry_pending }}；重试已耗尽 {{ source.collection_stats.document_retry_exhausted }}，请核对来源日志
     </div>
     <div v-if="source.collection_stats?.discovered" class="text-xs text-slate-500">
       本轮发现 {{ source.collection_stats.discovered }}；筛除 {{ source.collection_stats.excluded ?? 0 }}；不完整包 {{ source.collection_stats.partial ?? 0 }}

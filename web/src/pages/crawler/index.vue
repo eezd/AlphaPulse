@@ -1,5 +1,5 @@
 <script lang="ts" setup>
-import type { SourcesInfo } from "@@/apis/crawler/type"
+import type { SourceInfo, SourcesInfo } from "@@/apis/crawler/type"
 import { createRssApi, listSourcesApi, restartCrawlerApi } from "@@/apis/crawler"
 import { useSessionScope } from "@@/composables/useSessionScope"
 import { formatTime } from "@@/utils/text"
@@ -8,6 +8,7 @@ import { logRequestError } from "@/http/axios"
 import CalendarSourcePanel from "./components/CalendarSourcePanel.vue"
 import SourcePanel from "./components/SourcePanel.vue"
 import { useCrawlerLogs } from "./composables/useCrawlerLogs"
+import { sourceStatus } from "./sourceStatus"
 
 const rssVisible = ref(false)
 const rssSaving = ref(false)
@@ -178,10 +179,10 @@ onMounted(async () => {
             {{ regions[row.region_code as keyof typeof regions] ?? row.region_code }}
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="110">
+        <el-table-column label="状态" min-width="130">
           <template #default="{ row }">
-            <el-tag size="small" :type="row.enabled && row.process?.state === 'running' ? 'success' : 'info'">
-              {{ !row.enabled ? '已停用' : row.process?.state === 'running' ? '运行中' : '未运行' }}
+            <el-tag size="small" :type="sourceStatus(row as SourceInfo, restarting.has(row.code)).type">
+              {{ sourceStatus(row as SourceInfo, restarting.has(row.code)).text }}
             </el-tag>
           </template>
         </el-table-column>

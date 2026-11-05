@@ -12,6 +12,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from scrapy import Request
 from scrapy.http import Response
+from scrapy.spidermiddlewares.httperror import HttpError
 from sqlalchemy import select
 
 from alphapulse.calendar.umich import pdf_text
@@ -105,6 +106,7 @@ class USOfficialSpider(NewsSpider):
             self._starting = False
 
     def first_requests(self):
+        self.run.completed_documents_safe = True
         if self.name == 'doj' and self.cursor.get('transport') != 'doj-api-v1':
             # Retain retry evidence; HTML discovery cursors cannot use API pagination.
             self.cursor = {k: v for k, v in self.cursor.items() if k not in ('history', 'realtime', 'checked')}
@@ -115,9 +117,18 @@ class USOfficialSpider(NewsSpider):
             self.run.errors.append(error)
             return []
         state = self.cursor.setdefault('realtime', {'entry': 0})
+        retries = self.cursor.get('document_retries', {})
+        due_documents = [{**value['document'], 'document_retry': True} for value in retries.values() if value['attempts'] < 3 and value['next_at'] <= self.run.started_at.timestamp()]
+        if due_documents:
+            state.setdefault('pending', []).extend(copy.deepcopy(d) for d in due_documents if d['url'] not in {p['url'] for p in state['pending']})
         due = [value['document'] for value in self.cursor.get('attachment_retries', {}).values() if value['attempts'] < 3 and value['next_at'] <= self.run.started_at.timestamp()]
-        if due and not state.get('pending'):
-            state['pending'] = [{**doc, 'attachment_retry': True} for doc in due]
+        for doc in due:
+            pending = state.setdefault('pending', [])
+            existing = next((value for value in pending if value['url'] == doc['url']), None)
+            if existing is None:
+                pending.append({**copy.deepcopy(doc), 'attachment_retry': True})
+            else:
+                existing['attachment_retry'] = True
         bill_due = [{**v['document'], 'bill_retry': True} for v in self.cursor.get('bill_retries', {}).values() if v['attempts'] < 3 and v['next_at'] <= self.run.started_at.timestamp()]
         if bill_due:
             state.setdefault('pending', []).extend(d for d in bill_due if d['url'] not in {p['url'] for p in state['pending']})
@@ -136,12 +147,21 @@ class USOfficialSpider(NewsSpider):
 
     def advance(self, lane):
         state = self.cursor[lane]
+        if self.run.blocked:
+            return []
         if configuration_error(self.name):
             return []
         if lane == 'history' and time.monotonic() >= self.run.history_deadline:
             return []
         if state.get('pending'):
             doc = state['pending'][0]
+            gap = self.cursor.get('document_retries', {}).get(doc['url'])
+            if doc['url'] in self.run.document_retries_started or (gap and (gap['attempts'] >= 3 or gap['next_at'] > self.run.started_at.timestamp())):
+                state['pending'].pop(0)
+                return self.advance(lane)
+            if gap:
+                doc['document_retry'] = True
+                self.run.document_retries_started.add(doc['url'])
             if doc['kind'] == 'bill_finish':
                 self.finish_bill(lane)
                 return self.advance(lane)
@@ -213,6 +233,8 @@ class USOfficialSpider(NewsSpider):
         elif self.name in ('congress', 'federal_register'):
             data = response.json()
             key = ('committeeMeetings' if '/committee-meeting' in response.url else 'bills') if self.name == 'congress' else 'results'
+            if self.name == 'federal_register' and key not in data and type(data.get('count')) is int and data['count'] == 0 and isinstance(data.get('description'), str):
+                data[key] = []
             if key not in data or not isinstance(data[key], list):
                 raise ValueError('官方 API 列表结构未识别')
             if self.name == 'federal_register' and data.get('count', 0) > 2000:
@@ -228,6 +250,10 @@ class USOfficialSpider(NewsSpider):
                     docs.append({'url': f"https://www.federalregister.gov/api/v1/documents/{doc['document_number']}.json", 'kind': 'register'})
             next_url = data.get('pagination', {}).get('next') if self.name == 'congress' else data.get('next_page_url')
         else:
+            heading = ' '.join(response.css('title, h1').xpath('normalize-space(.)').getall())
+            if re.search(r'just a moment|access denied|verify (?:you are|your)|captcha', heading, re.I) or response.css('#challenge-form, #cf-challenge-running'):
+                self.block_until(datetime.now(UTC) + timedelta(minutes=15))
+                raise ValueError('官方列表返回验证页面')
             if not response.css('h1'):
                 raise ValueError('官方列表页面未识别')
             pattern = SOURCES[self.name].article_path
@@ -238,6 +264,16 @@ class USOfficialSpider(NewsSpider):
                     continue
                 if re.search(pattern, urlsplit(url).path) and url not in SOURCES[self.name].entries and not re.search(r'/\d{4}-(?:press|speeches|testimony)\.htm$', urlsplit(url).path) and not url.lower().endswith('.pdf'):
                     doc = {'url': url, 'kind': 'article'}
+                    if self.name in ('treasury', 'cftc', 'fincen', 'whitehouse'):
+                        container = {
+                            'treasury': 'ancestor::div[h3][1]',
+                            'cftc': 'ancestor::tr[1]',
+                            'fincen': 'ancestor::div[contains(@class,"fincen-news-article__content")][1]',
+                            'whitehouse': 'ancestor::div[contains(@class,"wp-block-whitehouse-post-template__content")][1]',
+                        }[self.name]
+                        dates = a.xpath(container + '//time/@datetime').getall()
+                        if len(dates) == 1:
+                            doc['listing_date'] = published(dates[0])[0].isoformat()
                     if self.name == 'fed' and '/monetarypolicy/fomcminutes' in url:
                         # The URL identifies the meeting; the calendar gives the release day.
                         match = re.search(r'Released\s+([A-Za-z]+ \d{1,2}, \d{4})', a.xpath('normalize-space(parent::*)').get() or '')
@@ -261,6 +297,12 @@ class USOfficialSpider(NewsSpider):
                     return True
                 return day >= begin.date()
             docs = [doc for doc in docs if in_range(doc)]
+        if self.name in ('treasury', 'cftc', 'fincen', 'whitehouse') and docs:
+            begin = self.run.history_target if lane == 'history' else self.run.cutoff
+            dates = [published(d['listing_date'])[0] for d in docs if d.get('listing_date')]
+            if len(dates) == len(docs) and dates == sorted(dates, reverse=True) and dates[-1].date() < begin.date():
+                next_url = None
+            docs = [d for d in docs if not d.get('listing_date') or published(d['listing_date'])[0].date() >= begin.date()]
         if lane == 'realtime':
             # OFAC's recent-actions entry is a descending day-indexed feed.
             if self.name == 'ofac' and docs:
@@ -271,6 +313,9 @@ class USOfficialSpider(NewsSpider):
             threshold = (self.run.started_at - timedelta(hours=24)).timestamp()
             self.cursor['checked'] = {k: v for k, v in checked.items() if v >= threshold}
             docs = [d for d in docs if self.cursor['checked'].get(d['url'], 0) < threshold]
+        retries = self.cursor.get('document_retries', {})
+        docs = [d for d in docs if d['url'] not in retries or (retries[d['url']]['attempts'] < 3 and retries[d['url']]['next_at'] <= self.run.started_at.timestamp())]
+        docs = [{**d, 'document_retry': True} if d['url'] in retries else d for d in docs]
         if next_url and official_url(self.name, next_url, response.url) == response.url:
             raise ValueError('官方列表翻页重复当前页面，未推进断点')
         visited = state.setdefault('visited_pages', [])
@@ -287,8 +332,54 @@ class USOfficialSpider(NewsSpider):
             state['day_complete'] = True
         yield from self.advance(lane)
 
+    def document_failed(self, request, error):
+        doc = request.meta.get('document')
+        if not doc or doc['kind'] not in ('article', 'doj'):
+            return None
+        state = self.cursor[request.meta['lane']]
+        if not state.get('pending') or state['pending'][0]['url'] != doc['url']:
+            return None
+        retries = self.cursor.setdefault('document_retries', {})
+        previous = retries.get(doc['url'], {})
+        now = datetime.now(UTC)
+        if not previous or previous['next_at'] <= now.timestamp():
+            retries[doc['url']] = {'document': copy.deepcopy(doc), 'attempts': previous.get('attempts', 0) + 1,
+                                  'next_at': (now + timedelta(hours=1)).timestamp(), 'error': error}
+        self.run.document_retries_started.add(doc['url'])
+        self.run.errors.append(error)
+        self.logger.error('文档缺口：%s；%s', doc['url'], error)
+        state['pending'].pop(0)
+        return self.advance(request.meta['lane'])
+
+    def on_request_error(self, failure):
+        status = failure.value.response.status if failure.check(HttpError) else None
+        if status not in (403, 429):
+            requests = self.document_failed(failure.request, f'请求失败 {failure.request.url}：{status or repr(failure.value)}')
+            if requests is not None:
+                return requests
+        return super().on_request_error(failure)
+
     async def parse_document(self, response):
+        try:
+            async for result in self._parse_document(response):
+                yield result
+        except (ValueError, KeyError, TypeError) as exc:
+            if '验证' in str(exc) or '登录页面' in str(exc):
+                self.block_until(datetime.now(UTC) + timedelta(minutes=15))
+            requests = self.document_failed(response.request, f'解析异常 {response.url}：{exc!r}')
+            if requests is None:
+                raise
+            for request in requests:
+                yield request
+
+    async def _parse_document(self, response):
         lane, doc = response.meta['lane'], response.meta['document']
+        begin = self.run.history_target if lane == 'history' else self.run.cutoff
+        if not (doc.get('document_retry') or doc.get('attachment_retry')) and doc.get('listing_date') and published(doc['listing_date'])[0].date() < begin.date():
+            self.run.stats['outside_range'] = self.run.stats.get('outside_range', 0) + 1
+            for result in self.complete(lane):
+                yield result
+            return
         if doc['kind'] == 'register_issue':
             root = etree.fromstring(response.body, etree.XMLParser(resolve_entities=False, no_network=True))
             if root.tag != 'FEDREG' or published(root.findtext('DATE', default=''))[0].date().isoformat() != doc['day']:
@@ -459,7 +550,7 @@ class USOfficialSpider(NewsSpider):
                     context.setdefault('unmatched_texts', []).append(copy.deepcopy(doc))
             parsed['extra']['selection_reasons'] = context['reasons']
         begin = self.run.history_target if lane == 'history' else self.run.cutoff
-        if doc.get('attachment_retry') or (doc.get('bill') and self.cursor[lane]['bill'].get('retry')):
+        if doc.get('attachment_retry') or doc.get('document_retry') or (doc.get('bill') and self.cursor[lane]['bill'].get('retry')):
             begin = datetime(2025, 1, 1, tzinfo=UTC)
         outside_range = parsed['published_at'].date() < begin.date() if parsed['extra'].get('published_at_precision') == 'date' else parsed['published_at'] < begin
         if outside_range:
@@ -487,7 +578,7 @@ class USOfficialSpider(NewsSpider):
         retries = self.cursor.setdefault('bill_retries', {})
         if not context['bodies'] or context.get('missing_material'):
             previous = retries.get(context['url'], {})
-            retries[context['url']] = {'document': {'url': context['url'], 'kind': 'bill'}, 'version': context['version'], 'attempts': previous.get('attempts', 0) + 1, 'next_at': (self.run.started_at + timedelta(hours=1)).timestamp()}
+            retries[context['url']] = {'document': {'url': context['url'], 'kind': 'bill'}, 'version': context['version'], 'attempts': previous.get('attempts', 0) + 1, 'next_at': (datetime.now(UTC) + timedelta(hours=1)).timestamp()}
         else:
             retries.pop(context['url'], None)
             if not context['reasons']:
@@ -511,7 +602,7 @@ class USOfficialSpider(NewsSpider):
         retries = self.cursor.setdefault('attachment_retries', {})
         if incomplete and retry_doc:
             previous = retries.get(parsed['url'], {})
-            retries[parsed['url']] = {'document': retry_doc, 'attempts': previous.get('attempts', 0) + 1, 'next_at': (self.run.started_at + timedelta(hours=1)).timestamp()}
+            retries[parsed['url']] = {'document': retry_doc, 'attempts': previous.get('attempts', 0) + 1, 'next_at': (datetime.now(UTC) + timedelta(hours=1)).timestamp()}
         elif not incomplete:
             retries.pop(parsed['url'], None)
         if reasons:
@@ -546,6 +637,7 @@ class USOfficialSpider(NewsSpider):
 
     def complete(self, lane):
         doc = self.cursor[lane]['pending'].pop(0)
+        self.cursor.get('document_retries', {}).pop(doc['url'], None)
         if lane == 'realtime':
             self.cursor.setdefault('checked', {})[doc['url']] = self.run.started_at.timestamp()
         return self.advance(lane)
@@ -556,6 +648,7 @@ class SecSpider(USOfficialSpider):
 
 
 class CftcSpider(USOfficialSpider):
+    custom_settings = {**USOfficialSpider.custom_settings, 'DOWNLOAD_DELAY': 3.0, 'CONCURRENT_REQUESTS': 1}
     name = 'cftc'
 
 
