@@ -129,6 +129,11 @@ def main():
                     finally:
                         run(*command, 'up', '-d', 'crawler')
                 for name, task in state['tasks'].items():
+                    if task['status'] == 'running':
+                        task.update(status='retired' if task['attempts'] >= 3 else 'waiting',
+                                    next_at=time.time() + 3600,
+                                    errors=[{'error': '上次回补中断，保留已用额度并等待冷却'}])
+                        save(path, state)
                     if task['status'] in ('done', 'retired') or task['next_at'] > time.time():
                         continue
                     task['attempts'] += 1
