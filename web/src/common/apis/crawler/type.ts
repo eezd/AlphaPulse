@@ -19,7 +19,13 @@ export interface SourceInfo {
   paused_until: string | null
   collection_stats?: Record<string, number>
   configuration_error?: string | null
-  history_cursor?: { history?: { scanned?: boolean }, realtime?: { entry: number } }
+  history_cursor?: {
+    history?: { scanned?: boolean }
+    realtime?: { entry: number }
+    document_retries?: Record<string, CollectionRetry>
+    attachment_retries?: Record<string, CollectionRetry>
+    bill_retries?: Record<string, CollectionRetry>
+  }
   supports_history: boolean
   history_target: string | null
   history_position: string | null
@@ -28,6 +34,13 @@ export interface SourceInfo {
   today_new: number
   today_revised: number
   total_items: number
+}
+
+export interface CollectionRetry {
+  document: { url: string, canonical?: string }
+  attempts: number
+  next_at: number
+  error?: string
 }
 
 export interface SourcesInfo {

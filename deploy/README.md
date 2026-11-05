@@ -304,6 +304,13 @@ format is PNG, JPEG or GIF. They do not establish completeness or irrelevance.
 Relevant documents remain `partial`; documents whose relevance is still unknown
 are kept in bounded attachment retries rather than inserted as unrelated news.
 Congress meeting attachment failures retain the same retry evidence as articles.
+Bill and attachment retry records retain an optional `error` explaining missing
+dates, unavailable text formats or extraction failures. The console shows these
+reasons, original links, attempt counts and pending/exhausted state even while a
+new round runs. Historical records without a reason remain visible as such; this
+change neither resets their retry quota nor rewrites historical records.
+`unresolved_bills`, `bill_retry_pending` and `bill_retry_exhausted` are derived from
+the persisted bill retry cursor, independently of the latest round's statistics.
 The source API derives `attachment_gaps`, `attachment_retry_pending` and
 `attachment_retry_exhausted` from the persisted cursor, independently of the latest
 round's statistics. The console keeps these document counts visible across rounds;

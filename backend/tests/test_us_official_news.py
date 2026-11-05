@@ -556,6 +556,8 @@ def test_image_attachment_preserves_unknown_text_gap(trading, monkeypatch, conte
     attachment = parsed['extra']['attachments'][0]
     assert attachment['status'] == 'unavailable'
     assert '图片' in attachment['error']
+    assert attachment['error'] in obj.cursor['attachment_retries'][doc['url']]['error']
+    assert url in obj.cursor['attachment_retries'][doc['url']]['error']
     assert attachment['raw_response_id'] == 13
     assert obj.cursor['attachment_retries'][doc['url']]['attempts'] == 1
 
@@ -566,7 +568,7 @@ def test_source_api_keeps_attachment_gaps_visible_across_rounds(trading, monkeyp
     from alphapulse.models import Source
 
     source = Source(code='doj', name='DOJ', list_url=SOURCES['doj'].entries[0], enabled=False, interval_seconds=300, backfill_hours=72,
-                    consecutive_failures=0, last_success_at=None, last_error=None, paused_until=None, history_cursor={'attachment_retries': {'a': {'attempts': 1}, 'b': {'attempts': 2}, 'c': {'attempts': 3}}, 'document_retries': {'d': {'attempts': 1}, 'e': {'attempts': 3}}},
+                    consecutive_failures=0, last_success_at=None, last_error=None, paused_until=None, history_cursor={'attachment_retries': {'a': {'attempts': 1}, 'b': {'attempts': 2}, 'c': {'attempts': 3}}, 'document_retries': {'d': {'attempts': 1}, 'e': {'attempts': 3}}, 'bill_retries': {'f': {'attempts': 1}, 'g': {'attempts': 3}}},
                     history_target=None, history_position=None, history_done=False)
     latest = SimpleNamespace(source_code='doj', status='success', stats={'discovered': 2, 'attachment_gaps': 999})
 
@@ -581,7 +583,7 @@ def test_source_api_keeps_attachment_gaps_visible_across_rounds(trading, monkeyp
 
     monkeypatch.setattr(crawler.redis, 'hgetall', AsyncMock(return_value={}))
     monkeypatch.setattr(crawler, 'calendar_sources', AsyncMock(return_value=[]))
-    for stats in ({'discovered': 2, 'attachment_gaps': 999}, {}):
+    for stats in ({'discovered': 2, 'attachment_gaps': 999, 'unresolved_bills': 999}, {}):
         latest.stats = stats
         result = asyncio.run(crawler.list_sources(Session())).data.sources[0]
         assert result.collection_stats['attachment_gaps'] == 3
@@ -590,6 +592,14 @@ def test_source_api_keeps_attachment_gaps_visible_across_rounds(trading, monkeyp
         assert result.collection_stats['document_gaps'] == 2
         assert result.collection_stats['document_retry_pending'] == 1
         assert result.collection_stats['document_retry_exhausted'] == 1
+        assert result.collection_stats['unresolved_bills'] == 2
+        assert result.collection_stats['bill_retry_pending'] == 1
+        assert result.collection_stats['bill_retry_exhausted'] == 1
+        latest.status = 'running'
+        running = asyncio.run(crawler.list_sources(Session())).data.sources[0]
+        assert running.collection_stats['unresolved_bills'] == 2
+        assert running.collection_stats['round_running'] == 1
+        latest.status = 'success'
         assert result.collection_stats['round_running'] == 0
     source.history_cursor['attachment_retries'].pop('a')
     result = asyncio.run(crawler.list_sources(Session())).data.sources[0]
@@ -601,6 +611,9 @@ def test_source_api_keeps_attachment_gaps_visible_across_rounds(trading, monkeyp
     assert result.collection_stats['attachment_gaps'] == 0
     assert result.collection_stats['attachment_retry_exhausted'] == 0
     assert result.collection_stats['document_gaps'] == 0
+    assert result.collection_stats['unresolved_bills'] == 0
+    assert result.collection_stats['bill_retry_pending'] == 0
+    assert result.collection_stats['bill_retry_exhausted'] == 0
     latest.status = 'running'
     result = asyncio.run(crawler.list_sources(Session())).data.sources[0]
     assert result.collection_stats['round_running'] == 1
@@ -979,7 +992,8 @@ def test_fragment_is_valid_without_page_heading(trading):
     assert item['extra']['content_scope'] == 'article'
 
 
-def test_bill_full_text_can_supply_relevance_and_resume(trading, monkeypatch):
+@pytest.mark.parametrize('undated', [False, True])
+def test_bill_full_text_can_supply_relevance_and_resume(trading, monkeypatch, undated):
     from alphapulse.crawler.spiders import us_official
     monkeypatch.setattr(us_official, 'get_settings', lambda: SimpleNamespace(congress_api_key='test', crawler_contact_email='test@example.invalid'))
     obj = spider(trading, 'congress')
@@ -991,14 +1005,20 @@ def test_bill_full_text_can_supply_relevance_and_resume(trading, monkeypatch):
     asyncio.run(parse(json.dumps({'bill': {'title': 'GENIUS Act', 'updateDate': '2026-11-04'}})))
     asyncio.run(parse(json.dumps({'subjects': {'legislativeSubjects': []}})))
     asyncio.run(parse(json.dumps({'summaries': []})))
-    asyncio.run(parse(json.dumps({'textVersions': [{'type': 'Enrolled', 'date': '2026-11-04', 'formats': [{'type': 'Formatted Text', 'url': 'https://www.congress.gov/text'}]}]})))
+    versions = [{'type': 'Enrolled', 'date': '2026-11-04', 'formats': [{'type': 'Formatted Text', 'url': 'https://www.congress.gov/text'}]}]
+    if undated:
+        versions.insert(0, {'type': 'Enrolled Bill', 'date': None, 'formats': []})
+    asyncio.run(parse(json.dumps({'textVersions': versions})))
     obj.cursor = json.loads(json.dumps(obj.cursor))
     output = asyncio.run(parse('<p>The bill establishes the regulatory framework for payment stablecoins and digital assets.</p>'))
     assert output[0]['title'] == 'GENIUS Act — Enrolled'
     assert '/actions?' in output[1].url
     output = asyncio.run(parse(json.dumps({'actions': [{'actionDate': '2026-11-04', 'text': 'Became law'}]})))
     assert output[0]['extra']['content_scope'] == 'official_action'
-    assert not obj.cursor.get('bill_retries')
+    if undated:
+        assert obj.cursor['bill_retries'][base]['error'] == 'Enrolled Bill 缺少官方日期'
+    else:
+        assert not obj.cursor.get('bill_retries')
 
 
 def test_missing_bill_material_is_a_retryable_gap(trading, monkeypatch):
@@ -1019,6 +1039,7 @@ def test_missing_bill_material_is_a_retryable_gap(trading, monkeypatch):
     assert obj.cursor['bill_retries'][base]['attempts'] == 1
     assert obj.run.stats['unresolved_bills'] == 1
     assert not obj.run.stats.get('excluded')
+    assert obj.cursor['bill_retries'][base]['error'] == '没有可用的官方正文'
     assert (before + timedelta(hours=1)).timestamp() <= obj.cursor['bill_retries'][base]['next_at'] <= (after + timedelta(hours=1)).timestamp()
 
 
@@ -1245,6 +1266,7 @@ def test_bill_undated_text_is_visible_retry_gap(trading):
     obj.finish_bill('history')
     assert obj.cursor['bill_retries'][base]['attempts'] == 1
     assert obj.run.stats['unresolved_bills'] == 1
+    assert '缺少官方日期' in obj.cursor['bill_retries'][base]['error']
 
 
 def test_public_api_and_pdf_fixtures_replay_without_io(trading):
@@ -1296,6 +1318,7 @@ def test_dated_but_unavailable_bill_text_remains_a_gap(trading):
     asyncio.run(collect())
     obj.finish_bill('history')
     assert obj.run.stats['unresolved_bills'] == 1
+    assert '缺少支持的正文格式' in obj.cursor['bill_retries'][base]['error']
 
 
 

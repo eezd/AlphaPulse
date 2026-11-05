@@ -493,11 +493,13 @@ class USOfficialSpider(NewsSpider):
                 for version in data['textVersions']:
                     if not version.get('date'):
                         self.cursor[lane]['bill']['missing_material'] = True
+                        self.cursor[lane]['bill'].setdefault('material_errors', []).append(f"{version.get('type', '正文版本')} 缺少官方日期")
                         continue
                     formats = version.get('formats', [])
                     chosen = next((f for f in formats if f['type'] == 'Formatted Text'), None) or next((f for f in formats if f['type'] == 'Formatted XML'), None) or next((f for f in formats if f['type'] == 'PDF'), None)
                     if not chosen:
                         self.cursor[lane]['bill']['missing_material'] = True
+                        self.cursor[lane]['bill'].setdefault('material_errors', []).append(f"{version.get('type', '正文版本')} 缺少支持的正文格式")
                     if chosen:
                         children.append({'url': chosen['url'], 'kind': 'text', 'title': doc['title'] + ' — ' + version['type'], 'at': version['date'], 'bill': doc['bill']})
             next_url = data.get('pagination', {}).get('next')
@@ -613,7 +615,10 @@ class USOfficialSpider(NewsSpider):
         retries = self.cursor.setdefault('bill_retries', {})
         if not context['bodies'] or context.get('missing_material'):
             previous = retries.get(context['url'], {})
-            retries[context['url']] = {'document': {'url': context['url'], 'kind': 'bill'}, 'version': context['version'], 'attempts': previous.get('attempts', 0) + 1, 'next_at': (datetime.now(UTC) + timedelta(hours=1)).timestamp()}
+            errors = list(context.get('material_errors', []))
+            if not context['bodies']:
+                errors.append('没有可用的官方正文')
+            retries[context['url']] = {'document': {'url': context['url'], 'kind': 'bill'}, 'version': context['version'], 'attempts': previous.get('attempts', 0) + 1, 'next_at': (datetime.now(UTC) + timedelta(hours=1)).timestamp(), 'error': '；'.join(dict.fromkeys(errors)) or '官方正文材料不完整'}
         else:
             retries.pop(context['url'], None)
             if not context['reasons']:
@@ -637,7 +642,8 @@ class USOfficialSpider(NewsSpider):
         retries = self.cursor.setdefault('attachment_retries', {})
         if incomplete and retry_doc:
             previous = retries.get(parsed['url'], {})
-            retries[parsed['url']] = {'document': retry_doc, 'attempts': previous.get('attempts', 0) + 1, 'next_at': (datetime.now(UTC) + timedelta(hours=1)).timestamp()}
+            error = '；'.join(f"{a['url']}：{a.get('error') or '附件尚未完成文字提取'}" for a in parsed['extra']['attachments'] if a['status'] != 'complete')
+            retries[parsed['url']] = {'document': retry_doc, 'attempts': previous.get('attempts', 0) + 1, 'next_at': (datetime.now(UTC) + timedelta(hours=1)).timestamp(), 'error': error}
         elif not incomplete:
             retries.pop(parsed['url'], None)
         if reasons:

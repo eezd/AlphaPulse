@@ -194,6 +194,8 @@ async def list_sources(session: Annotated[AsyncSession, Depends(get_session)]) -
         pending = sum(value['attempts'] < 3 for value in retries.values())
         documents = (source.history_cursor or {}).get('document_retries', {})
         document_pending = sum(value['attempts'] < 3 for value in documents.values())
+        bills = (source.history_cursor or {}).get('bill_retries', {})
+        bill_pending = sum(value['attempts'] < 3 for value in bills.values())
         attachment_stats[source.code] = {
             'attachment_gaps': len(retries),
             'attachment_retry_pending': pending,
@@ -201,6 +203,9 @@ async def list_sources(session: Annotated[AsyncSession, Depends(get_session)]) -
             'document_gaps': len(documents),
             'document_retry_pending': document_pending,
             'document_retry_exhausted': len(documents) - document_pending,
+            'unresolved_bills': len(bills),
+            'bill_retry_pending': bill_pending,
+            'bill_retry_exhausted': len(bills) - bill_pending,
         }
     return success(SourcesOut(
         manager_alive=bool(statuses),
