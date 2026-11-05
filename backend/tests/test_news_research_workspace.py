@@ -681,3 +681,49 @@ def test_long_event_compaction_uses_final_research_context(trading, monkeypatch,
     assert not reader.fits(provider, skill, versions[0].input, ResearchResult)
     assert not reader.fits(provider, boundary_rules, compressed, ResearchResult)
     assert reader.fits(provider, skill, compressed, ResearchResult) != needs_compaction
+
+
+@pytest.mark.parametrize("task", ["index", "assign", "research"])
+def test_model_config_sends_only_selected_task_and_records_exact_prompt(trading, monkeypatch, task):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from alphapulse.news_research import service
+    from alphapulse.news_research.contracts import INDEX_ASSIGN_SKILL, INDEX_SKILL, ASSIGN_SKILL, RESEARCH_SKILL
+    from alphapulse.news_research.pipeline import BASE
+    from alphapulse.models import SkillNode
+
+    content = RESEARCH_SKILL if task == "research" else INDEX_ASSIGN_SKILL
+    node = N(id=22, scope="news", kind="skill", enabled=True, parent_id=None, published_version_id=61)
+    version = N(version_no=5, content=content)
+    session = N(get=AsyncMock(side_effect=lambda model, *args: node if model is SkillNode else version))
+    provider = N(id=12, model="test", max_tokens=1000, context_window=100000, reasoning_effort="medium")
+    monkeypatch.setattr(service, "provider_for", AsyncMock(return_value=provider))
+    config = {stage: dict(provider_id=12, model="test", skill_id=22) for stage in ("index", "research")}
+    _, prompt, rules = asyncio.run(service.model_config(session, config, task))
+    selected = {"index": INDEX_SKILL, "assign": ASSIGN_SKILL, "research": RESEARCH_SKILL}[task]
+    assert prompt == BASE + "\n" + selected
+    assert rules["system_prompt"] == prompt and rules["content"] == content
+    assert rules["skill_id"] == 22 and rules["version"] == 5
+
+
+@pytest.mark.parametrize("content", [
+    "legacy unstructured rules",
+    "## 索引规则\nonly one section",
+    "## 索引规则\n\n## 归属规则\nassign",
+    "## 索引规则\nindex\n## 索引规则\nagain",
+    "preamble\n## 索引规则\nindex\n## 归属规则\nassign",
+    "## 索引规则\nindex\n## 归属规则\nassign\n## 其他规则\nextra",
+    "## 索引规则\nindex\n## 归属规则\nassign\n## 索引规则\nagain",
+])
+def test_invalid_first_stage_skill_fails_instead_of_sending_full_text(trading, content):
+    from alphapulse.news_research.contracts import task_skill, SkillFormatError
+    for task in ("index", "assign"):
+        with pytest.raises(SkillFormatError):
+            task_skill(content, task)
+
+
+def test_task_skill_keeps_custom_rules_and_accepts_crlf(trading):
+    from alphapulse.news_research.contracts import task_skill
+    content = "## 归属规则\r\n自定义归属\r\n### 细则\r\n保留规则\r\n## 索引规则\r\n自定义索引"
+    assert task_skill(content, "assign") == "自定义归属\n### 细则\n保留规则"
+    assert task_skill(content, "index") == "自定义索引"

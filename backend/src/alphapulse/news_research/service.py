@@ -27,8 +27,8 @@ from alphapulse.news_research.models import (
     Reference,
 )
 from alphapulse.news_research.contracts import (
-    INDEX_SKILL,
-    ASSIGN_SKILL,
+    INDEX_ASSIGN_SKILL,
+    task_skill,
     RESEARCH_SKILL,
     IndexResult,
     Assignment,
@@ -187,7 +187,7 @@ def dirty(event, urgent=False):
 
 
 async def model_config(session, config, stage):
-    selected = config[stage]
+    selected = config["index" if stage == "assign" else stage]
     provider = await provider_for(
         session,
         SimpleNamespace(provider_id=selected["provider_id"], model=selected["model"]),
@@ -213,19 +213,21 @@ async def model_config(session, config, stage):
                                   'max_tokens': provider.max_tokens, 'context_window': provider.context_window,
                                   'reasoning_effort': provider.reasoning_effort,
                                   'selected_reasoning_effort': selected.get('reasoning_effort')}}
-        skill = BASE + '\n' + version.content
+        skill = BASE + '\n' + task_skill(version.content, stage)
     else:
         if not config.get("isolated_acceptance"):
             raise ValueError("请选择已发布的新闻专用Skill")
         skill = (
-            INDEX_SKILL + "\n" + ASSIGN_SKILL if stage == "index" else RESEARCH_SKILL
+            INDEX_ASSIGN_SKILL if stage in ("index", "assign") else RESEARCH_SKILL
         )
         rules = {"content": skill}
+        skill = task_skill(skill, stage)
     return (
         provider,
         skill,
         {
             **rules,
+            "system_prompt": skill,
             "model": provider.model,
             "reasoning_effort": provider.reasoning_effort,
         },
@@ -451,12 +453,12 @@ async def _process_package(identifier, config, expected_stage):
                     "events": await candidate_context(session, catalog),
                 }
                 attempt.input = payload
-            provider, skill, rules = await model_config(session, config, "index")
+            provider, skill, rules = await model_config(session, config, stage)
             attempt.rules = {**rules, "vocabulary": vocabulary}
             await session.commit()
             output, used = await complete(
                 provider,
-                skill + "\n当前子任务为" + stage + "，只提交该子任务schema规定字段。",
+                skill,
                 payload,
                 IndexResult if stage == "index" else Assignment,
             )

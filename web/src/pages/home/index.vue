@@ -578,6 +578,7 @@ onBeforeUnmount(() => {
         </router-link>
         <p class="my-3 text-sm text-slate-500">
           保存设置会暂停新任务。第一阶段先保存关键词，再分类；分类重试不会重新提取关键词。
+          第一阶段 Skill 必须包含“## 索引规则”和“## 归属规则”两个分段，每次调用只读取对应规则。
         </p>
         <el-button type="primary" :loading="busy" @click="save">
           保存并暂停

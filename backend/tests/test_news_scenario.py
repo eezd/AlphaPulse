@@ -92,7 +92,7 @@ def test_published_skill_retains_base_instructions(trading, monkeypatch):
     monkeypatch.setattr(service, 'provider_for', AsyncMock(return_value=provider))
     session = SimpleNamespace(get=AsyncMock(side_effect=[
         SimpleNamespace(id=9, scope='news', kind='skill', enabled=True, parent_id=None, published_version_id=10),
-        SimpleNamespace(version_no=3, content='PUBLISHED'),
+        SimpleNamespace(version_no=3, content='## 索引规则\nPUBLISHED\n## 归属规则\nASSIGN'),
     ]))
     _, skill, rules = asyncio.run(service.model_config(session, {'index': {'provider_id': 7, 'model': 'test', 'skill_id': 9}}, 'index'))
     assert skill == BASE+'\nPUBLISHED' and rules['base'] == BASE

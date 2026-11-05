@@ -24,8 +24,8 @@ from alphapulse.news_research.models import (
 from alphapulse.news_research import service, batches, vocabulary as vocab
 from alphapulse.news_research.models import VocabularyVersion
 from alphapulse.news_research.contracts import (
-    INDEX_SKILL,
-    ASSIGN_SKILL,
+    INDEX_ASSIGN_SKILL,
+    SkillFormatError,
     RESEARCH_SKILL,
     Strict,
     IndexResult,
@@ -176,19 +176,20 @@ async def enable(session: DB):
     original_config = row.config
     control_revision = row.control_revision
     try:
-        provider, skill, _ = await service.model_config(
-            session, original_config, "index"
-        )
+        configs = {task: await service.model_config(session, original_config, task)
+                   for task in ("index", "assign", "research")}
+        provider, skill, _ = configs["index"]
         indexed, _ = await complete(
             provider,
-            skill + "\n" + INDEX_SKILL,
+            skill,
             {"task": "index", "article": fixture},
             IndexResult,
         )
         service.validate_keywords(indexed, fixture)
+        provider, skill, _ = configs["assign"]
         assigned, _ = await complete(
             provider,
-            skill + "\n" + ASSIGN_SKILL,
+            skill,
             {
                 "task": "assign",
                 "article": fixture,
@@ -198,12 +199,10 @@ async def enable(session: DB):
             Assignment,
         )
         service.validate_assignment(assigned, fixture, set(), indexed.model_dump()["keywords"])
-        provider, skill, _ = await service.model_config(
-            session, original_config, "research"
-        )
+        provider, skill, _ = configs["research"]
         researched, _ = await complete(
             provider,
-            skill + "\n" + RESEARCH_SKILL,
+            skill,
             {
                 "id": 1,
                 "event": {"id": 1, "title": fixture["title"]},
@@ -234,6 +233,8 @@ async def enable(session: DB):
             or any(set(p.package_ids) != {1} for p in researched.timeline_points)
         ):
             raise ValueError("测试返回未知对象")
+    except SkillFormatError as error:
+        raise HTTPException(422, str(error)) from error
     except Exception as error:
         raise HTTPException(502, f"两阶段验证失败：{error}") from error
     row = await session.get(
@@ -254,7 +255,7 @@ async def templates(session: DB):
 
     ids = {}
     for role, name, content in [
-        ("index", "新闻关键词索引与事件归属", INDEX_SKILL + "\n" + ASSIGN_SKILL),
+        ("index", "新闻关键词索引与事件归属", INDEX_ASSIGN_SKILL),
         ("research", "新闻事件整体研究", RESEARCH_SKILL),
     ]:
         node = await session.scalar(

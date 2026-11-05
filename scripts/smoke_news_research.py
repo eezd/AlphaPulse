@@ -49,9 +49,13 @@ async def main():
     model_inputs = {}
 
     async def config(*args):
-        return SimpleNamespace(context_window=1000000, max_tokens=1000), "test", {}
+        return SimpleNamespace(context_window=1000000, max_tokens=1000), "test-" + args[-1], {}
 
     async def complete(provider, skill, payload, schema):
+        from alphapulse.news_research.contracts import INDEX_SKILL, ASSIGN_SKILL
+        from alphapulse.news_research.pipeline import BASE
+        expected = "test-" + payload["task"] if skill.startswith("test-") else BASE + "\n" + (INDEX_SKILL if schema is IndexResult else ASSIGN_SKILL)
+        assert skill == expected
         calls.append(schema.__name__)
         model_inputs[schema.__name__] = deepcopy(payload)
         if schema is IndexResult:
@@ -264,6 +268,11 @@ async def main():
             )
         ids = (await client.post("/api/risk/skill-templates")).json()["data"]
         async with SessionLocal() as s:
+            versions_before = list(await s.scalars(select(SkillVersion.id).order_by(SkillVersion.id)))
+        assert (await client.post("/api/risk/skill-templates")).json()["data"] == ids
+        async with SessionLocal() as s:
+            assert list(await s.scalars(select(SkillVersion.id).order_by(SkillVersion.id))) == versions_before
+        async with SessionLocal() as s:
             provider = AiProvider(
                 name="ci-only-" + str(now.timestamp()),
                 protocol="openai",
@@ -305,15 +314,19 @@ async def main():
             "enabled"
         ] is False
         async with SessionLocal() as s:
-            for stage in ("index", "research"):
+            for stage in ("index", "assign", "research"):
                 provider, skill, rules = await service.model_config(s, config, stage)
                 assert (
-                    rules["skill_id"] == ids[stage]
+                    rules["skill_id"] == ids["index" if stage == "assign" else stage]
                     and skill
                     and provider.model == "ci-only"
                 )
 
         async def validation(provider, skill, payload, schema):
+            from alphapulse.news_research.contracts import INDEX_SKILL, ASSIGN_SKILL, RESEARCH_SKILL
+            from alphapulse.news_research.pipeline import BASE
+            expected = {IndexResult: INDEX_SKILL, Assignment: ASSIGN_SKILL, ResearchResult: RESEARCH_SKILL}[schema]
+            assert skill == BASE + "\n" + expected
             source = payload.get("article") or payload["articles"][0]
             quote = source["content"]
             if schema is IndexResult:
@@ -355,6 +368,20 @@ async def main():
             )
             return schema.model_validate(result), {}
 
+        async with SessionLocal() as s:
+            node = await s.get(SkillNode, ids["index"])
+            published_skill = await s.get(SkillVersion, node.published_version_id)
+            valid_content = published_skill.content
+            published_skill.content = "legacy unstructured rules"
+            await s.commit()
+        with patch.object(model_service, "complete", side_effect=AssertionError("Invalid Skill must not call model")):
+            response = await client.post("/api/risk/enable")
+            assert response.status_code == 422, response.text
+        assert (await client.get("/api/risk/settings")).json()["data"]["enabled"] is False
+        async with SessionLocal() as s:
+            published_skill = await s.get(SkillVersion, node.published_version_id)
+            published_skill.content = valid_content
+            await s.commit()
         with patch.object(model_service, "complete", validation):
             response = await client.post("/api/risk/enable")
             assert response.status_code == 200, response.text
