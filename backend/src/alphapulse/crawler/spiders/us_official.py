@@ -116,6 +116,14 @@ class USOfficialSpider(NewsSpider):
         if error:
             self.run.errors.append(error)
             return []
+        if self.name == 'federal_register':
+            # Existing checkpoints identify completed bodies rather than discovery metadata.
+            checked = self.cursor.setdefault('checked', {})
+            for url, at in list(checked.items()):
+                match = re.fullmatch(r'https://www\.federalregister\.gov/documents/full_text/html/\d{4}/\d{2}/\d{2}/([A-Za-z0-9-]+)\.html', url)
+                if match:
+                    metadata = f'https://www.federalregister.gov/api/v1/documents/{match[1]}.json'
+                    checked[metadata] = max(checked.get(metadata, 0), at)
         if self.name == 'cftc':
             # Earlier discovery treated commissioner indexes as article gaps.
             retries = self.cursor.get('document_retries', {})
@@ -504,7 +512,7 @@ class USOfficialSpider(NewsSpider):
             url = data.get('body_html_url') or data.get('raw_text_url')
             if not url:
                 raise ValueError('规则文档缺少正文地址')
-            self.cursor[lane]['pending'][0] = {'url': official_url(self.name, url), 'kind': 'text', 'title': data['title'], 'at': data['publication_date'], 'canonical': data['html_url'], 'document_number': data['document_number'], 'effective_on': data.get('effective_on'), 'pdf': data.get('pdf_url')}
+            self.cursor[lane]['pending'][0] = {'url': official_url(self.name, url), 'kind': 'text', 'title': data['title'], 'at': data['publication_date'], 'canonical': data['html_url'], 'document_number': data['document_number'], 'effective_on': data.get('effective_on'), 'pdf': data.get('pdf_url'), 'metadata_url': response.url}
             for result in self.advance(lane):
                 yield result
             return
@@ -666,7 +674,10 @@ class USOfficialSpider(NewsSpider):
         doc = self.cursor[lane]['pending'].pop(0)
         self.cursor.get('document_retries', {}).pop(doc['url'], None)
         if lane == 'realtime':
-            self.cursor.setdefault('checked', {})[doc['url']] = self.run.started_at.timestamp()
+            checked = self.cursor.setdefault('checked', {})
+            checked[doc['url']] = self.run.started_at.timestamp()
+            if doc.get('metadata_url'):
+                checked[doc['metadata_url']] = self.run.started_at.timestamp()
         return self.advance(lane)
 
 

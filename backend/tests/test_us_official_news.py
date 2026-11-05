@@ -49,6 +49,38 @@ def test_real_empty_register_day_continues_to_previous_day(trading):
     assert not obj.run.errors
 
 
+@pytest.mark.parametrize('recent', [False, True])
+def test_register_completed_body_checkpoint_matches_discovery_after_restart(trading, recent):
+    obj = spider(trading, 'federal_register')
+    body = 'https://www.federalregister.gov/documents/full_text/html/2026/11/03/2026-22248.html'
+    metadata = 'https://www.federalregister.gov/api/v1/documents/2026-22248.json'
+    obj.cursor['checked'] = {body: (obj.run.started_at - timedelta(hours=1 if recent else 25)).timestamp()}
+    obj.first_requests()
+    listing = json.dumps({'count': 1, 'results': [{'document_number': '2026-22248'}]})
+    requests = list(obj.parse_listing(response(SOURCES[obj.name].entries[0], listing, lane='realtime')))
+    assert any(r.url == metadata for r in requests) is not recent
+
+
+def test_register_completes_metadata_only_after_body_and_pdf(trading, monkeypatch):
+    from alphapulse.crawler.spiders import us_official
+    obj = spider(trading, 'federal_register')
+    metadata = 'https://www.federalregister.gov/api/v1/documents/2026-22248.json'
+    body = 'https://www.federalregister.gov/documents/full_text/html/2026/11/03/2026-22248.html'
+    pdf = 'https://www.govinfo.gov/content/pkg/FR-2026-11-03/pdf/2026-22248.pdf'
+    doc = {'url': metadata, 'kind': 'register'}
+    obj.cursor['realtime'].update(pending=[doc], entry=len(SOURCES[obj.name].entries))
+    data = {'body_html_url': body, 'title': 'Digital asset exchange rule', 'publication_date': '2026-11-03', 'html_url': 'https://www.federalregister.gov/documents/2026/11/03/2026-22248/rule', 'document_number': '2026-22248', 'pdf_url': pdf}
+    async def parse(res):
+        return [item async for item in obj.parse_document(res)]
+    body_request, = asyncio.run(parse(response(metadata, json.dumps(data), lane='realtime', document=doc)))
+    assert metadata not in obj.cursor.get('checked', {})
+    pdf_request, = asyncio.run(parse(response(body, '<p>This official rule regulates digital asset exchanges and financial institutions.</p>', **body_request.meta)))
+    assert metadata not in obj.cursor.get('checked', {})
+    monkeypatch.setattr(us_official, 'pdf_text', lambda value: 'The official digital asset exchange rule and supporting material.')
+    list(obj.parse_attachment(Response(pdf, body=b'%PDF-test', request=pdf_request.replace(meta={**pdf_request.meta, 'raw_response_id': 13}))))
+    assert metadata in obj.cursor['checked'] and body in obj.cursor['checked']
+
+
 @pytest.mark.parametrize('data', [{'count': 2}, {'count': '0', 'description': 'x'}, {'count': 0}, {'count': 0, 'description': 'x', 'results': None}])
 def test_register_does_not_hide_malformed_responses(trading, data):
     obj = spider(trading, 'federal_register')
