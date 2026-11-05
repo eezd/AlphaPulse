@@ -10,8 +10,8 @@ import pytest
 @pytest.mark.parametrize('mode', ['success', 'exhausted', 'partial', 'timeout', 'auth', 'long_wait', 'tool_fragment'])
 def test_news_transport_retry_budget_and_output_guard(trading, monkeypatch, mode):
     from alphapulse.ai import llm
-    from alphapulse.news_risk.service import model_stream
-    from alphapulse.news_risk.progress import current
+    from alphapulse.news_research.model import model_stream
+    from alphapulse.news_research.progress import current
     calls = []
     async def adapter(*args):
         calls.append(args)
@@ -55,8 +55,8 @@ def test_retry_after_seconds_and_dates(trading):
 
 def test_cancelling_backoff_releases_context_and_progress(trading, monkeypatch):
     from alphapulse.ai import llm
-    from alphapulse.news_risk.service import model_stream
-    from alphapulse.news_risk import progress
+    from alphapulse.news_research.model import model_stream
+    from alphapulse.news_research import progress
     entered = asyncio.Event()
     async def adapter(*args):
         raise openai.APIError('Concurrency limit exceeded', httpx.Request('POST', 'https://example.invalid'), body={})

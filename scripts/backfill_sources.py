@@ -25,10 +25,10 @@ import asyncio,json
 from sqlalchemy import select,func
 from alphapulse.core.db import SessionLocal,engine
 from alphapulse.models import Source,NewsItem
-from alphapulse.models.risk import RiskSettings
+from alphapulse.news_research.models import ResearchSettings
 async def main():
  async with SessionLocal() as s:
-  setting=await s.get(RiskSettings,1)
+  setting=await s.get(ResearchSettings,1)
   rows=(await s.execute(select(NewsItem.source_code,func.count()).group_by(NewsItem.source_code))).all()
   print(json.dumps({'news_ai_enabled':bool(setting and setting.enabled),'news_counts':dict(rows)}))
  await engine.dispose()

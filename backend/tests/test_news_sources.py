@@ -341,7 +341,7 @@ def test_new_rss_is_paused_and_discovered_without_manager_restart(trading, monke
     from unittest.mock import AsyncMock
     from alphapulse.api.crawler import RssIn, create_rss
     from alphapulse.crawler import manager
-    from alphapulse.news_risk import research
+    from alphapulse.core import public_http as research
     added = []
     session = SimpleNamespace(add=added.append, commit=AsyncMock())
     monkeypatch.setattr(research, 'public_address', AsyncMock())
@@ -376,7 +376,7 @@ def test_custom_feed_preserves_declared_xml_encoding_through_public_downloader(t
     from unittest.mock import AsyncMock
     import httpx
     from alphapulse.crawler.spiders import rss
-    from alphapulse.news_risk import research
+    from alphapulse.core import public_http as research
     url = 'https://example.invalid/feed.xml'
     item_xml = ITEM.replace('Bitcoin &amp; Ethereum', title).replace('公开摘要 &amp; 数据', 'Public summary')
     body = f'<?xml version="1.0" encoding="{encoding}"?><rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/"><channel>{item_xml}</channel></rss>'.encode(encoding)
@@ -401,7 +401,7 @@ def test_custom_feed_keeps_http_failure_status_for_scrapy_retry(trading, monkeyp
     from unittest.mock import AsyncMock
     import httpx
     from alphapulse.crawler.spiders import rss
-    from alphapulse.news_risk import research
+    from alphapulse.core import public_http as research
     url = 'https://example.invalid/feed.xml'
     original_client = httpx.AsyncClient
     monkeypatch.setattr(research, 'public_address', AsyncMock(return_value=(urlsplit(url), '8.8.8.8')))

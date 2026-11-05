@@ -132,12 +132,12 @@ async def stream(
             if output or (policy is not None and policy.get("output")) or attempt == retries or not retryable:
                 raise _llm_error(e) from e
             if policy is not None:
-                from alphapulse.news_risk.progress import step
+                from alphapulse.news_research.progress import step
                 step(f"上游暂时拒绝：{_llm_error(e)}；{delay:g}秒后重试（{attempt + 1}/2）")
             logger.warning("模型调用失败，%ss 后第 %s 次重试：%s", delay, attempt + 1, _llm_error(e))
             await asyncio.sleep(delay)
             if policy is not None:
-                from alphapulse.news_risk.progress import step
+                from alphapulse.news_research.progress import step
                 step(f"等待模型响应（重试 {attempt + 1}/2）")
 
 

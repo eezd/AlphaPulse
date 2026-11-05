@@ -246,7 +246,7 @@ def test_retry_refreshes_unavailable_search_but_reuses_successful_results(
     import asyncio
     from unittest.mock import AsyncMock
     from alphapulse.news_research.service import Research
-    from alphapulse.news_risk import research as tools
+    from alphapulse.news_research import tools as tools
 
     session = AsyncMock()
     session.__aenter__.return_value = session
@@ -634,7 +634,7 @@ def test_long_event_compaction_uses_final_research_context(trading, monkeypatch,
     from alphapulse.news_research import service
     from alphapulse.news_research.contracts import RESEARCH_SKILL, ResearchResult
     from alphapulse.news_research.models import Version
-    from alphapulse.news_risk import pipeline
+    from alphapulse.news_research import pipeline
 
     provider = N(max_tokens=32000, context_window=250000)
     skill = pipeline.BASE + "\n" + RESEARCH_SKILL

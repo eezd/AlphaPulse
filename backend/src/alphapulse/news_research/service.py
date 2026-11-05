@@ -9,16 +9,15 @@ from sqlalchemy import select, update, func, or_, case, column, exists, true, li
 from sqlalchemy.dialects.postgresql import insert
 from alphapulse.core.db import SessionLocal
 from alphapulse.models import NewsItem
-from alphapulse.news_risk.service import complete, provider_for
-from alphapulse.news_risk.pipeline import (
-    configuration,
+from alphapulse.news_research.model import complete, provider_for
+from alphapulse.news_research.pipeline import (
     validate_evidence,
     Evidence,
     validate_event,
     extract_articles,
     compact_extractions,
 )
-from alphapulse.news_risk.research import Research as LegacyResearch
+from alphapulse.news_research.tools import Research as ResearchTools
 from alphapulse.news_research.models import (
     Package,
     Attempt,
@@ -197,19 +196,24 @@ async def model_config(session, config, stage):
         provider.reasoning_effort = selected["reasoning_effort"]
     # Skill nodes are optional only for explicitly supplied isolated acceptance config.
     if selected.get("skill_id"):
-        settings = SimpleNamespace(
-            grouping_skill_id=selected["skill_id"],
-            analysis_skill_id=selected["skill_id"],
-            provider_id=provider.id,
-            model=provider.model,
-            second_provider_id=provider.id,
-            second_model=provider.model,
-            reasoning_effort=provider.reasoning_effort,
-            second_reasoning_effort=provider.reasoning_effort,
-        )
-        _, skill, rules, _ = await configuration(
-            session, settings, "grouping" if stage == "index" else "analysis"
-        )
+        from alphapulse.models import SkillNode, SkillVersion
+        from alphapulse.news_research.pipeline import BASE
+
+        node = await session.get(SkillNode, selected['skill_id'])
+        if node is None or node.scope != 'news' or node.kind != 'skill' or not node.published_version_id:
+            raise ValueError('请选择已发布的新闻专用Skill')
+        current = node
+        while current:
+            if not current.enabled:
+                raise ValueError('新闻Skill或上级文件夹已停用')
+            current = await session.get(SkillNode, current.parent_id) if current.parent_id else None
+        version = await session.get(SkillVersion, node.published_version_id)
+        rules = {'skill_id': node.id, 'version': version.version_no, 'content': version.content, 'base': BASE,
+                 'model_config': {'provider_id': provider.id, 'model': provider.model,
+                                  'max_tokens': provider.max_tokens, 'context_window': provider.context_window,
+                                  'reasoning_effort': provider.reasoning_effort,
+                                  'selected_reasoning_effort': selected.get('reasoning_effort')}}
+        skill = BASE + '\n' + version.content
     else:
         if not config.get("isolated_acceptance"):
             raise ValueError("请选择已发布的新闻专用Skill")
@@ -578,7 +582,7 @@ async def _process_package(identifier, config, expected_stage):
             await session.commit()
 
 
-class Research(LegacyResearch):
+class Research(ResearchTools):
     def register_members(self, payload):
         self.member_sources = {a["news_id"]: a for a in payload["articles"]}
         self.member_packages = {p["id"]: p for p in payload["packages"]}
@@ -614,7 +618,7 @@ class Research(LegacyResearch):
         member_sources = getattr(self, "member_sources", {})
         member_packages = getattr(self, "member_packages", {})
         if name in ("read_news", "read_package"):
-            from alphapulse.news_risk.research import TOOLS
+            from alphapulse.news_research.tools import TOOLS
 
             args = TOOLS[name][0].model_validate(arguments)
             member = member_packages.get(args.id) if name == "read_package" else None
@@ -650,7 +654,7 @@ class Research(LegacyResearch):
                 )
                 return result
         if name in ("search_packages", "read_package", "search_events", "read_event"):
-            from alphapulse.news_risk.research import TOOLS
+            from alphapulse.news_research.tools import TOOLS
 
             arguments = TOOLS[name][0].model_validate(arguments).model_dump()
             key = name + json.dumps(arguments, sort_keys=True)

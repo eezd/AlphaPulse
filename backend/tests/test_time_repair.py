@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import BaseModel
 
-from alphapulse.news_risk.contracts import PackageTimePoint
+from alphapulse.news_research.time_contracts import PackageTimePoint
 
 
 class Result(BaseModel):
@@ -14,7 +14,7 @@ class Result(BaseModel):
 
 @pytest.mark.parametrize('outcome', ['success', 'invalid', 'query', 'truncated', 'context'])
 def test_time_repair_is_bounded_and_accounts_for_calls(trading, monkeypatch, outcome):
-    from alphapulse.news_risk import service
+    from alphapulse.news_research import model as service
     from alphapulse.ai.llm import Completion
     payload = {'timeline_points': [{'occurred_at': None, 'time_precision': 'day', 'time_text': '',
         'reported_at': None, 'description': 'Unknown occurrence time', 'verification': 'insufficient',
@@ -49,7 +49,7 @@ def test_time_repair_is_bounded_and_accounts_for_calls(trading, monkeypatch, out
 
 
 def test_unrelated_validation_does_not_retry(trading, monkeypatch):
-    from alphapulse.news_risk import service
+    from alphapulse.news_research import model as service
     from alphapulse.ai.llm import Completion
     calls = []
     async def stream(*args):
@@ -63,8 +63,8 @@ def test_unrelated_validation_does_not_retry(trading, monkeypatch):
 
 
 def test_research_time_repair_preserves_round_budget_and_thinking(trading, monkeypatch):
-    from alphapulse.news_risk import service
-    from alphapulse.news_risk.research import Research
+    from alphapulse.news_research import model as service
+    from alphapulse.news_research.tools import Research
     from alphapulse.ai.llm import Completion
     calls = []
     args = {'timeline_points': [{'occurred_at': None, 'time_precision': 'day', 'time_text': '', 'reported_at': None,
@@ -100,7 +100,7 @@ def usage_tokens(usage):
 @pytest.mark.parametrize('failure', ['second_call', 'evidence'])
 def test_extraction_failure_keeps_completed_and_failed_call_usage(trading, monkeypatch, failure):
     from unittest.mock import AsyncMock
-    from alphapulse.news_risk import pipeline, service
+    from alphapulse.news_research import pipeline, model as service
     extract = pipeline.Extraction(facts='Source', evidence_refs=[pipeline.Evidence(article_id=1, quote='Source')])
     complete = AsyncMock(side_effect=[(extract, {'input_tokens': 10}), service.SubmissionFailure('synthetic failure', {'input_tokens': 40})])
     monkeypatch.setattr(pipeline, 'complete', complete)
@@ -114,7 +114,7 @@ def test_extraction_failure_keeps_completed_and_failed_call_usage(trading, monke
 @pytest.mark.parametrize('failure', ['second_call', 'evidence', 'no_shrink'])
 def test_compaction_failure_keeps_every_paid_call(trading, monkeypatch, failure):
     from unittest.mock import AsyncMock
-    from alphapulse.news_risk import pipeline, service
+    from alphapulse.news_research import pipeline, model as service
     group = {'facts': 'Very long source fact ' * 50, 'evidence_refs': [{'article_id': 1, 'quote': 'Source'}]}
     extract = pipeline.Extraction(facts='Source' if failure != 'no_shrink' else 'Longer' * 1000,
         evidence_refs=[pipeline.Evidence(article_id=1, quote='Changed' if failure == 'evidence' else 'Source')])
@@ -122,25 +122,16 @@ def test_compaction_failure_keeps_every_paid_call(trading, monkeypatch, failure)
     monkeypatch.setattr(pipeline, 'complete', complete)
     monkeypatch.setattr(pipeline, 'fits_context', lambda *args: True)
     with pytest.raises(service.SubmissionFailure) as error:
-        asyncio.run(pipeline.compact_extractions(SimpleNamespace(), 'rules', {'extractions': [group]}, pipeline.EventResult, fits=lambda *args: False))
+        asyncio.run(pipeline.compact_extractions(SimpleNamespace(), 'rules', {'extractions': [group]}, pipeline.ReviewResult, fits=lambda *args: False))
     assert usage_tokens(error.value.usage) == (50 if failure == 'second_call' else 10)
 
 
-def test_summary_keeps_extraction_usage_when_compaction_fails(trading, monkeypatch):
-    from unittest.mock import AsyncMock
-    from alphapulse.news_risk import pipeline, service
-    monkeypatch.setattr(pipeline, 'fits_context', lambda *args: False)
-    monkeypatch.setattr(pipeline, 'extract_articles', AsyncMock(return_value=([{'facts': 'Source'}], [{'input_tokens': 123}])))
-    monkeypatch.setattr(pipeline, 'compact_extractions', AsyncMock(side_effect=service.SubmissionFailure('synthetic failure', {'input_tokens': 456})))
-    with pytest.raises(service.SubmissionFailure) as error:
-        asyncio.run(pipeline.summarize_articles(SimpleNamespace(), 'rules', [], {'id': 1}))
-    assert usage_tokens(error.value.usage) == 579
 
 
 @pytest.mark.parametrize('error_kind', ['missing', 'extra'])
 def test_structural_repair_submits_full_result_once(trading, monkeypatch, error_kind):
     from pydantic import ConfigDict
-    from alphapulse.news_risk import service
+    from alphapulse.news_research import model as service
     from alphapulse.ai.llm import Completion
     class Category(BaseModel):
         model_config = ConfigDict(extra='forbid')

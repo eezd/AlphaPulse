@@ -87,11 +87,15 @@ def test_published_skill_retains_base_instructions(trading, monkeypatch):
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
     from alphapulse.news_research import service
-    provider = SimpleNamespace(id=7, model='test', reasoning_effort='medium')
+    from alphapulse.news_research.pipeline import BASE
+    provider = SimpleNamespace(id=7, model='test', reasoning_effort='medium', max_tokens=8192, context_window=200000)
     monkeypatch.setattr(service, 'provider_for', AsyncMock(return_value=provider))
-    monkeypatch.setattr(service, 'configuration', AsyncMock(return_value=(provider, 'BASE\nPUBLISHED', {'content': 'PUBLISHED', 'base': 'BASE'}, 'hash')))
-    _, skill, rules = asyncio.run(service.model_config(None, {'index': {'provider_id': 7, 'model': 'test', 'skill_id': 9}}, 'index'))
-    assert skill == 'BASE\nPUBLISHED' and rules['base'] == 'BASE'
+    session = SimpleNamespace(get=AsyncMock(side_effect=[
+        SimpleNamespace(id=9, scope='news', kind='skill', enabled=True, parent_id=None, published_version_id=10),
+        SimpleNamespace(version_no=3, content='PUBLISHED'),
+    ]))
+    _, skill, rules = asyncio.run(service.model_config(session, {'index': {'provider_id': 7, 'model': 'test', 'skill_id': 9}}, 'index'))
+    assert skill == BASE+'\nPUBLISHED' and rules['base'] == BASE
 
 
 def test_pinned_reference_requires_later_natural_update_without_consumer_rerun(scenario):

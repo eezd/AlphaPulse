@@ -162,8 +162,8 @@ async def enable(session: DB):
     )
     if running:
         raise HTTPException(409, "请等待已接收任务完成后再验证")
-    from alphapulse.news_risk.service import complete
-    from alphapulse.news_risk.pipeline import validate_event
+    from alphapulse.news_research.model import complete
+    from alphapulse.news_research.pipeline import validate_event
 
     fixture = {
         "id": 1,

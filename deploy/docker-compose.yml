@@ -42,7 +42,7 @@ services:
   news-risk:
     <<: *backend
     container_name: AlphaPulse-dev-news-risk
-    command: [python, -m, alphapulse.news_risk.worker]
+    command: [python, -m, alphapulse.news_research.worker]
 
   calendar:
     <<: *backend

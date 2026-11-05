@@ -336,69 +336,11 @@ def remove_cls(build, execute=False):
         deploy_locked(build, INSTANCE, maintenance=pending)
 
 
-def reset_news_ai(build, confirmed=False):
-    """Preview or clear only legacy news AI records under the deployment lock."""
-    validate_images(build)
-    with locked(INSTANCE / '.deploy.lock'):
-        require(not (INSTANCE / 'deployment.pending.json').exists(), 'Recover the pending deployment first')
-        command = ['docker', 'run', '--rm', '-i', '--network', 'dev_default', '--env-file', str(INSTANCE / '.env'),
-                   IMAGES['backend'] + ':' + build['version'], 'python', '-']
-        run(*command, input=SCHEMA)
-        if confirmed:
-            current = json.loads((INSTANCE / 'deployment.json').read_text())
-            run(*compose(INSTANCE, current), 'stop', 'news-risk')
-        program = """
-import asyncio,json
-from sqlalchemy import text
-from alphapulse.core.db import engine
-async def main():
-    async with engine.begin() as c:
-        if not CONFIRMED:
-            await c.execute(text('SET TRANSACTION READ ONLY'))
-        counts = {table: await c.scalar(text('SELECT count(*) FROM '+table)) for table in
-            ('risk_analyses','risk_events','risk_snapshots')}
-        if CONFIRMED:
-            assert not await c.scalar(text('SELECT count(*) FROM news_ai_article_analyses')), 'New pipeline already contains data'
-            assert not await c.scalar(text('SELECT count(*) FROM news_ai_summaries')), 'New pipeline already contains data'
-            await c.execute(text('UPDATE risk_settings SET enabled=false, start_at=NULL'))
-            for table in ('risk_analyses','risk_events','risk_snapshots'):
-                await c.execute(text('DELETE FROM '+table))
-        print(json.dumps({'legacy_counts':counts,'cleared':CONFIRMED}))
-    await engine.dispose()
-asyncio.run(main())
-"""
-        print(run(*command, input='CONFIRMED = '+repr(confirmed)+'\n'+program), flush=True)
-
-def reset_news_derived(build, execute=False, acceptance=None, baseline=None):
-    """Run the scoped reset with both deployment and model-admission locks."""
-    report = json.loads(acceptance.read_text()) if acceptance else None
-    raw = baseline.read_bytes() if baseline else None
-    if execute:
-        require(bool(report and raw and report.get('real_models') is True and report.get('quality_accepted') is True
-            and report.get('baseline_sha256') == hashlib.sha256(raw).hexdigest()
-            and report.get('baseline_packages') == 20 and report.get('originals') == 27
-            and report.get('failed') == 0 and report.get('unassigned') == 0), '固定样本真实模型质量验收尚未通过')
-    validate_images(build)
-    with locked(INSTANCE / '.deploy.lock'):
-        require(not (INSTANCE / 'deployment.pending.json').exists(), 'Recover the pending deployment first')
-        command = ['docker','run','--rm','-i','--network','dev_default','--env-file',str(INSTANCE / '.env'),
-            IMAGES['backend']+':'+build['version'],'python','-']
-        run(*command,input=SCHEMA)
-        source = (ROOT / 'scripts/reset_news_ai.py').read_text()
-        program = "import asyncio,json\nnamespace={'__name__':'news_reset'}\nexec("+repr(source)+",namespace)\n"
-        program += 'print(json.dumps(asyncio.run(namespace["reset"]('+repr(execute)+','+repr(report)+','+repr(raw)+')),ensure_ascii=False))'
-        print(run(*command,input=program),flush=True)
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('update', 'recover', 'rollback', 'reset-news-ai', 'reset-news-derived', 'install-entrypoints', 'remove-cls'))
+    parser.add_argument('command', choices=('update', 'recover', 'rollback', 'install-entrypoints', 'remove-cls'))
     parser.add_argument('--execute', action='store_true')
     parser.add_argument('--build', type=Path, default=ROOT / 'build.json')
-    parser.add_argument('--confirm-delete-old-news-ai', action='store_true')
-    parser.add_argument('--confirm-reset-news-derived', action='store_true')
-    parser.add_argument('--acceptance', type=Path)
-    parser.add_argument('--baseline', type=Path)
     args = parser.parse_args()
     if args.command == 'remove-cls':
         remove_cls(json.loads(args.build.read_text()), args.execute)
@@ -407,10 +349,6 @@ def main():
             require(not (INSTANCE / 'deployment.pending.json').exists(), 'Recover the pending deployment first')
             install_entrypoints(INSTANCE)
         print('实例启停入口已安装；未启动或停止任何服务')
-    elif args.command == 'reset-news-derived':
-        reset_news_derived(json.loads(args.build.read_text()),args.confirm_reset_news_derived,args.acceptance,args.baseline)
-    elif args.command == 'reset-news-ai':
-        reset_news_ai(json.loads(args.build.read_text()), args.confirm_delete_old_news_ai)
     elif args.command == 'update':
         deploy(json.loads(args.build.read_text()))
     else:

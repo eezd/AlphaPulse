@@ -146,7 +146,7 @@ def test_budget_counts_transport_failures_before_retry(trading, tmp_path):
 
 
 def test_supplemental_citation_must_use_returned_article_id(trading):
-    from alphapulse.news_risk.pipeline import validate_evidence, Evidence
+    from alphapulse.news_research.pipeline import validate_evidence, Evidence
 
     sources = {-1: {"news_id": 1004, "content": "Original correction"}}
     validate_evidence([Evidence(article_id=-1, quote="Original correction")], sources)

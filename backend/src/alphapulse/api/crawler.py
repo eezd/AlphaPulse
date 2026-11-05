@@ -325,7 +325,7 @@ class RssIn(BaseModel):
 
 @router.post('/sources/rss', status_code=201)
 async def create_rss(body: RssIn, session: Annotated[AsyncSession, Depends(get_session)]):
-    from alphapulse.news_risk.research import public_address
+    from alphapulse.core.public_http import public_address
     try: await public_address(body.url)
     except ValueError as error: raise HTTPException(422, str(error)) from error
     except OSError as error: raise HTTPException(422, '无法解析订阅来源地址') from error

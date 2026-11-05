@@ -173,11 +173,6 @@ async def delete(node_id: int, session: Annotated[AsyncSession, Depends(get_sess
     node = await get_node(session, node_id)
     if node.kind == "folder" and await session.scalar(select(func.count()).where(SkillNode.parent_id == node_id)):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "文件夹不为空，请先移走或删除其中的节点")
-    from alphapulse.models.risk import RiskSettings
-    referenced = await session.scalar(select(RiskSettings.id).where(
-        (RiskSettings.grouping_skill_id == node_id) | (RiskSettings.analysis_skill_id == node_id) | (RiskSettings.outlook_skill_id == node_id)))
-    if referenced:
-        raise HTTPException(409, "请先解除新闻模型的Skill绑定")
     from alphapulse.news_research.models import ResearchSettings
     research = await session.scalar(select(ResearchSettings).where(
         ResearchSettings.config.contains({'index': {'skill_id': node_id}}) |

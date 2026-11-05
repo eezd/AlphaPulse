@@ -1,4 +1,4 @@
-"""Bounded keyword matching shared by grouping and research."""
+"""Bounded keyword matching for original news research."""
 from sqlalchemy import or_, case
 
 ALIASES = {'央行': '中国人民银行', '证监会': '中国证监会', '人行': '中国人民银行'}

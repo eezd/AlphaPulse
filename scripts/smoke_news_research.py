@@ -237,7 +237,7 @@ async def main():
     from alphapulse.news_research import api
     from alphapulse.models import AiProvider, SkillNode, SkillVersion
     from alphapulse.core.crypto import encrypt
-    from alphapulse.news_risk import service as legacy_service
+    from alphapulse.news_research import model as model_service
 
     app = FastAPI()
     app.include_router(api.router)
@@ -355,7 +355,7 @@ async def main():
             )
             return schema.model_validate(result), {}
 
-        with patch.object(legacy_service, "complete", validation):
+        with patch.object(model_service, "complete", validation):
             response = await client.post("/api/risk/enable")
             assert response.status_code == 200, response.text
         assert (await client.get("/api/risk/settings")).json()["data"][
@@ -380,7 +380,7 @@ async def main():
                     assert response.status_code == 200
                 return await validation(provider, skill, payload, schema)
 
-            with patch.object(legacy_service, "complete", interrupted_validation):
+            with patch.object(model_service, "complete", interrupted_validation):
                 response = await client.post("/api/risk/enable")
                 assert response.status_code == 409, response.text
             assert (await client.get("/api/risk/settings")).json()["data"][

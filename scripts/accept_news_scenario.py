@@ -195,7 +195,7 @@ async def _run(args):
     if int(baseline.read_text()) != 199 or hashlib.sha256(baseline.read_bytes()).hexdigest() != manifest['baseline_counter_sha256']:
         raise ValueError('历史计数不匹配')
     # Preflight precedes all paid calls, using the application's public reader.
-    from alphapulse.news_risk.research import fetch_public
+    from alphapulse.news_research.tools import fetch_public
     preflight = []
     for source in manifest['official_sources']:
         result = await fetch_public(source['url'])

@@ -1,5 +1,4 @@
 from alphapulse.models.jin10 import Jin10Connection, Jin10SyncDay
-from alphapulse.models.risk import RiskSettings, RiskEvent, RiskAnalysis, RiskSnapshot
 from alphapulse.core.db import Base
 from alphapulse.models.ai import AiProvider, ChatMessage, ChatSession, ContextVersion, SkillNode, SkillVersion
 from alphapulse.models.calendar import EconomicRelease, EconomicRevision, EconomicSeriesValue
@@ -10,7 +9,6 @@ from alphapulse.models.trading import NewsSignal, TradingAccount, TradingAnalysi
 __all__ = [
     "Jin10Connection",
     "Jin10SyncDay",
-    "RiskSettings", "RiskEvent", "RiskAnalysis", "RiskSnapshot",
     "AiProvider",
     "Base",
     "ChatMessage",

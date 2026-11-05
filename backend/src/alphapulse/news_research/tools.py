@@ -1,67 +1,13 @@
-"""Read-only research tools with bounded calls and durable source snapshots."""
-import asyncio
-import ipaddress
+"""Read-only news and external research tools with bounded calls."""
 import json
-import socket
-from datetime import UTC, datetime
-from urllib.parse import urlsplit
-import httpx
-from parsel import Selector
-from pydantic import BaseModel, Field
 from sqlalchemy import select, or_
+import httpx
+from pydantic import BaseModel, Field
 from alphapulse.ai import llm
 from alphapulse.core.db import SessionLocal
+from alphapulse.core.public_http import fetch_public
 from alphapulse.models import NewsItem
-from alphapulse.models.risk import NewsSummary
-from alphapulse.news_risk.service import fits_context, validate_submission, model_stream
-
-
-async def public_address(url):
-    parsed = urlsplit(url)
-    if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.password or parsed.port not in (None, 80, 443):
-        raise ValueError('只允许公开HTTP/HTTPS地址')
-    answers = await asyncio.get_running_loop().getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == 'https' else 80), type=socket.SOCK_STREAM)
-    addresses = [item[4][0] for item in answers]
-    if not addresses or any(not ipaddress.ip_address(ip).is_global for ip in addresses):
-        raise ValueError('不允许访问非公开地址')
-    return parsed, addresses[0]
-
-
-async def fetch_public_response(url):
-    async with httpx.AsyncClient(timeout=20, trust_env=False) as client:
-        for _ in range(4):
-            parsed, address = await public_address(url)
-            # Pin the checked address while retaining TLS hostname verification.
-            target = httpx.URL(url).copy_with(host=address)
-            async with client.stream('GET', target, headers={'Host': parsed.hostname}, extensions={'sni_hostname': parsed.hostname}) as response:
-                if response.is_redirect:
-                    location = response.headers.get('location')
-                    if not location: raise ValueError('重定向缺少地址')
-                    url = str(httpx.URL(url).join(location)); continue
-                chunks, size = [], 0
-                async for chunk in response.aiter_bytes():
-                    size += len(chunk)
-                    if size > 2*1024*1024: raise ValueError('响应超过2MiB限制')
-                    chunks.append(chunk)
-                body = b''.join(chunks)
-                # Bytes are already decompressed; Scrapy must not decode them again.
-                headers = [(k, v) for k, v in response.headers.multi_items()
-                    if k.lower() not in ('content-encoding', 'content-length', 'transfer-encoding')]
-                return httpx.Response(response.status_code, headers=headers, content=body, request=httpx.Request('GET', url))
-    raise ValueError('重定向超过限制')
-
-
-async def fetch_public(url):
-    response = await fetch_public_response(url)
-    response.raise_for_status()
-    content_type = response.headers.get('content-type', '')
-    if 'html' in content_type:
-        selector = Selector(text=response.text)
-        content = '\n'.join(selector.xpath('//body//text()[not(ancestor::script or ancestor::style or ancestor::nav)]').getall())
-    elif any(t in content_type for t in ('text/', 'xml', 'json')):
-        content = response.text
-    else: raise ValueError('该来源不是可读取的文本正文')
-    return {'url': str(response.url), 'title': '', 'content': content, 'fetched_at': datetime.now(UTC).isoformat()}
+from alphapulse.news_research.model import fits_context, validate_submission, model_stream
 
 
 class Search(BaseModel):
@@ -91,7 +37,7 @@ TOOLS = {
 
 
 class Research:
-    def __init__(self, package=None, event=None):
+    def __init__(self, event=None):
         self.counts = {'search': 0, 'read': 0, 'search_web': 0, 'read_web': 0}
         self.records = []
         self.sources = {}
@@ -101,7 +47,6 @@ class Research:
         self.read_package_ids = set()
         self.read_event_ids = set()
         self.read_event_versions = {}
-        self.package = package or {}
         self.event = event or {}
         self.provided_news = {}
         self.provided_packages = {}
@@ -133,16 +78,13 @@ class Research:
 
     async def tool(self, name, arguments):
         if name not in TOOLS: raise ValueError('未知研究工具')
-        from alphapulse.news_risk.progress import step
+        from alphapulse.news_research.progress import step
         step('查询资料', tool=name)
         args = TOOLS[name][0].model_validate(arguments)
         if name == 'read_event' and args.id == self.event.get('id'):
             return {**self.event, 'status':'already_provided', 'scope':'ai_summary_not_evidence'}
         if name == 'read_package' and args.id in self.provided_packages:
             return {**self.provided_packages[args.id], 'status':'already_provided', 'scope':'ai_summary_not_evidence'}
-        if name == 'read_package' and args.id == self.package.get('id'):
-            return {'id': args.id, 'revision': self.package.get('revision'), 'status': 'already_provided',
-                'scope': 'ai_summary_not_evidence', 'instruction': '当前包及previous已在输入中；纠错使用给定articles中的id或package.sources中的analysis_id。'}
         if name == 'read_news' and args.id in self.provided_news:
             return {'article_id': self.provided_news[args.id], 'news_id': args.id, 'status': 'already_provided',
                 'instruction': '原文已在本轮输入或工具响应中，使用该article_id引用，不重复计为独立来源。'}
@@ -174,26 +116,12 @@ class Research:
                 identifier = min([0, *self.sources])-1
                 self.sources[identifier] = result
                 result = {**result, 'article_id': identifier}
-            elif name in ('search_events', 'read_event'):
-                from alphapulse.models.risk import NewsEvent, EventMember
-                if name == 'search_events':
-                    rows = (await session.scalars(select(NewsEvent).where(or_(*(NewsEvent.title.icontains(term, autoescape=True) for term in (args.keywords or args.query.split())[:6])), NewsEvent.state != 'retired', NewsEvent.id != self.event.get('id', 0)).limit(20))).all()
-                    result = [{'id': e.id, 'title': e.title} for e in rows]
-                else:
-                    row = await session.get(NewsEvent, args.id)
-                    if row is None: raise ValueError('事件不存在')
-                    self.read_event_ids.add(row.id); self.read_event_versions[row.id]=row.revision
-                    members = list((await session.scalars(select(EventMember.package_id).where(EventMember.event_id == row.id))).all())
-                    packages = list(await session.scalars(select(NewsSummary).where(NewsSummary.id.in_(members),NewsSummary.replacement_ids==[],NewsSummary.state!='withdrawn')))
-                    result = {'packages':[{'id':p.id,'revision':p.revision,'fact':p.fact,'tags':p.tags} for p in packages], 'id':row.id, 'revision':row.revision, 'title':row.title, 'fact':row.fact, 'result':row.result, 'package_ids':members, 'scope':'ai_summary_not_evidence'}
-            elif name in ('search_news', 'search_packages'):
-                model = NewsItem if name == 'search_news' else NewsSummary
-                from alphapulse.news_risk.retrieval import terms_for, matching
-                conditions, score = matching(model, terms_for(args.query, args.keywords))
-                if model is NewsSummary: conditions = conditions & (NewsSummary.replacement_ids == []) & (NewsSummary.state != 'withdrawn') & (NewsSummary.id != self.package.get('id', 0)) & NewsSummary.id.not_in(self.provided_packages)
-                rows = (await session.scalars(select(model).where(conditions).order_by(score.desc(), model.published_at.desc(), model.id).limit(20))).all()
-                result = [{'id': r.id, 'title': r.title} for r in rows]
-                if model is NewsSummary: self.package_ids.update(r.id for r in rows)
+            elif name == 'search_news':
+                from alphapulse.news_research.retrieval import terms_for, matching
+                conditions, score = matching(NewsItem, terms_for(args.query, args.keywords))
+                rows = await session.scalars(select(NewsItem).where(conditions).order_by(
+                    score.desc(), NewsItem.published_at.desc(), NewsItem.id).limit(20))
+                result = [{'id': row.id, 'title': row.title} for row in rows]
             elif name == 'read_news':
                 row = await session.get(NewsItem, args.id)
                 if row is None: raise ValueError('新闻不存在')
@@ -202,15 +130,6 @@ class Research:
                     'summary': row.summary, 'url': row.url, 'published_at': row.published_at.isoformat()}
                 self.sources[identifier] = result
                 self.provided_news[row.id] = identifier
-            elif name == 'read_package':
-                from alphapulse.models.risk import SummaryArticle, ArticleAnalysis, EventMember
-                row = await session.get(NewsSummary, args.id)
-                if row is None: raise ValueError('包不存在')
-                self.package_ids.add(row.id); self.read_package_ids.add(row.id)
-                ids = (await session.scalars(select(ArticleAnalysis.news_id).join(SummaryArticle).join(NewsItem).where(SummaryArticle.summary_id == row.id, SummaryArticle.active.is_(True), ArticleAnalysis.content_hash == NewsItem.content_hash).distinct())).all()
-                assignments = (await session.scalars(select(ArticleAnalysis).join(SummaryArticle).join(NewsItem).where(SummaryArticle.summary_id == row.id, SummaryArticle.active.is_(True), ArticleAnalysis.content_hash == NewsItem.content_hash))).all()
-                membership = await session.get(EventMember, row.id)
-                result = {'main_event_id': membership.event_id if membership else None, 'replacement_ids': row.replacement_ids, 'state': row.state, 'id': row.id, 'revision': row.revision, 'fact': row.fact, 'result': row.result, 'articles': [{'analysis_id': a.id, **a.input} for a in assignments], 'news_ids': ids, 'scope': 'ai_summary_not_evidence'}
             else:
                 from alphapulse.models.calendar import EconomicRelease
                 rows = (await session.scalars(select(EconomicRelease).where(or_(*(EconomicRelease.title.icontains(term, autoescape=True) for term in (args.keywords or args.query.split())[:6]))).limit(20))).all()
@@ -229,7 +148,7 @@ class Research:
         submit = llm.ToolSpec('submit', '提交完整研判，引用实际读取来源', schema.model_json_schema())
         messages = [{'role': 'user', 'text': json.dumps(payload, ensure_ascii=False)}]
         usages = self.usages = []
-        from alphapulse.news_risk.progress import step, current
+        from alphapulse.news_research.progress import step, current
         for round_no in range(9):
             if current.get() is not None: step('模型研判', round=round_no+1, model=provider.model, reasoning_effort=provider.reasoning_effort)
             if not self.fits_messages(provider, system, messages, schema):

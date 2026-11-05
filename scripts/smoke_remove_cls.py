@@ -6,10 +6,9 @@ from sqlalchemy import DateTime, Integer, MetaData, String, insert, text
 from sqlalchemy.dialects.postgresql import JSONB
 
 from alphapulse.core.config import get_settings
-from alphapulse.core.db import Base, engine
+from alphapulse.core.db import engine
 from alphapulse.crawler.remove_cls import AI_TABLES, OPTIONAL_AI_TABLES, cleanup
 from alphapulse.models import NewsItem, Source
-import alphapulse.models.risk  # noqa: F401
 import alphapulse.news_research.models  # noqa: F401
 
 
@@ -26,8 +25,15 @@ async def main():
                     await connection.execute(insert(NewsItem).values(id=identity, source_code=source, external_id='cleanup-ci',
                         url='https://example.com', published_at=datetime.now(UTC), content_hash=str(identity)))
                 assert set((await cleanup(connection))['absent_legacy_tables']) == set(OPTIONAL_AI_TABLES)
-                for name in OPTIONAL_AI_TABLES:
-                    await connection.run_sync(lambda sync, name=name: Base.metadata.tables[name].create(sync))
+                # These archived tables have no runtime ORM models; exercise their
+                # optional cleanup with their historical schema in the disposable DB.
+                await connection.execute(text('''CREATE TABLE news_ai_event_evidence (
+                    id BIGSERIAL PRIMARY KEY,
+                    version_id BIGINT NOT NULL REFERENCES news_ai_event_versions(id),
+                    data JSONB NOT NULL, fetched_at TIMESTAMPTZ NOT NULL DEFAULT now())'''))
+                await connection.execute(text('''CREATE TABLE news_ai_event_corrections (
+                    id BIGSERIAL PRIMARY KEY, fingerprint VARCHAR(64) UNIQUE NOT NULL,
+                    input JSONB NOT NULL, result JSONB NOT NULL)'''))
                 reflected = MetaData()
                 await connection.run_sync(lambda sync: reflected.reflect(sync, only=list((*AI_TABLES, *OPTIONAL_AI_TABLES))))
                 for table in reflected.sorted_tables:

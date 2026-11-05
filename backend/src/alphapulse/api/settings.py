@@ -18,7 +18,6 @@ from alphapulse.core.crypto import encrypt
 from alphapulse.core.db import get_session
 from alphapulse.core.redis import redis
 from alphapulse.models import AiProvider, TradingAccount, TradingAnalysis, TradingCredential, TradingSymbol
-from alphapulse.models.risk import RiskSettings
 from alphapulse.trading.client import ExchangeError, create_client
 from alphapulse.trading.snapshot import STATUS_KEY
 
@@ -160,16 +159,6 @@ async def delete_provider(provider_id: int, session: Annotated[AsyncSession, Dep
         ResearchSettings.config.contains({'research': {'provider_id': provider_id}})).with_for_update())
     if research:
         raise HTTPException(409, '请先切换两阶段新闻研究使用的接入配置')
-    risk = await session.scalar(select(RiskSettings).where((RiskSettings.provider_id == provider_id) | (RiskSettings.second_provider_id == provider_id) | (RiskSettings.third_provider_id == provider_id)).with_for_update())
-    if risk:
-        if risk.enabled:
-            raise HTTPException(status.HTTP_409_CONFLICT, "请先暂停新闻 AI 分析或切换其接入配置")
-        if risk.provider_id == provider_id:
-            risk.provider_id = None
-        if risk.third_provider_id == provider_id:
-            risk.third_provider_id = None
-        if risk.second_provider_id == provider_id:
-            risk.second_provider_id = None
     await session.delete(provider)
     await session.flush()
     if provider.is_default:

@@ -184,7 +184,7 @@ class CustomRssSpider(RssNewsSpider):
     async def start(self):
         from alphapulse.core.db import SessionLocal
         from alphapulse.models import Source
-        from alphapulse.news_risk.research import public_address
+        from alphapulse.core.public_http import public_address
         async with SessionLocal() as session:
             source = await session.get(Source, self.name)
             if source is None or source.adapter != 'rss': raise ValueError('订阅不存在')
@@ -236,7 +236,7 @@ class PublicFeedDownloadHandler:
     async def close(self): pass
 
     async def download_request(self, request):
-        from alphapulse.news_risk.research import fetch_public_response
+        from alphapulse.core.public_http import fetch_public_response
         response = await fetch_public_response(request.url)
         return Response(str(response.url), status=response.status_code, body=response.content, request=request,
             headers=response.headers.multi_items())
