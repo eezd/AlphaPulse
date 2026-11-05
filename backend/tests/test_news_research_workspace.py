@@ -239,43 +239,6 @@ def test_retry_refreshes_local_search_with_current_vocabulary(
     assert len(reader.records) == 1 and not reader.records[0].get("reused")
 
 
-@pytest.mark.parametrize("status", ["unavailable", "no_matches", "matched"])
-def test_retry_refreshes_unavailable_search_but_reuses_successful_results(
-    trading, monkeypatch, status
-):
-    import asyncio
-    from unittest.mock import AsyncMock
-    from alphapulse.news_research.service import Research
-    from alphapulse.news_research import tools as tools
-
-    session = AsyncMock()
-    session.__aenter__.return_value = session
-    monkeypatch.setattr(tools, "SessionLocal", lambda: session)
-    client = AsyncMock()
-    client.__aenter__.return_value = client
-    client.get.return_value = N(
-        raise_for_status=lambda: None,
-        json=lambda: {"results": [], "unresponsive_engines": []},
-    )
-    monkeypatch.setattr(tools.httpx, "AsyncClient", lambda **kwargs: client)
-    cached = {
-        "status": status,
-        "results": [{"url": "https://example.invalid/retry"}]
-        if status == "matched"
-        else [],
-        "errors": [["engine", "CAPTCHA"]] if status == "unavailable" else [],
-    }
-    reader = Research(event={"id": 8})
-    reader.restore(
-        [{"tool": "search_web", "arguments": {"query": "same query"}, "result": cached}]
-    )
-    result = asyncio.run(reader.tool("search_web", {"query": "same query"}))
-    if status == "unavailable":
-        assert client.get.await_count == 1 and result["status"] == "no_matches"
-        assert len(reader.records) == 1 and not reader.records[0].get("reused")
-    else:
-        assert client.get.await_count == 0 and result == cached
-        assert reader.records[0]["reused"] is True
 
 
 def test_settings_contract_rejects_third_stage_and_unknown_efforts(trading):

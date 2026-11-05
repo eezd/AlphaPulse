@@ -99,10 +99,6 @@ class EntrypointTests(unittest.TestCase):
         self.assertEqual(up[up.index('--env-file') + 1], str(self.directory / 'images.env'))
         self.assertEqual(calls[-1]['args'][0], 'inspect')
 
-    def test_replaced_search_tag_never_starts_any_service(self):
-        self.fixture['images'][instance.SEARCH_IMAGE]['RepoDigests'] = []
-        calls = self.invoke(code=1)
-        self.assertFalse(any('up' in c['args'] for c in calls))
 
     def test_missing_or_mismatched_images_never_start_any_service(self):
         backend = deploy.IMAGES['backend'] + ':' + self.receipt['version']

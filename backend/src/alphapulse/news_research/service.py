@@ -590,20 +590,11 @@ class Research(ResearchTools):
 
     def restore(self, records):
         # Retry local searches against current data and reviewed vocabulary.
-        records = [
-            r
-            for r in records
-            if r["tool"] not in ("search_packages", "search_events")
-            and not (
-                r["tool"] == "read_news"
-                and r["arguments"].get("id") in getattr(self, "member_sources", {})
-            )
-            and not (
-                r["tool"] == "search_web"
-                and isinstance(r.get("result"), dict)
-                and r["result"].get("status") == "unavailable"
-            )
-        ]
+        from alphapulse.news_research.tools import TOOLS
+        records = [r for r in records if r['tool'] in TOOLS
+                   and r['tool'] not in ('search_packages', 'search_events')
+                   and not (r['tool'] == 'read_news'
+                            and r['arguments'].get('id') in getattr(self, 'member_sources', {}))]
         super().restore(records)
         self.records.extend(
             {**record, "reused": True}

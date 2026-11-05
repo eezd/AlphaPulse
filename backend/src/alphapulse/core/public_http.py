@@ -2,10 +2,8 @@
 import asyncio
 import ipaddress
 import socket
-from datetime import UTC, datetime
 from urllib.parse import urlsplit
 import httpx
-from parsel import Selector
 
 
 async def public_address(url):
@@ -40,15 +38,3 @@ async def fetch_public_response(url):
                     if k.lower() not in ('content-encoding', 'content-length', 'transfer-encoding')]
                 return httpx.Response(response.status_code, headers=headers, content=body, request=httpx.Request('GET', url))
     raise ValueError('重定向超过限制')
-
-async def fetch_public(url):
-    response = await fetch_public_response(url)
-    response.raise_for_status()
-    content_type = response.headers.get('content-type', '')
-    if 'html' in content_type:
-        selector = Selector(text=response.text)
-        content = '\n'.join(selector.xpath('//body//text()[not(ancestor::script or ancestor::style or ancestor::nav)]').getall())
-    elif any(t in content_type for t in ('text/', 'xml', 'json')):
-        content = response.text
-    else: raise ValueError('该来源不是可读取的文本正文')
-    return {'url': str(response.url), 'title': '', 'content': content, 'fetched_at': datetime.now(UTC).isoformat()}

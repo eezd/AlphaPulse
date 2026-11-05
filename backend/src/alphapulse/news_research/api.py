@@ -20,7 +20,7 @@ from alphapulse.news_research.models import (
     Version,
     Reference,
 )
-from alphapulse.news_research import service, vocabulary as vocab
+from alphapulse.news_research import service, batches, vocabulary as vocab
 from alphapulse.news_research.models import VocabularyVersion
 from alphapulse.news_research.contracts import (
     INDEX_SKILL,
@@ -113,7 +113,8 @@ async def settings_row(session):
 async def settings(session: DB):
     row = await settings_row(session)
     return success(
-        {"config": row.config, "enabled": row.enabled, "start_at": row.start_at}
+        {"config": row.config, "enabled": row.enabled, "start_at": row.start_at,
+         "batch": await batches.progress(session)}
     )
 
 

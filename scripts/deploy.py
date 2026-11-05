@@ -3,7 +3,6 @@
 
 import argparse
 import hashlib
-import secrets
 import json
 from pathlib import Path
 import re
@@ -16,7 +15,7 @@ SEARXNG_IMAGE = 'docker.io/searxng/searxng:2026.10.30-ffa88e3ba'
 SEARXNG_DIGEST = 'sha256:f4aa660c54d062dedb268be84e821ea24e39f48c7a496af8dd02cc9eedb93847'
 
 INSTANCE = Path('/docker/gitea/dev/AlphaPulse')
-SERVICES = ('api', 'web', 'market', 'crawler', 'calendar', 'trader', 'news-risk', 'jin10-calendar', 'searxng')
+SERVICES = ('api', 'web', 'market', 'crawler', 'calendar', 'trader', 'news-risk', 'jin10-calendar')
 
 # Recognize the unmodified skill templates installed before entrypoint versioning.
 LEGACY_ENTRIES = {
@@ -167,8 +166,6 @@ def deploy_locked(build, directory, maintenance=None):
         print('Skipped: dev has advanced')
         return
     validate_images(build)
-    run('docker', 'pull', SEARXNG_IMAGE)
-    validate_search_image()
     # Only this read-only schema guard receives the existing application environment.
     print(run('docker', 'run', '--rm', '-i', '--network', 'dev_default', '--env-file', directory / '.env',
               IMAGES['backend'] + ':' + build['version'], 'python', '-', input=SCHEMA), flush=True)
@@ -214,14 +211,10 @@ def deploy_locked(build, directory, maintenance=None):
             run(*old_command, 'stop', 'trader')
             run(*old_command, 'stop', *[service for service in previous_running if service != 'trader'])
         (directory / 'compose.yml').write_text((ROOT / 'deploy/docker-compose.yml').read_text())
-        search_config = directory / 'searxng.yml'
-        if not search_config.exists():
-            search_config.write_text((ROOT / 'deploy/searxng.yml').read_text().replace('@SEARXNG_SECRET@', secrets.token_hex(32)))
-            search_config.chmod(0o644)
         command = compose(directory, build)
         run(*command, 'config', '--quiet')
-        run(*command, 'up', '-d', '--no-build', '--pull', 'never', '--wait', '--wait-timeout', '120', 'api', 'web')
-        run(*command, 'up', '-d', '--no-build', '--pull', 'never', 'market', 'crawler', 'calendar', 'trader', 'news-risk', 'jin10-calendar', 'searxng')
+        run(*command, 'up', '-d', '--no-build', '--pull', 'never', '--remove-orphans', '--wait', '--wait-timeout', '120', 'api', 'web')
+        run(*command, 'up', '-d', '--no-build', '--pull', 'never', 'market', 'crawler', 'calendar', 'trader', 'news-risk', 'jin10-calendar')
         time.sleep(5)
         health(command, build)
         if previous:

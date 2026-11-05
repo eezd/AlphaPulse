@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 import subprocess
 
-SERVICES = ('api', 'web', 'market', 'crawler', 'calendar', 'trader', 'news-risk', 'jin10-calendar', 'searxng')
+SERVICES = ('api', 'web', 'market', 'crawler', 'calendar', 'trader', 'news-risk', 'jin10-calendar')
 SEARCH_IMAGE = 'docker.io/searxng/searxng:2026.10.30-ffa88e3ba'
 SEARCH_DIGEST = 'sha256:f4aa660c54d062dedb268be84e821ea24e39f48c7a496af8dd02cc9eedb93847'
 
@@ -34,8 +34,9 @@ def start(directory, command, env):
         require(re.fullmatch(r'git\.134333\.xyz/eezd/dev/' + part + r'/alphapulse:\d{8}-[0-9a-f]{8}', image), '部署镜像版本标签无效')
     # Inspect interpolation without reading service credentials into the controller.
     config = json.loads(run([*command, 'config', '--format', 'json', '--no-env-resolution'], env))
-    require(config['name'] == 'alphapulse-dev' and set(config['services']) == set(SERVICES), 'Compose 实例或服务集合不匹配')
-    expected = {name: SEARCH_IMAGE if name == 'searxng' else images['web' if name == 'web' else 'backend'] for name in SERVICES}
+    services = set(config['services'])
+    require(config['name'] == 'alphapulse-dev' and services in (set(SERVICES), set(SERVICES) | {'searxng'}), 'Compose 实例或服务集合不匹配')
+    expected = {name: SEARCH_IMAGE if name == 'searxng' else images['web' if name == 'web' else 'backend'] for name in services}
     require(all(config['services'][name]['image'] == image for name, image in expected.items()), 'images.env 或 Compose 镜像与部署回执不一致')
     local_ids = {}
     for image in set(expected.values()):
@@ -54,10 +55,10 @@ def start(directory, command, env):
     run([*command, 'config', '--quiet'], env)
     run([*command, 'up', '-d', '--no-build', '--pull', 'never', '--wait', '--wait-timeout', '120'], env)
     identifiers = run([*command, 'ps', '--all', '--quiet'], env).split()
-    require(len(identifiers) == len(SERVICES), '启动后服务数量不完整')
+    require(len(identifiers) == len(services), '启动后服务数量不完整')
     template = '{"service":{{json (index .Config.Labels "com.docker.compose.service")}},"image":{{json .Image}},"state":{{json .State}}}'
     containers = [json.loads(line) for line in run(['docker', 'inspect', '--format', template, *identifiers], env).splitlines()]
-    require({c['service'] for c in containers} == set(SERVICES), '启动后服务集合不完整')
+    require({c['service'] for c in containers} == services, '启动后服务集合不完整')
     for container in containers:
         state = container['state']
         require(state['Running'] and not state['Paused'] and state.get('Health', {}).get('Status', 'healthy') == 'healthy',

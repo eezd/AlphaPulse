@@ -131,33 +131,8 @@ def test_checkpoint_is_atomic_private_and_can_be_replaced(scenario, tmp_path):
     assert not path.with_suffix('.pending').exists()
 
 
-def test_official_evidence_requires_success_correct_event_and_cited_claim(scenario):
-    tables = {m.__tablename__: [] for m in scenario.MODELS}
-    value = {'external_news_ids': [1], 'official_sources': [{'url': 'https://official.invalid', 'anchors': ['Official fact']}]}
-    tables['news_research_packages'] = [{'id': 10, 'news_id': 1}]
-    tables['news_research_memberships'] = [{'package_id': 10, 'event_id': 2}]
-    version = {'id': 3, 'event_id': 2, 'state': 'done', 'evidence': [
-        {'tool': 'read_web', 'result': {'url': 'https://official.invalid/article', 'content': 'Official fact was confirmed.', 'article_id': -1}}],
-        'output': {'claims': [{'verdict': 'supported', 'evidence_refs': [{'article_id': -1, 'quote': 'Official fact was confirmed.'}]}]}}
-    tables['news_research_versions'] = [version]
-    assert scenario.official_assertions(value, tables, [2])[0]['passed']
-    for field, invalid in [('state', 'failed'), ('event_id', 99), ('output', {'claims': []})]:
-        old = version[field]
-        version[field] = invalid
-        assert not scenario.official_assertions(value, tables, [2])[0]['passed']
-        version[field] = old
 
 
-def test_official_hints_are_scoped_to_event_members(scenario):
-    value = {'external_news_ids': [11, 22], 'official_sources': [
-        {'url': 'https://one.invalid/incident'}, {'url': 'https://two.invalid/licence'}]}
-    hints = scenario.official_hints(value, {11, 33})
-    assert 'https://one.invalid/incident' in hints and 'https://two.invalid/licence' not in hints
-    hints = scenario.official_hints(value, {22})
-    assert 'https://two.invalid/licence' in hints and 'https://one.invalid/incident' not in hints
-    value['official_sources'].pop()
-    with pytest.raises(ValueError):
-        scenario.official_hints(value, {11})
 
 
 def test_reference_api_assertion_checks_changed_and_original_version(scenario, monkeypatch):

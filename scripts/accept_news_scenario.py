@@ -14,7 +14,7 @@ from alphapulse.ai import llm
 from alphapulse.ai.skills import create_node, add_version
 from alphapulse.core.crypto import encrypt, decrypt
 from alphapulse.core.db import SessionLocal, engine
-from alphapulse.models import AiProvider, NewsItem, SkillNode, SkillVersion
+from alphapulse.models import AiProvider, NewsItem, SkillNode
 from alphapulse.news_research import service
 from alphapulse.news_research.contracts import INDEX_SKILL, ASSIGN_SKILL, RESEARCH_SKILL
 from alphapulse.news_research.models import Package, Attempt, Event, Version, Membership, Reference, VocabularyVersion
@@ -129,39 +129,8 @@ def assertions(manifest, tables, checkpoints):
     return checks
 
 
-def official_assertions(manifest, tables, external):
-    packages = {p['id']: p['news_id'] for p in tables['news_research_packages']}
-    links = {n: {m['event_id'] for m in tables['news_research_memberships']
-                 if packages[m['package_id']] == n} for n in manifest['external_news_ids']}
-    checks = []
-    for news_id, source in zip(manifest['external_news_ids'], manifest['official_sources'], strict=True):
-        valid = False
-        for version in tables['news_research_versions']:
-            if version['state'] != 'done' or version['event_id'] not in links[news_id] or version['event_id'] not in external:
-                continue
-            output = version.get('output') or {}
-            refs = [ref for claim in output.get('claims', []) if claim.get('verdict') in ('supported', 'partial')
-                    for ref in claim.get('evidence_refs', [])]
-            for record in version['evidence']:
-                body = record.get('result', {})
-                if record['tool'] != 'read_web' or body.get('error') or not body.get('content'):
-                    continue
-                if urlparse(body.get('url', '')).hostname != urlparse(source['url']).hostname:
-                    continue
-                if not all(a.casefold() in body['content'].casefold() for a in source['anchors']):
-                    continue
-                if any(ref['article_id'] == body.get('article_id') and ref['quote'].strip()
-                       and ref['quote'] in body['content'] for ref in refs):
-                    valid = True
-        checks.append({'name': 'official_claim_evidence', 'news_id': news_id,
-                       'domain': urlparse(source['url']).hostname, 'passed': valid})
-    return checks
 
 
-def official_hints(manifest, news_ids):
-    return '\n验收提供的公开来源线索（链接不是证据）：' + '\n'.join(
-        source['url'] for news_id, source in zip(manifest['external_news_ids'], manifest['official_sources'], strict=True)
-        if news_id in news_ids)
 
 
 async def reference_api_assertion(manifest, tables):
@@ -194,18 +163,7 @@ async def _run(args):
     baseline = Path(manifest['baseline_counter'])
     if int(baseline.read_text()) != 199 or hashlib.sha256(baseline.read_bytes()).hexdigest() != manifest['baseline_counter_sha256']:
         raise ValueError('历史计数不匹配')
-    # Preflight precedes all paid calls, using the application's public reader.
-    from alphapulse.news_research.tools import fetch_public
-    preflight = []
-    for source in manifest['official_sources']:
-        result = await fetch_public(source['url'])
-        if not all(anchor.lower() in result['content'].lower() for anchor in source['anchors']):
-            raise ValueError('官方正文缺少预期事实锚点')
-        preflight.append({**result, 'sha256': digest(result['content'])})
     credentials = json.loads(args.credentials.read_text())
-    if credentials.get('searxng_url'):
-        from alphapulse.core.config import get_settings
-        get_settings().searxng_url = credentials['searxng_url']
     state_path = args.output / 'state.json'
     if args.resume:
         state = json.loads(state_path.read_text())
@@ -223,10 +181,9 @@ async def _run(args):
         args.output.mkdir(mode=0o700)
         config = await initialize(credentials)
         state = {'manifest_sha256': digest(manifest), 'credentials_sha256': digest(credentials), 'config': config,
-                 'rules': await freeze_config(config), 'batch': 0, 'checkpoints': [], 'requests': 0, 'external': []}
+                 'rules': await freeze_config(config), 'batch': 0, 'checkpoints': [], 'requests': 0}
         args.budget.write_text('0'); args.budget.chmod(0o600)
         save(state_path, state)
-    save(args.output / 'preflight.json', preflight)
     async with SessionLocal() as session:
         for stage in ('index', 'research'):
             provider = await session.get(AiProvider, state['config'][stage]['provider_id'])
@@ -266,13 +223,6 @@ async def _run(args):
         state['request_limit'] = limit
         save(state_path, state)
         budget = Budget(args.budget, limit)
-        original_tool = service.Research.tool
-        async def chronological_tool(self, name, arguments):
-            if name in ('search_web', 'read_web'):
-                result = {'status': 'unavailable', 'error': '历史顺序回放不读取当前互联网，最终单独核验'}
-                self.records.append({'tool': name, 'arguments': arguments, 'result': result})
-                return result
-            return await original_tool(self, name, arguments)
         async def process(identifier):
             await service.process_package(identifier, config)
         async def research_pending():
@@ -284,7 +234,7 @@ async def _run(args):
         with ExitStack() as stack:
             for name in ('_stream_openai', '_stream_anthropic'):
                 stack.enter_context(patch.object(llm, name, budget.wrap(getattr(llm, name))))
-            with patch.object(service.Research, 'tool', chronological_tool):
+            with ExitStack():
                 if args.repair_references:
                     if state['batch'] >= len(manifest['batches']):
                         raise ValueError('引用修复须在最终自然更新批次之前执行')
@@ -350,39 +300,10 @@ async def _run(args):
                     print(json.dumps({'batch': state['batch'], 'requests': state['requests'], 'complete': complete}), flush=True)
                     if not complete:
                         break
-            if state['batch'] == len(manifest['batches']) and int(args.budget.read_text()) < limit:
-                async with SessionLocal() as session:
-                    targets = list(await session.scalars(select(Membership.event_id).join(Package, Package.id == Membership.package_id).where(Package.news_id.in_(manifest['external_news_ids'])).distinct().order_by(Membership.event_id)))
-                for identifier in targets:
-                    if identifier in state['external'] or int(args.budget.read_text()) >= limit:
-                        continue
-                    async with SessionLocal() as session:
-                        # Supply only this event's official leads, never unrelated sources.
-                        news_ids = set(await session.scalars(select(Package.news_id).join(Membership).where(Membership.event_id == identifier)))
-                        content = RESEARCH_SKILL + official_hints(manifest, news_ids)
-                        node = await session.get(SkillNode, config['research']['skill_id'])
-                        version = await session.scalar(select(SkillVersion).where(SkillVersion.skill_id == node.id, SkillVersion.content == content).order_by(SkillVersion.version_no.desc()).limit(1))
-                        if version is None:
-                            version = await add_version(session, node, content, 'user', 'Event-specific official leads for final live verification')
-                        node.published_version_id = version.id
-                        event = await session.get(Event, identifier)
-                        if event.state == 'done':
-                            event.revision += 1
-                        event.state = 'pending'
-                        await session.commit()
-                    state['rules'] = await freeze_config(config)
-                    save(state_path, state)
-                    await service.process_event(identifier, config, force=True)
-                    async with SessionLocal() as session:
-                        event = await session.get(Event, identifier)
-                        if event.state == 'done':
-                            state['external'].append(identifier)
-                    state['requests'] = int(args.budget.read_text())
-                    save(state_path, state)
         tables = await snapshot()
         checks = assertions(manifest, tables, state['checkpoints'])
         checks.extend(await reference_api_assertion(manifest, tables))
-        checks.extend(official_assertions(manifest, tables, state['external']))
+        checks.append({'name': 'station_only_tools', 'passed': all(r['tool'] not in ('search_web', 'read_web') for v in tables['news_research_versions'] for r in v.get('evidence', []))})
         report = {'quality_accepted': False, 'long_running_quality_verified': False, 'automated_passed': all(c['passed'] for c in checks),
                   'assertions': checks, 'requests_new': int(args.budget.read_text()), 'requests_historical': 199,
                   'requests_cumulative': 199 + int(args.budget.read_text()), 'new_cap': limit, 'manifest': manifest,

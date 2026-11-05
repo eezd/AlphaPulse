@@ -10,6 +10,7 @@ from alphapulse.core.db import engine
 
 SOURCES = ('cls_depth', 'cls_telegraph')
 AI_TABLES = (
+    'news_research_batch_events', 'news_research_batch_packages', 'news_research_batches',
     'news_research_references', 'news_research_versions', 'news_research_memberships',
     'news_research_attempts', 'news_research_packages', 'news_research_events',
     'news_ai_reprocess_targets', 'news_ai_reprocess_items', 'news_ai_reprocess_jobs',

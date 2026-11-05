@@ -229,7 +229,7 @@ async def main():
                     "SELECT count(*) FROM information_schema.tables WHERE table_name LIKE 'news_research_%'"
                 )
             )
-            == 8
+            == 11
         )
     # Exercise actual routes and published-Skill resolution against isolated storage.
     import httpx

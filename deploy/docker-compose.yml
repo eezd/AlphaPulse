@@ -9,11 +9,6 @@ x-backend: &backend
   networks: [dev_default]
 
 services:
-  searxng:
-    image: docker.io/searxng/searxng:2026.10.30-ffa88e3ba
-    restart: unless-stopped
-    volumes: [./searxng.yml:/etc/searxng/settings.yml:ro]
-    networks: [dev_default]
   api:
     <<: *backend
     container_name: AlphaPulse-dev-api

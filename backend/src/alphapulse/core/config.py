@@ -10,7 +10,6 @@ class Settings(BaseSettings):
     congress_api_key: str = ""
     crawler_contact_email: str = ""
 
-    searxng_url: str = "http://searxng:8080"
     database_url: str
     redis_url: str
     jwt_secret: str

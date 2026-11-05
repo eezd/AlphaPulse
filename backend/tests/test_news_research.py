@@ -18,23 +18,6 @@ def test_private_and_mixed_dns_are_rejected(trading, monkeypatch):
     asyncio.run(check())
 
 
-@pytest.mark.parametrize('discovered', [False, True])
-def test_read_web_supports_direct_urls_and_budget(trading, monkeypatch, discovered):
-    from alphapulse.news_research import tools as module
-    reader = module.Research()
-    url = 'https://example.invalid/official'
-    if discovered:
-        reader.urls.add(url)
-    fetch = AsyncMock(return_value={'url': url, 'content': 'Official original'})
-    monkeypatch.setattr(module, 'fetch_public', fetch)
-    result = asyncio.run(reader.tool('read_web', {'url': url}))
-    assert result['discovery_method'] == ('discovered' if discovered else 'direct')
-    assert result['article_id'] < 0
-    fetch.assert_awaited_once_with(url)
-    reader.counts['read_web'] = 4
-    with pytest.raises(ValueError, match='预算'):
-        asyncio.run(reader.tool('read_web', {'url': url + '/other'}))
-    assert fetch.await_count == 1
 
 
 def test_high_importance_positive_package_is_valid(trading):
@@ -63,17 +46,10 @@ def test_public_fetch_pins_address_and_rechecks_redirect(trading, monkeypatch):
     monkeypatch.setattr(research, 'public_address', resolve)
     monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: original(transport=httpx.MockTransport(handle)))
     with pytest.raises(ValueError, match='非公开'):
-        asyncio.run(research.fetch_public('https://public.invalid'))
+        asyncio.run(research.fetch_public_response('https://public.invalid'))
     assert len(calls) == 1
 
 
-def test_failed_review_can_reuse_saved_evidence_without_new_io(trading):
-    from alphapulse.news_research.tools import Research
-    research = Research()
-    record = {'tool': 'read_web', 'arguments': {'url': 'https://example.invalid'}, 'result': {'article_id': -1, 'content': 'Original'}}
-    research.restore([record])
-    assert asyncio.run(research.tool('read_web', record['arguments']))['content'] == 'Original'
-    assert not research.records and research.counts['read_web'] == 0
 
 
 def test_restored_news_is_sent_before_reusing_its_reference(trading, monkeypatch):
@@ -170,29 +146,16 @@ def test_provided_original_is_reused_without_io(trading, monkeypatch):
     assert review.counts['read'] == 0 and not review.records
 
 
-def test_web_unavailable_short_circuits_only_this_review(trading, monkeypatch):
-    from alphapulse.news_research import tools as research
-    session = AsyncMock()
-    session.__aenter__.return_value = session
-    monkeypatch.setattr(research, 'SessionLocal', lambda: session)
-    client = AsyncMock()
-    client.__aenter__.return_value = client
-    response = SimpleNamespace(raise_for_status=lambda: None,
-        json=lambda: {'results': [], 'unresponsive_engines': [['engine', 'CAPTCHA']]})
-    client.get.return_value = response
-    monkeypatch.setattr(research.httpx, 'AsyncClient', lambda **kwargs: client)
-    review = research.Research()
-    assert asyncio.run(review.tool('search_web', {'query': 'first query'}))['status'] == 'unavailable'
-    assert asyncio.run(review.tool('search_web', {'query': 'different query'}))['status'] == 'unavailable'
-    assert client.get.await_count == 1 and review.counts['search_web'] == 1
-    assert research.Research().web_unavailable is None
 
 
-def test_direct_web_read_preserves_public_reader_rejection(trading, monkeypatch):
-    from alphapulse.news_research import tools as module
-    reader = module.Research()
-    fetch = AsyncMock(side_effect=ValueError('不允许访问非公开地址'))
-    monkeypatch.setattr(module, 'fetch_public', fetch)
-    with pytest.raises(ValueError, match='非公开'):
-        asyncio.run(reader.tool('read_web', {'url': 'http://127.0.0.1'}))
-    assert not reader.sources
+
+
+@pytest.mark.parametrize('tool,args', [('search_web', {'query': 'test'}), ('read_web', {'url': 'https://example.invalid'})])
+def test_external_tools_are_removed_and_cannot_restore_sources(trading, tool, args):
+    from alphapulse.news_research.service import Research
+    reader = Research(event={'id': 1})
+    assert tool not in [spec.name for spec in reader.tool_specs()]
+    reader.restore([{'tool': tool, 'arguments': args, 'result': {'article_id': -1, 'content': 'Old external body'}}])
+    assert not reader.records and not reader.sources and not reader.cache
+    with pytest.raises(ValueError, match='未知'):
+        asyncio.run(reader.tool(tool, args))

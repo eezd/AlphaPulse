@@ -1,11 +1,9 @@
 """Read-only news and external research tools with bounded calls."""
 import json
 from sqlalchemy import select, or_
-import httpx
 from pydantic import BaseModel, Field
 from alphapulse.ai import llm
 from alphapulse.core.db import SessionLocal
-from alphapulse.core.public_http import fetch_public
 from alphapulse.models import NewsItem
 from alphapulse.news_research.model import fits_context, validate_submission, model_stream
 
@@ -20,9 +18,6 @@ class LocalSearch(Search):
 class Read(BaseModel):
     id: int
 
-class ReadWeb(BaseModel):
-    url: str = Field(max_length=2000)
-
 TOOLS = {
     'search_news': (LocalSearch, '按关键词检索站内新闻'),
     'read_news': (Read, '读取站内新闻原文'),
@@ -31,18 +26,15 @@ TOOLS = {
     'search_events': (LocalSearch, '检索历史事件及时间线，仅作线索'),
     'read_event': (Read, '读取事件、成员包和时间线，原文仍须另行读取'),
     'search_calendar': (LocalSearch, '检索已有经济日历'),
-    'search_web': (Search, '通过SearXNG搜索外部来源，摘要仅作线索'),
-    'read_web': (ReadWeb, '读取已发现或已知URL的公开网页正文，链接本身不是证据'),
 }
 
 
 class Research:
     def __init__(self, event=None):
-        self.counts = {'search': 0, 'read': 0, 'search_web': 0, 'read_web': 0}
+        self.counts = {'search': 0, 'read': 0}
         self.records = []
         self.sources = {}
         self.cache = {}
-        self.urls = set()
         self.package_ids = set()
         self.read_package_ids = set()
         self.read_event_ids = set()
@@ -50,7 +42,6 @@ class Research:
         self.event = event or {}
         self.provided_news = {}
         self.provided_packages = {}
-        self.web_unavailable = None
 
     @staticmethod
     def tool_specs():
@@ -66,14 +57,13 @@ class Research:
     def restore(self, records):
         for record in records:
             name, args, result = record['tool'], record['arguments'], record['result']
+            if name not in TOOLS: continue
             if isinstance(result, dict) and 'error' in result: continue
             # Membership and revisions can change between attempts; reread local objects.
             if name in ('read_event', 'read_package'): continue
             self.cache[name+json.dumps(args, sort_keys=True)] = result
-            if name in ('read_web', 'read_news'):
+            if name == 'read_news':
                 self.sources[result['article_id']] = result
-            if name == 'search_web': self.urls.update(r['url'] for r in result['results'] if r.get('url'))
-            if name == 'search_calendar': self.urls.update(r['release_url'] for r in result if r.get('release_url'))
             if name == 'search_packages': self.package_ids.update(r['id'] for r in result)
 
     async def tool(self, name, arguments):
@@ -88,35 +78,18 @@ class Research:
         if name == 'read_news' and args.id in self.provided_news:
             return {'article_id': self.provided_news[args.id], 'news_id': args.id, 'status': 'already_provided',
                 'instruction': '原文已在本轮输入或工具响应中，使用该article_id引用，不重复计为独立来源。'}
-        if name == 'search_web' and self.web_unavailable is not None:
-            return self.web_unavailable
         key = name+json.dumps(arguments, sort_keys=True)
         if key in self.cache:
             result = self.cache[key]
             # Restored text becomes provided only when returned to this conversation.
             if name == 'read_news': self.provided_news[args.id] = result['article_id']
             return result
-        budget = name if name in ('search_web', 'read_web') else 'search' if name.startswith('search') else 'read'
-        if self.counts[budget] >= {'search': 4, 'read': 8, 'search_web': 2, 'read_web': 4}[budget]:
+        budget = 'search' if name.startswith('search') else 'read'
+        if self.counts[budget] >= {'search': 4, 'read': 8}[budget]:
             raise ValueError('工具预算已用尽，请明确证据不足')
         self.counts[budget] += 1
         async with SessionLocal() as session:
-            if name == 'search_web':
-                from alphapulse.core.config import get_settings
-                async with httpx.AsyncClient(timeout=20, trust_env=False) as client:
-                    response = await client.get(get_settings().searxng_url+'/search', params={'q': args.query, 'format': 'json'})
-                    response.raise_for_status(); data = response.json()
-                rows = data.get('results', [])[:10]
-                self.urls.update(r['url'] for r in rows if r.get('url'))
-                result = {'results': rows, 'errors': data.get('unresponsive_engines', []), 'scope': 'search_snippets_only', 'status': 'matched' if rows else 'unavailable' if data.get('unresponsive_engines') else 'no_matches'}
-                if result['status'] == 'unavailable': self.web_unavailable = result
-            elif name == 'read_web':
-                result = await fetch_public(args.url)
-                result['discovery_method'] = 'discovered' if args.url in self.urls else 'direct'
-                identifier = min([0, *self.sources])-1
-                self.sources[identifier] = result
-                result = {**result, 'article_id': identifier}
-            elif name == 'search_news':
+            if name == 'search_news':
                 from alphapulse.news_research.retrieval import terms_for, matching
                 conditions, score = matching(NewsItem, terms_for(args.query, args.keywords))
                 rows = await session.scalars(select(NewsItem).where(conditions).order_by(
@@ -134,7 +107,6 @@ class Research:
                 from alphapulse.models.calendar import EconomicRelease
                 rows = (await session.scalars(select(EconomicRelease).where(or_(*(EconomicRelease.title.icontains(term, autoescape=True) for term in (args.keywords or args.query.split())[:6]))).limit(20))).all()
                 result = [{'id': r.id, 'title': r.title, 'values': r.values, 'release_url': r.release_url, 'scheduled_at': r.scheduled_at.isoformat()} for r in rows]
-                self.urls.update(r.release_url for r in rows if r.release_url)
         self.cache[key] = result
         self.records.append({'tool': name, 'arguments': arguments, 'result': result})
         return result

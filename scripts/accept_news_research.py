@@ -75,10 +75,6 @@ async def main(args):
     if len(news) != (12 if args.synthetic else 30):
         raise ValueError("样本数量不符合冻结范围")
     credentials = json.loads(args.credentials.read_text())
-    if not args.synthetic and credentials.get("searxng_url"):
-        from alphapulse.core.config import get_settings
-
-        get_settings().searxng_url = credentials["searxng_url"]
     config = {"isolated_acceptance": True, "concurrency": 3}
     async with SessionLocal() as session:
         if await session.scalar(select(func.count()).select_from(NewsItem)):
@@ -140,19 +136,11 @@ async def main(args):
         async with semaphore:
             await service.process_event(identifier, config, force=True)
 
-    async def controlled_web(self, name, arguments):
-        if name in ("search_web", "read_web"):
-            return {"status": "unavailable", "reason": "虚构验收组不使用真实外部网络"}
-        return await original_tool(self, name, arguments)
-
-    original_tool = service.Research.tool
     with ExitStack() as stack:
         for name in ("_stream_openai", "_stream_anthropic"):
             stack.enter_context(
                 patch.object(llm, name, budget.wrap(getattr(llm, name)))
             )
-        if args.synthetic:
-            stack.enter_context(patch.object(service.Research, "tool", controlled_web))
         for batch in batches:
             if args.budget.exists() and int(args.budget.read_text() or "0") >= 240:
                 break

@@ -140,3 +140,30 @@ TABLES = [
     Version.__table__,
     Reference.__table__,
 ]
+
+
+class Batch(Base):
+    __tablename__ = 'news_research_batches'
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    phase: Mapped[str] = mapped_column(String(20), default='assigning', index=True)
+    cutoff_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class BatchPackage(Base):
+    __tablename__ = 'news_research_batch_packages'
+    batch_id: Mapped[int] = mapped_column(ForeignKey('news_research_batches.id'), primary_key=True)
+    package_id: Mapped[int] = mapped_column(ForeignKey('news_research_packages.id'), primary_key=True)
+    content_hash: Mapped[str] = mapped_column(String(64))
+    state: Mapped[str] = mapped_column(String(20), default='pending')
+
+
+class BatchEvent(Base):
+    __tablename__ = 'news_research_batch_events'
+    batch_id: Mapped[int] = mapped_column(ForeignKey('news_research_batches.id'), primary_key=True)
+    event_id: Mapped[int] = mapped_column(ForeignKey('news_research_events.id'), primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer)
+    state: Mapped[str] = mapped_column(String(20), default='pending')
+
+
+TABLES.extend([Batch.__table__, BatchPackage.__table__, BatchEvent.__table__])

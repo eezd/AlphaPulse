@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { Config, Event, EventDetail, Package, PackageDetail, VersionDetail, Vocabulary } from "@@/apis/news-research/type"
+import type { BatchProgress, Config, Event, EventDetail, Package, PackageDetail, VersionDetail, Vocabulary } from "@@/apis/news-research/type"
 import type { Provider } from "@@/apis/settings/type"
 import type { SkillNode } from "@@/apis/skills/type"
 import * as api from "@@/apis/news-research"
@@ -88,6 +88,8 @@ const opened = ref(false)
 const packageOpened = ref(false)
 const settingsOpened = ref(false)
 const enabled = ref(false)
+const batch = ref<BatchProgress | null>(null)
+const batchPhases: Record<string, string> = { assigning: "索引与归属中", researching: "集中研究中", done: "已完成", partial: "部分失败或延期" }
 const loading = ref(false)
 const error = ref(false)
 const busy = ref(false)
@@ -120,6 +122,7 @@ async function load() {
     const [settings, rows] = await Promise.all([api.getSettingsApi(), tab.value === "events" ? api.listEventsApi(q.value, page.value) : api.listPackagesApi(q.value, page.value)])
     if (!valid() || seq !== sequence) return
     enabled.value = settings.enabled
+    batch.value = settings.batch ?? null
     if (tab.value === "events") events.value = rows.items as Event[]
     else packages.value = rows.items as Package[]
     total.value = rows.total
@@ -323,6 +326,12 @@ onBeforeUnmount(() => {
     </div>
     <p class="mb-4 text-sm text-slate-500">
       新闻包保存原文和关键词；事件汇集相关报道，持续更新判断与时间线。
+    </p>
+    <p v-if="batch" class="mb-4 text-sm text-slate-500">
+      批次 #{{ batch.id }} · {{ batchPhases[batch.phase] ?? batch.phase }} ·
+      新闻归属 {{ batch.packages_done }}/{{ batch.packages_total }}，失败 {{ batch.packages_failed }}，延期 {{ batch.packages_deferred }} ·
+      事件研究 {{ batch.events_done }}/{{ batch.events_total }}，失败 {{ batch.events_failed }}，延期 {{ batch.events_deferred }}。
+      新新闻和重试请求排入下一批，研究仅使用站内资料。
     </p>
     <el-alert v-if="error" title="读取失败，保留上次结果，可刷新重试" type="error" :closable="false" />
     <div class="mb-4 flex flex-wrap gap-3">
