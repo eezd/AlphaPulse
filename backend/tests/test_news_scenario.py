@@ -189,3 +189,57 @@ def test_restore_preserves_extended_cap_and_never_rewinds_counter(scenario):
     report['new_cap'] = 119
     with pytest.raises(ValueError, match='累计上限'):
         recovery.counter_limit(report, 147)
+
+
+def test_scenario_initialization_freezes_valid_task_skills(scenario, monkeypatch):
+    import asyncio
+    from types import SimpleNamespace as N
+    from unittest.mock import AsyncMock
+    from alphapulse.models import SkillNode
+    from alphapulse.news_research.contracts import INDEX_ASSIGN_SKILL, INDEX_SKILL, ASSIGN_SKILL, RESEARCH_SKILL
+    from alphapulse.news_research.pipeline import BASE
+    from alphapulse.news_research import service
+    import restore_news_scenario as recovery
+
+    nodes, versions = {}, {}
+
+    class Session:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def scalar(self, query): return 0
+        async def flush(self): pass
+        async def commit(self): pass
+        def add(self, row): row.id = len(nodes) + 1
+        async def get(self, model, identifier):
+            return (nodes if model is SkillNode else versions)[identifier]
+
+    async def create(session, parent, kind, name, scope):
+        node = N(id=len(nodes)+1, scope=scope, kind=kind, enabled=True, parent_id=parent)
+        nodes[node.id] = node
+        return node
+
+    async def add_version(session, node, content, *args):
+        version = N(id=node.id, version_no=1, content=content)
+        versions[version.id] = version
+        return version
+
+    monkeypatch.setattr(scenario, 'SessionLocal', Session)
+    monkeypatch.setattr(service, 'provider_for', AsyncMock(return_value=N(
+        id=1, model='test', reasoning_effort=None, max_tokens=8192, context_window=200000)))
+    monkeypatch.setattr(scenario, 'create_node', create)
+    monkeypatch.setattr(scenario, 'add_version', add_version)
+    fields = dict(protocol='openai', base_url='https://example.invalid', api_key='test-only',
+                  model='test', max_tokens=8192, context_window=200000)
+
+    async def check():
+        assert recovery.initialize is scenario.initialize
+        config = await recovery.initialize({'index': fields, 'research': fields})
+        rules = await scenario.freeze_config(config)
+        assert rules['index']['content'] == INDEX_ASSIGN_SKILL
+        assert rules['index']['system_prompt'] == BASE + '\n' + INDEX_SKILL
+        assert rules['research']['system_prompt'] == BASE + '\n' + RESEARCH_SKILL
+        async with Session() as session:
+            _, prompt, _ = await service.model_config(session, config, 'assign')
+        assert prompt == BASE + '\n' + ASSIGN_SKILL
+
+    asyncio.run(check())

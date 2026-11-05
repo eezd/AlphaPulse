@@ -16,7 +16,7 @@ from alphapulse.core.crypto import encrypt, decrypt
 from alphapulse.core.db import SessionLocal, engine
 from alphapulse.models import AiProvider, NewsItem, SkillNode
 from alphapulse.news_research import service
-from alphapulse.news_research.contracts import INDEX_SKILL, ASSIGN_SKILL, RESEARCH_SKILL
+from alphapulse.news_research.contracts import INDEX_ASSIGN_SKILL, RESEARCH_SKILL
 from alphapulse.news_research.models import Package, Attempt, Event, Version, Membership, Reference, VocabularyVersion
 from accept_news_research import Budget
 
@@ -72,7 +72,7 @@ async def initialize(credentials):
     async with SessionLocal() as session:
         if await session.scalar(select(func.count()).select_from(NewsItem)) or await session.scalar(select(func.count()).select_from(SkillNode)):
             raise ValueError('必须使用空的独立CI数据库')
-        for stage, content in [('index', INDEX_SKILL + '\n' + ASSIGN_SKILL), ('research', RESEARCH_SKILL)]:
+        for stage, content in [('index', INDEX_ASSIGN_SKILL), ('research', RESEARCH_SKILL)]:
             fields = credentials[stage]
             provider = AiProvider(name='scenario-' + stage, protocol=fields['protocol'], base_url=fields['base_url'],
                 api_key_encrypted=encrypt(fields['api_key']), api_key_hint='isolated', model=fields['model'],
