@@ -1,9 +1,9 @@
 """Durable admission barriers: finish this batch's assignments before any research."""
 from collections import Counter
 from datetime import UTC, datetime
-from sqlalchemy import select, or_, exists
+from sqlalchemy import select, or_, exists, func
 from alphapulse.models import NewsItem
-from alphapulse.news_research.models import Batch, BatchPackage, BatchEvent, Package, Event, Membership
+from alphapulse.news_research.models import Batch, BatchPackage, BatchEvent, Package, Event, Membership, Attempt
 from alphapulse.news_research.service import enroll
 
 
@@ -76,15 +76,21 @@ async def actions(session, batch, active, slots):
         for e in await session.scalars(select(Event).where(Event.id.in_(ids - existing))):
             session.add(BatchEvent(batch_id=batch.id, event_id=e.id, revision=e.revision, state='pending'))
         await session.flush()
+        latest = select(func.max(Attempt.id)).join(BatchPackage, BatchPackage.package_id == Attempt.package_id).where(
+            BatchPackage.batch_id == batch.id, Attempt.stage == 'assign', Attempt.state == 'done').group_by(Attempt.package_id)
+        urgent = {int(event_id) for attempt in await session.scalars(select(Attempt).where(Attempt.id.in_(latest)))
+                  for event_id, target in attempt.rules.get('membership_targets', {}).items() if target.get('urgent')}
         for item, event in await session.execute(select(BatchEvent, Event).join(Event).where(BatchEvent.batch_id == batch.id)):
+            if item.event_id in urgent:
+                item.state = 'urgent_pending'
             item.revision = event.revision
         batch.phase = 'researching'
         return []
     result = []
     rows = list(await session.execute(select(BatchEvent, Event).join(Event).where(
-        BatchEvent.batch_id == batch.id).order_by(Event.due_at, Event.id)))
+        BatchEvent.batch_id == batch.id).order_by((BatchEvent.state == 'urgent_pending').desc(), Event.due_at, Event.id)))
     for item, event in rows:
-        if item.state not in ('pending', 'processing') or ('event', event.id) in active:
+        if item.state not in ('pending', 'urgent_pending', 'processing') or ('event', event.id) in active:
             continue
         if item.revision != event.revision:
             item.state = 'deferred'
@@ -102,7 +108,7 @@ async def actions(session, batch, active, slots):
             elif len(result) < slots:
                 item.state = 'processing'
                 result.append(('event', event.id))
-    if not result and not active and all(item.state not in ('pending', 'processing') for item, _ in rows):
+    if not result and not active and all(item.state not in ('pending', 'urgent_pending', 'processing') for item, _ in rows):
         bad = any(item.state in ('failed', 'deferred') for item, _ in rows)
         bad |= bool(await session.scalar(select(BatchPackage.batch_id).where(
             BatchPackage.batch_id == batch.id, BatchPackage.state.in_(['failed', 'deferred'])).limit(1)))

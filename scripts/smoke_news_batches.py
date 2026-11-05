@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 from sqlalchemy import select, delete
 from alphapulse.core.db import SessionLocal, engine
 from alphapulse.models import NewsItem
-from alphapulse.news_research.models import Batch, BatchPackage, BatchEvent, Package, Event, Membership
+from alphapulse.news_research.models import Batch, BatchPackage, BatchEvent, Package, Event, Membership, Attempt
 from alphapulse.news_research import batches
 
 
@@ -47,6 +47,7 @@ async def main():
         for p in packages[:2]:
             p.state = 'done'
             s.add(Membership(event_id=event.id, package_id=p.id, evidence='original', reason='same event', change_kind='new_fact'))
+        s.add(Attempt(package_id=packages[0].id, content_hash=packages[0].content_hash, stage='assign', state='done', input={}, rules={'membership_targets': {str(event.id): {'urgent': True}}}))
         packages[2].state = 'index_failed'
         await s.commit()
         assert not await batches.actions(s, batch, {('assign', packages[0].id)}, 8)
@@ -54,6 +55,7 @@ async def main():
         assert not await batches.actions(s, batch, set(), 8)
         await s.commit()
         assert batch.phase == 'researching'
+        assert (await s.get(BatchEvent, (batch.id, event.id))).state == 'urgent_pending'
         # Reopen the session to prove the admission barrier is durable.
     async with SessionLocal() as s:
         batch = await s.get(Batch, identifier)
@@ -81,7 +83,7 @@ async def main():
         await s.commit()
         assert items[0].state == 'deferred'
         # Leave no fixtures for other isolated acceptance scripts.
-        for model in (BatchEvent, BatchPackage, Batch, Membership, Package, Event, NewsItem):
+        for model in (BatchEvent, BatchPackage, Batch, Membership, Attempt, Package, Event, NewsItem):
             await s.execute(delete(model))
         await s.commit()
     await engine.dispose()
