@@ -44,6 +44,30 @@ def test_keywords_require_original_aliases_and_literal_evidence(trading):
         validate_keywords(output, source)
 
 
+@pytest.mark.parametrize("canonical", ["币安", "Binance", "MI455X"])
+def test_chinese_assignment_preserves_indexed_names_and_english_evidence(trading, canonical):
+    from alphapulse.news_research.contracts import Assignment
+    from alphapulse.news_research.service import validate_assignment
+
+    quote = "Binance announced scheduled maintenance for MI455X."
+    source = {"id": 7, "content": quote}
+    keywords = [{"canonical": canonical, "aliases": ["Binance", "MI455X"], "quote": quote}]
+    result = Assignment(targets=[{
+        "event_id": None, "new_key": "maintenance", "title": "币安计划维护公告",
+        "reason": "原文宣布计划维护，独立建立事件。", "quote": quote,
+        "keyword_canonicals": [canonical], "change_kind": "new_fact", "urgent": False,
+    }])
+    validate_assignment(result, source, set(), keywords)
+    assert result.targets[0].keyword_canonicals == [canonical]
+    result.targets[0].quote = "币安宣布计划维护。"
+    with pytest.raises(ValueError, match="原文"):
+        validate_assignment(result, source, set(), keywords)
+    result.targets[0].quote = quote
+    result.targets[0].keyword_canonicals = ["改写的关键词"]
+    with pytest.raises(ValueError, match="逐字"):
+        validate_assignment(result, source, set(), keywords)
+
+
 def test_one_package_can_be_assigned_to_multiple_events_without_splitting(trading):
     from alphapulse.news_research.contracts import Assignment
     from alphapulse.news_research.service import validate_assignment
@@ -663,6 +687,8 @@ def test_long_event_compaction_uses_final_research_context(trading, monkeypatch,
     async def consolidate(provider, rules, payload, schema):
         assert schema is pipeline.Extraction
         assert "当前事件及各成员归属边界" in rules and quote in rules
+        assert "extract和consolidate生成的facts等叙述也必须用简体中文" in rules
+        assert "time_text及取自原文的period_text逐字保留原语言和字符" in rules
         assert pipeline.fits_context(provider, rules, payload, schema)
         refs = [ref for part in payload["extractions"] for ref in part["evidence_refs"]]
         return pipeline.Extraction(facts="调查继续。", evidence_refs=refs), {"mock": True}
@@ -686,6 +712,7 @@ def test_long_event_compaction_uses_final_research_context(trading, monkeypatch,
     assert event.state == "done" and len(research_requests) == 1
     assert bool(complete.await_count) == needs_compaction
     boundary_rules = extract.await_args.args[1]
+    assert "extract和consolidate生成的facts等叙述也必须用简体中文" in boundary_rules
     compressed = {**versions[0].input, "articles": [], "extractions": extracts}
     reader = service.Research()
     assert not reader.fits(provider, skill, versions[0].input, ResearchResult)
