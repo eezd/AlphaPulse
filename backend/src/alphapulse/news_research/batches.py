@@ -1,7 +1,7 @@
 """Durable admission barriers: finish this batch's assignments before any research."""
 from collections import Counter
 from datetime import UTC, datetime
-from sqlalchemy import select, or_, exists, func
+from sqlalchemy import select, or_, and_, exists, func, any_
 from alphapulse.models import NewsItem
 from alphapulse.news_research.models import Batch, BatchPackage, BatchEvent, Package, Event, Membership, Attempt
 from alphapulse.news_research.service import enroll
@@ -10,8 +10,8 @@ from alphapulse.news_research.service import enroll
 async def freeze(session, settings):
     cutoff = datetime.now(UTC)
     ids = list(await session.scalars(select(NewsItem.id).outerjoin(Package, Package.news_id == NewsItem.id).where(
-        NewsItem.published_at >= settings.start_at, NewsItem.published_at <= cutoff,
-        or_(Package.id.is_(None), Package.content_hash != NewsItem.content_hash))))
+        or_(and_(NewsItem.published_at >= settings.start_at, NewsItem.published_at <= cutoff, Package.id.is_(None)),
+            and_(Package.id.is_not(None), Package.content_hash != NewsItem.content_hash)))))
     existing_ids = list(await session.scalars(select(Package.id).where(
         Package.state.in_(['index_pending', 'assign_pending', 'index_failed', 'assign_failed']))))
     event_cutoff = list(await session.scalars(select(Event.id).where(Event.state == "pending")))
@@ -21,12 +21,12 @@ async def freeze(session, settings):
         BatchPackage.package_id == Package.id, BatchPackage.content_hash == Package.content_hash,
         BatchPackage.state == 'failed'))
     packages = list(await session.scalars(select(Package).where(
-        or_(Package.id.in_(existing_ids), Package.news_id.in_(ids)), or_(
+        or_(Package.id == any_(existing_ids), Package.news_id == any_(ids)), or_(
         Package.state.in_(['index_pending', 'assign_pending']),
         Package.state.in_(['index_failed', 'assign_failed']) & ~previous_failure))))
     deferred = exists(select(BatchEvent.batch_id).where(BatchEvent.event_id == Event.id,
         BatchEvent.revision == Event.revision, BatchEvent.state == 'deferred'))
-    events = list(await session.scalars(select(Event).where(Event.id.in_(event_cutoff), Event.state == 'pending', ~deferred)))
+    events = list(await session.scalars(select(Event).where(Event.id == any_(event_cutoff), Event.state == 'pending', ~deferred)))
     if not packages and not events:
         return None
     batch = Batch(phase='assigning', cutoff_at=cutoff)
@@ -37,8 +37,8 @@ async def freeze(session, settings):
     event_ids = {e.id for e in events}
     if packages:
         event_ids.update(await session.scalars(select(Membership.event_id).where(
-            Membership.package_id.in_([p.id for p in packages]))))
-    for e in await session.scalars(select(Event).where(Event.id.in_(event_ids))):
+            Membership.package_id == any_([p.id for p in packages]))))
+    for e in await session.scalars(select(Event).where(Event.id == any_(list(event_ids)))):
         session.add(BatchEvent(batch_id=batch.id, event_id=e.id, revision=e.revision, state='pending'))
     await session.commit()
     return batch
@@ -73,7 +73,7 @@ async def actions(session, batch, active, slots):
         ids = set(await session.scalars(select(Membership.event_id).join(
             BatchPackage, BatchPackage.package_id == Membership.package_id).where(BatchPackage.batch_id == batch.id)))
         existing = {x.event_id for x in await session.scalars(select(BatchEvent).where(BatchEvent.batch_id == batch.id))}
-        for e in await session.scalars(select(Event).where(Event.id.in_(ids - existing))):
+        for e in await session.scalars(select(Event).where(Event.id == any_(list(ids - existing)))):
             session.add(BatchEvent(batch_id=batch.id, event_id=e.id, revision=e.revision, state='pending'))
         await session.flush()
         latest = select(func.max(Attempt.id)).join(BatchPackage, BatchPackage.package_id == Attempt.package_id).where(

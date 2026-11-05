@@ -19,6 +19,7 @@ from alphapulse.news_research.models import (
     Membership,
     Version,
     Reference,
+    BatchEvent,
 )
 from alphapulse.news_research import service, batches, vocabulary as vocab
 from alphapulse.news_research.models import VocabularyVersion
@@ -496,7 +497,13 @@ async def retry_event(identifier: int, session: DB):
         raise HTTPException(404, "事件不存在")
     if row.state == "processing":
         raise HTTPException(409, "事件正在处理")
-    if row.state == "done":
+    deferred = None
+    if row.state == "pending":
+        deferred = await session.scalar(select(BatchEvent.batch_id).where(
+            BatchEvent.event_id == row.id, BatchEvent.revision == row.revision,
+            BatchEvent.state == "deferred").limit(1))
+    if row.state == "done" or deferred is not None:
+        # Escape a deferred revision only on explicit retry; ordinary retries reuse evidence.
         service.dirty(row, True)
     else:
         row.state = "pending"

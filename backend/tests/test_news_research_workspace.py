@@ -124,22 +124,22 @@ def test_new_event_waits_for_aggregation_unless_urgent(trading, urgent):
     assert event.due_at - event.dirty_since == timedelta(minutes=0 if urgent else 5)
 
 
-@pytest.mark.parametrize("state", ["failed", "pending", "done"])
-def test_event_retry_preserves_content_revision_until_content_changes(trading, state):
+@pytest.mark.parametrize("state,deferred", [("failed", False), ("pending", False), ("pending", True), ("done", False)])
+def test_event_retry_preserves_content_revision_unless_done_or_deferred(trading, state, deferred):
     import asyncio
     from unittest.mock import AsyncMock
     from alphapulse.news_research.api import retry_event
 
     event = N(
-        revision=7,
+        id=1, revision=7,
         state=state,
         dirty_since=None,
         due_at=datetime.now(UTC),
         error="Previous failure",
     )
-    session = N(get=AsyncMock(return_value=event), commit=AsyncMock())
+    session = N(get=AsyncMock(return_value=event), scalar=AsyncMock(return_value=12 if deferred else None), commit=AsyncMock())
     asyncio.run(retry_event(1, session))
-    assert event.revision == (8 if state == "done" else 7)
+    assert event.revision == (8 if state == "done" or deferred else 7)
     assert event.state == "pending" and event.error is None
     assert event.due_at <= datetime.now(UTC)
 

@@ -4,11 +4,12 @@ import os
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from urllib.parse import urlparse
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, insert, func, text
 from alphapulse.core.db import SessionLocal, engine
 from alphapulse.models import NewsItem
 from alphapulse.news_research.models import Batch, BatchPackage, BatchEvent, Package, Event, Membership, Attempt
-from alphapulse.news_research import batches
+from alphapulse.news_research import batches, service
+from alphapulse.news_research.api import retry_event
 
 
 async def main():
@@ -86,8 +87,82 @@ async def main():
         for model in (BatchEvent, BatchPackage, Batch, Membership, Attempt, Package, Event, NewsItem):
             await s.execute(delete(model))
         await s.commit()
+    await regressions(now, settings)
     await engine.dispose()
     print('Frozen batches passed: assignment barrier, single research, failures, new arrivals, restart and source revisions.')
+
+
+async def regressions(now, settings):
+    async def clear(session):
+        # This script runs first in an empty, disposable CI database. TRUNCATE avoids
+        # quadratic foreign-key checks when removing the 33,000-row stress fixture.
+        await session.execute(text('TRUNCATE news_research_batches, news_research_packages, news_research_events, news_items CASCADE'))
+        await session.commit()
+
+    async with SessionLocal() as s:
+        event = Event(title='Deferred retry', tags=[], revision=7, state='pending', due_at=now)
+        previous = Batch(phase='partial', cutoff_at=now)
+        s.add_all([event, previous])
+        await s.flush()
+        s.add(BatchEvent(batch_id=previous.id, event_id=event.id, revision=7, state='deferred'))
+        await s.commit()
+        assert await batches.freeze(s, settings) is None
+        await retry_event(event.id, s)
+        assert event.revision == 8
+        batch = await batches.freeze(s, settings)
+        assert batch is not None
+        await batches.actions(s, batch, set(), 8)
+        await s.commit()
+        assert await batches.actions(s, batch, set(), 8) == [('event', event.id)]
+        # Failed retries retain their revision so cached evidence can still be reused.
+        event.state = 'failed'
+        await s.commit()
+        await retry_event(event.id, s)
+        assert event.revision == 8 and event.state == 'pending'
+        await clear(s)
+
+        def original(key, published_at):
+            return dict(source_code='wscn_news', external_id=key, title=key, summary='',
+                content_text='Original', content_hash='a'*64, url='https://example.invalid/'+key,
+                published_at=published_at)
+        news = NewsItem(**original('manual-history', now-timedelta(days=365)))
+        excluded = NewsItem(**original('unselected-history', now-timedelta(days=365)))
+        s.add_all([news, excluded])
+        await s.commit()
+        await service.enroll(s, [news.id])
+        batch = await batches.freeze(s, settings)
+        package = await s.scalar(select(Package).where(Package.news_id == news.id))
+        news.content_hash = 'b'*64
+        await s.commit()
+        await batches.actions(s, batch, set(), 8)
+        await s.commit()
+        await batches.actions(s, batch, set(), 8)
+        await s.commit()
+        assert batch.phase == 'partial'
+        batch = await batches.freeze(s, settings)
+        assert package.content_hash == news.content_hash and package.state == 'index_pending'
+        assert await batches.actions(s, batch, set(), 8) == [('index', package.id)]
+        assert await s.scalar(select(func.count()).select_from(Package)) == 1
+        # A previously completed manual original also refreshes outside the automatic boundary.
+        package.state = 'done'
+        news.content_hash = 'c'*64
+        await s.commit()
+        await batches.freeze(s, settings)
+        assert package.content_hash == news.content_hash and package.state == 'index_pending'
+        await clear(s)
+
+        count = 33000
+        await s.execute(insert(NewsItem), [original('bulk-'+str(i), now) for i in range(count)])
+        await s.commit()
+        batch = await batches.freeze(s, settings)
+        assert await s.scalar(select(func.count()).select_from(BatchPackage).where(BatchPackage.batch_id == batch.id)) == count
+        assert await s.scalar(select(func.count()).select_from(Package)) == count
+        # Exercise the existing-pending-ID and membership arrays above the driver limit too.
+        next_batch = await batches.freeze(s, settings)
+        assert await s.scalar(select(func.count()).select_from(BatchPackage).where(BatchPackage.batch_id == next_batch.id)) == count
+        assert len(await batches.actions(s, next_batch, set(), 8)) == 8
+        await clear(s)
+    print('Batch regressions passed: deferred retries, failed-evidence reuse, manual source revisions, and 33,000 originals without parameter overflow.')
 
 
 asyncio.run(main())

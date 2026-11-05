@@ -5,7 +5,7 @@ import json
 import re
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from sqlalchemy import select, update, func, or_, case, column, exists, true, literal
+from sqlalchemy import select, update, func, or_, case, column, exists, true, literal, any_
 from sqlalchemy.dialects.postgresql import insert
 from alphapulse.core.db import SessionLocal
 from alphapulse.models import NewsItem
@@ -233,7 +233,7 @@ async def model_config(session, config, stage):
 
 
 async def enroll(session, ids):
-    news = list(await session.scalars(select(NewsItem).where(NewsItem.id.in_(ids))))
+    news = list(await session.scalars(select(NewsItem).where(NewsItem.id == any_(list(ids)))))
     for row in news:
         await session.execute(
             insert(Package)
