@@ -106,6 +106,11 @@ async def extract_articles(provider, system, articles, *, scopes=None):
             identifier = article['id']
             if not passages:
                 raise ValueError('文章缺少可读取原文')
+            if not any(p['text'].strip() for p in passages):
+                if not any((article.get(field) or '').strip() for field in ('title', 'summary', 'content')):
+                    raise ValueError('文章缺少可读取原文')
+                # Keep source characters intact, but never spend a call on whitespace alone.
+                continue
             part = {'task': 'extract', 'article_id': identifier,
                     'packages': [p for p in (scopes or []) if p['news_id'] == identifier],
                     'passages': [{'id': i, **passage} for i, passage in enumerate(passages)]}

@@ -126,6 +126,46 @@ def test_single_long_sentence_splits_without_losing_characters(pipeline, monkeyp
     assert len(received) > 1 and ''.join(received) == article['content']
 
 
+@pytest.mark.parametrize('content', ['正文。\n\n', '   正文。   ', ' ' * 500 + '正文。' + '\n' * 500])
+def test_whitespace_fragments_never_trigger_model_calls(pipeline, monkeypatch, content):
+    article = {'id': 9, 'title': '标题。', 'summary': '\t\n', 'content': content}
+    original = article.copy()
+    passages = pipeline.source_passages(article)
+    for field in ('title', 'summary', 'content'):
+        assert ''.join(p['text'] for p in passages if p['field'] == field) == article[field]
+    # Force every sentence and long-sentence fragment through the splitting path.
+    monkeypatch.setattr(pipeline, 'fits_context', lambda _p, _s, payload, _schema:
+        len(payload['passages']) == 1 and len(payload['passages'][0]['text']) <= 2)
+    received = []
+
+    async def complete(provider, rules, payload, schema):
+        assert any(p['text'].strip() for p in payload['passages'])
+        received.extend(payload['passages'])
+        return schema(facts='保留新闻事实。', evidence_ids=[0]), {'input_tokens': 10}
+
+    monkeypatch.setattr(pipeline, 'complete', complete)
+    extracts, usage = asyncio.run(pipeline.extract_articles(SimpleNamespace(), '规则', [article]))
+    assert len(usage) == len(extracts) == len(received)
+    assert {ref['article_id'] for part in extracts for ref in part['evidence_refs']} == {9}
+    for field in ('title', 'summary', 'content'):
+        sent = ''.join(p['text'] for p in received if p['field'] == field)
+        assert ''.join(sent.split()) == ''.join(article[field].split())
+    assert article == original
+    pipeline.validate_evidence([pipeline.Evidence.model_validate(ref) for part in extracts
+        for ref in part['evidence_refs']], {9: article})
+
+
+@pytest.mark.parametrize('content', ['', ' \n\t' * 500])
+def test_unreadable_article_fails_without_model_calls(pipeline, monkeypatch, content):
+    from unittest.mock import AsyncMock
+    complete = AsyncMock()
+    monkeypatch.setattr(pipeline, 'complete', complete)
+    with pytest.raises(pipeline.SubmissionFailure, match='文章9.*缺少可读取原文'):
+        asyncio.run(pipeline.extract_articles(SimpleNamespace(), '规则',
+            [{'id': 9, 'title': '', 'summary': '', 'content': content}]))
+    complete.assert_not_awaited()
+
+
 def test_oversized_scope_fails_before_model_call_with_article_identity(pipeline, monkeypatch):
     from unittest.mock import AsyncMock
     complete = AsyncMock()
