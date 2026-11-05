@@ -364,7 +364,7 @@ def test_completed_document_error_cannot_remove_next_pending_document(trading, m
 @pytest.mark.parametrize('safe', [False, True])
 def test_failed_round_saves_only_safe_completed_reads_and_explicit_gaps(trading, monkeypatch, safe):
     from alphapulse.crawler.spiders import base
-    obj = spider(trading)
+    obj = spider(trading, 'doj')
     source = SimpleNamespace(history_target=obj.run.history_target, history_cursor={'history': {'entry': 0}, 'realtime': {'entry': 0}}, consecutive_failures=0)
     class Session:
         async def __aenter__(self): return self
@@ -375,15 +375,22 @@ def test_failed_round_saves_only_safe_completed_reads_and_explicit_gaps(trading,
     monkeypatch.setattr(base, 'SessionLocal', Session)
     obj.run.errors = ['failed document']
     obj.run.completed_documents_safe = safe
-    obj.run.official_cursor = {'history': {'entry': 5}, 'realtime': {'entry': 8}, 'checked': {'good': 123}, 'document_retries': {'bad': {'attempts': 1}}}
+    gap = {'document': {'url': 'https://www.justice.gov/api/v1/press_releases/bad.json', 'kind': 'doj'}, 'attempts': 1, 'next_at': obj.run.started_at.timestamp() + 3600}
+    obj.run.official_cursor = {'transport': 'doj-api-v1', 'history': {'entry': 5}, 'realtime': {'entry': 8}, 'checked': {'good': 123}, 'document_retries': {'bad': gap}}
     asyncio.run(obj._finish_run(obj.run))
     assert source.history_cursor['history'] == {'entry': 0}
     assert source.history_cursor['realtime'] == {'entry': 0}
     assert ('checked' in source.history_cursor) is safe
     assert ('document_retries' in source.history_cursor) is safe
+    assert ('transport' in source.history_cursor) is safe
     if safe:
         assert source.history_cursor['checked'] == {'good': 123}
         assert 'bad' in source.history_cursor['document_retries']
+        restored = spider(trading, 'doj')
+        restored.cursor = copy.deepcopy(source.history_cursor)
+        restored.first_requests()
+        assert restored.cursor['checked'] == {'good': 123}
+        assert restored.cursor['document_retries'] == {'bad': gap}
 
 
 @pytest.mark.parametrize('status', [403, 429])

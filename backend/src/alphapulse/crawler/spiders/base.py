@@ -246,7 +246,7 @@ class NewsSpider(RedisSpider):
             elif failed and run.official_cursor is not None and run.completed_documents_safe:
                 # Retain completed reads and explicit gaps, never failed lane positions.
                 cursor = dict(source.history_cursor or {})
-                for key in ('checked', 'document_retries', 'attachment_retries', 'bill_retries'):
+                for key in ('transport', 'checked', 'document_retries', 'attachment_retries', 'bill_retries'):
                     if key in run.official_cursor:
                         cursor[key] = run.official_cursor[key]
                 source.history_cursor = cursor
