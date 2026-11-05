@@ -579,6 +579,7 @@ async def main():
             await s.commit()
             event = await s.get(Event, event_id)
             context = (await service.candidate_context(s, [event]))[0]
+            assert "tags" not in context and context["id"] == event.id and context["title"] == event.title
             assert context["reporting_range"] == {
                 "first": (now - timedelta(days=180)).isoformat(),
                 "latest": now.isoformat(),
@@ -766,9 +767,9 @@ async def review_regressions(config, complete, package_id, news_id):
         ).output
 
     # Force compression, then exercise both member read tools with frozen originals.
-    async def extract(provider, rules, articles):
-        assert "当前事件及各成员归属边界" in rules
-        assert '"keyword_canonicals": ["serialincident"]' in rules
+    async def extract(provider, rules, articles, *, scopes):
+        assert "当前事件：" in rules
+        assert all(p["keyword_canonicals"] == ["serialincident"] for p in scopes)
         return [
             {
                 "evidence_refs": [

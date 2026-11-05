@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace as N
+import json
 import pytest
 
 
@@ -648,13 +649,12 @@ def test_long_event_compaction_uses_final_research_context(trading, monkeypatch,
     monkeypatch.setattr(service, "validate_timeline", lambda *args: None)
 
     async def consolidate(provider, rules, payload, schema):
-        assert schema is pipeline.Extraction
-        assert "当前事件及各成员归属边界" in rules and quote in rules
+        assert schema is pipeline.EvidenceSelection
+        assert "当前事件：" in rules and "当前事件及各成员归属边界" not in rules
         assert "extract和consolidate生成的facts等叙述也必须用简体中文" in rules
         assert "time_text及取自原文的period_text逐字保留原语言和字符" in rules
         assert pipeline.fits_context(provider, rules, payload, schema)
-        refs = [ref for part in payload["extractions"] for ref in part["evidence_refs"]]
-        return pipeline.Extraction(facts="调查继续。", evidence_refs=refs), {"mock": True}
+        return schema(facts="调查继续。", evidence_ids=[ref["id"] for ref in payload["evidence"]]), {"mock": True}
 
     complete = AsyncMock(side_effect=consolidate)
     monkeypatch.setattr(pipeline, "complete", complete)
@@ -679,7 +679,9 @@ def test_long_event_compaction_uses_final_research_context(trading, monkeypatch,
     compressed = {**versions[0].input, "articles": [], "extractions": extracts}
     reader = service.Research()
     assert not reader.fits(provider, skill, versions[0].input, ResearchResult)
-    assert not reader.fits(provider, boundary_rules, compressed, ResearchResult)
+    assert len(extract.await_args.kwargs["scopes"]) == 40
+    assert all(p["keywords"] == keywords for p in extract.await_args.kwargs["scopes"])
+    assert len(boundary_rules) < len(json.dumps(versions[0].input["packages"], ensure_ascii=False))
     assert reader.fits(provider, skill, compressed, ResearchResult) != needs_compaction
 
 

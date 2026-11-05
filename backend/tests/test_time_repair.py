@@ -101,7 +101,7 @@ def usage_tokens(usage):
 def test_extraction_failure_keeps_completed_and_failed_call_usage(trading, monkeypatch, failure):
     from unittest.mock import AsyncMock
     from alphapulse.news_research import pipeline, model as service
-    extract = pipeline.Extraction(facts='Source', evidence_refs=[pipeline.Evidence(article_id=1, quote='Source')])
+    extract = pipeline.EvidenceSelection(facts='Source', evidence_ids=[0 if failure == 'second_call' else 999])
     complete = AsyncMock(side_effect=[(extract, {'input_tokens': 10}), service.SubmissionFailure('synthetic failure', {'input_tokens': 40})])
     monkeypatch.setattr(pipeline, 'complete', complete)
     monkeypatch.setattr(pipeline, 'fits_context', lambda *args: True)
@@ -109,6 +109,7 @@ def test_extraction_failure_keeps_completed_and_failed_call_usage(trading, monke
     with pytest.raises(service.SubmissionFailure) as error:
         asyncio.run(pipeline.extract_articles(SimpleNamespace(), 'rules', articles))
     assert usage_tokens(error.value.usage) == (50 if failure == 'second_call' else 10)
+    assert complete.await_count == (2 if failure == 'second_call' else 1)
 
 
 @pytest.mark.parametrize('failure', ['second_call', 'evidence', 'no_shrink'])
@@ -116,14 +117,15 @@ def test_compaction_failure_keeps_every_paid_call(trading, monkeypatch, failure)
     from unittest.mock import AsyncMock
     from alphapulse.news_research import pipeline, model as service
     group = {'facts': 'Very long source fact ' * 50, 'evidence_refs': [{'article_id': 1, 'quote': 'Source'}]}
-    extract = pipeline.Extraction(facts='Source' if failure != 'no_shrink' else 'Longer' * 1000,
-        evidence_refs=[pipeline.Evidence(article_id=1, quote='Changed' if failure == 'evidence' else 'Source')])
+    extract = pipeline.EvidenceSelection(facts='Source' if failure != 'no_shrink' else 'Longer' * 1000,
+        evidence_ids=[999 if failure == 'evidence' else 0])
     complete = AsyncMock(side_effect=[(extract, {'input_tokens': 10}), service.SubmissionFailure('synthetic failure', {'input_tokens': 40})])
     monkeypatch.setattr(pipeline, 'complete', complete)
     monkeypatch.setattr(pipeline, 'fits_context', lambda *args: True)
     with pytest.raises(service.SubmissionFailure) as error:
         asyncio.run(pipeline.compact_extractions(SimpleNamespace(), 'rules', {'extractions': [group]}, pipeline.ReviewResult, fits=lambda *args: False))
     assert usage_tokens(error.value.usage) == (50 if failure == 'second_call' else 10)
+    assert complete.await_count == (2 if failure == 'second_call' else 1)
 
 
 

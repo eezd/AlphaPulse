@@ -373,7 +373,6 @@ async def candidate_context(session, catalog):
             "id": e.id,
             "revision": e.revision,
             "title": e.title,
-            "tags": e.tags,
             "reporting_range": None,
             "evidence": [],
         }
@@ -876,12 +875,12 @@ async def process_event(identifier, config, force=False):
             if not researcher.fits(provider, skill, request, ResearchResult):
                 extraction_rules = (
                     skill
-                    + "\n当前事件及各成员归属边界："
-                    + json.dumps({"event": payload["event"], "packages": payload["packages"]}, ensure_ascii=False)
+                    + "\n当前事件："
+                    + json.dumps(payload["event"], ensure_ascii=False)
                     + "\nextract只提取当前片段对本事件有用的事实与连续原文引用，不作评级。consolidate保留各来源、冲突、时间与引用，不新增事实。"
                 )
                 extracts, preparations = await extract_articles(
-                    provider, extraction_rules, payload["articles"]
+                    provider, extraction_rules, payload["articles"], scopes=payload["packages"]
                 )
                 if {
                     ref["article_id"]
