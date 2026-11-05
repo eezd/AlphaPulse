@@ -1425,3 +1425,160 @@ def test_sec_historical_listing_stops_only_with_verified_dates(trading, dated, m
     else:
         assert any('/2024-199' in r.url for r in requests)
         assert obj.cursor['history']['next'].endswith('?page=1')
+
+
+def test_fed_nested_body_selectors_remove_shared_noise_once():
+    body = """<h1>Federal Reserve announcement</h1><time datetime="2026-05-13"></time>
+    <div id="content"><div id="article"><h3>Federal Reserve announcement</h3><form>subscribe</form><script>noise()</script>
+    <p>The Federal Reserve announces a monetary policy decision affecting interest rates.</p>
+    <a href="/report.pdf">Official report</a></div></div>"""
+    parsed = article('fed', body, 'https://www.federalreserve.gov/newsevents/pressreleases/other20260513a.htm')
+    assert 'monetary policy decision' in parsed['content_html']
+    assert 'subscribe' not in parsed['content_html'] and 'noise()' not in parsed['content_html']
+    assert parsed['published_at'].date().isoformat() == '2026-05-13'
+    assert parsed['extra']['attachments'][0]['url'].endswith('/report.pdf')
+
+
+def treasury_manifest():
+    return {'category': 'press-releases', 'total': 3, 'shards': [
+        {'path': '/news-data/press-releases/2026-2025.json', 'count': 2, 'offset': 0, 'endOffset': 2, 'startYear': 2025, 'endYear': 2026},
+        {'path': '/news-data/press-releases/2024-2023.json', 'count': 1, 'offset': 2, 'endOffset': 3, 'startYear': 2023, 'endYear': 2024}]}
+
+
+def test_treasury_json_replaces_only_discovery_cursors(trading):
+    obj = spider(trading, 'treasury')
+    obj.cursor.update(checked={'completed': 1}, document_retries={'gap': {'document': {}, 'attempts': 3}},
+                      attachment_retries={'attachment': {'attempts': 3}}, transport='old')
+    obj.cursor['history']['page'] = SOURCES['treasury'].entries[0] + '?page=2'
+    requests = obj.first_requests()
+    assert requests[0].url.endswith('/news-data/press-releases/manifest.json')
+    assert 'history' not in obj.cursor
+    assert obj.cursor['checked'] == {'completed': 1}
+    assert obj.cursor['document_retries']['gap']['attempts'] == 3
+    assert obj.cursor['attachment_retries'] == {'attachment': {'attempts': 3}}
+    checkpoint = copy.deepcopy(obj.cursor)
+    obj.first_requests()
+    assert obj.cursor == checkpoint
+
+
+def test_treasury_json_history_resumes_pending_full_articles(trading):
+    obj = spider(trading, 'treasury')
+    manifest = 'https://home.treasury.gov/news-data/press-releases/manifest.json'
+    request, = obj.parse_listing(response(manifest, json.dumps(treasury_manifest()), lane='history'))
+    assert request.url.endswith('/2026-2025.json')
+    # A restart must fetch the shard, not declare the empty manifest a finished history.
+    resumed = spider(trading, 'treasury')
+    resumed.cursor = copy.deepcopy(obj.cursor)
+    assert resumed.advance('history')[0].url == request.url
+    data = {'category': 'press-releases', 'count': 2, 'items': [
+        {'url': '/news/press-releases/sb0002/', 'date': '2026-11-03', 'datetime': '2026-11-03T18:00:00Z'},
+        {'url': '/news/press-releases/sb0001/', 'date': '2025-01-01', 'datetime': '2025-01-01T18:00:00Z'}]}
+    document, = resumed.parse_listing(response(request.url, json.dumps(data), lane='history'))
+    assert document.meta['document']['kind'] == 'article'
+    assert len(resumed.cursor['history']['pending']) == 2
+    assert not resumed.run.history_done
+    assert resumed.complete('history')[0].url.endswith('/sb0001/')
+    assert list(resumed.complete('history')) == []
+    assert resumed.run.history_done
+
+
+@pytest.mark.parametrize('failure', ['total', 'offset', 'host', 'empty'])
+def test_treasury_json_incomplete_manifest_cannot_complete_history(trading, failure):
+    data = treasury_manifest()
+    if failure == 'total': data['total'] = 4
+    if failure == 'offset': data['shards'][1]['offset'] = 0
+    if failure == 'host': data['shards'][0]['path'] = 'https://evil.example/shard.json'
+    if failure == 'empty': data['shards'] = []
+    obj = spider(trading, 'treasury')
+    with pytest.raises(ValueError):
+        list(obj.parse_listing(response('https://home.treasury.gov/news-data/press-releases/manifest.json', json.dumps(data), lane='history')))
+    assert not obj.run.history_done
+
+
+@pytest.mark.parametrize('source, expected', [('fincen', 4_000_000), ('sec', 2_000_000)])
+def test_pdf_budget_is_bounded_scoped_and_restored(trading, monkeypatch, source, expected):
+    from pypdf import get_configuration
+    from alphapulse.crawler.spiders import us_official
+    def extract(body):
+        assert get_configuration().stream_parsing_work_maximum_count == expected
+        raise ValueError('known PDF error')
+    monkeypatch.setattr(us_official, 'pdf_text', extract)
+    with pytest.raises(ValueError, match='known PDF error'):
+        spider(trading, source).pdf_text(b'%PDF-test')
+    assert get_configuration().stream_parsing_work_maximum_count == 2_000_000
+
+
+def test_pdf_resource_failure_retains_reason_as_a_gap(trading, monkeypatch):
+    from pypdf.errors import LimitReachedError
+    from alphapulse.calendar import umich
+    def reader(_):
+        raise LimitReachedError('stream work budget exhausted')
+    monkeypatch.setattr(umich, 'PdfReader', reader)
+    obj = spider(trading, 'fincen')
+    doc = {'url': 'https://www.fincen.gov/system/files/report.pdf', 'kind': 'article', 'format': 'pdf',
+           'listing_date': '2026-11-03', 'listing_url': SOURCES['fincen'].entries[1], 'title': 'Official report'}
+    obj.cursor['realtime'].update(pending=[doc], entry=len(SOURCES['fincen'].entries))
+    async def collect():
+        return [item async for item in obj.parse_document(Response(doc['url'], body=b'%PDF-test',
+            request=Request(doc['url'], meta={'lane': 'realtime', 'document': doc, 'raw_response_id': 12})))]
+    assert asyncio.run(collect()) == []
+    assert 'stream work budget exhausted' in obj.cursor['document_retries'][doc['url']]['error']
+    assert doc['url'] not in obj.cursor.get('checked', {})
+
+
+@pytest.mark.parametrize('failure', ['count', 'date', 'host', 'path'])
+def test_treasury_invalid_shard_keeps_history_unfinished(trading, failure):
+    obj = spider(trading, 'treasury')
+    url = 'https://home.treasury.gov/news-data/press-releases/2026-2025.json'
+    obj.cursor['history']['treasury_shards'] = [{'url': url, 'count': 1}]
+    item = {'url': '/news/press-releases/sb0001/', 'date': '2025-01-01', 'datetime': '2025-01-01T18:00:00Z'}
+    data = {'category': 'press-releases', 'count': 1, 'items': [item]}
+    if failure == 'count': data['count'] = 2
+    if failure == 'date': item['date'] = '2025-01-02'
+    if failure == 'host': item['url'] = 'https://evil.example/news/press-releases/sb0001/'
+    if failure == 'path': item['url'] = '/news/unknown/'
+    with pytest.raises(ValueError):
+        list(obj.parse_listing(response(url, json.dumps(data), lane='history')))
+    assert not obj.run.history_done
+    assert obj.cursor['history']['treasury_shards'] == [{'url': url, 'count': 1}]
+
+
+def test_treasury_shard_excludes_known_categories_and_retains_legacy_articles(trading):
+    obj = spider(trading, 'treasury')
+    url = 'https://home.treasury.gov/news-data/press-releases/2026-2023.json'
+    obj.cursor['history']['treasury_shards'] = [{'url': url, 'count': 4}]
+    items = [{'url': f'/news/press-releases/{name}/'} for name in ('readouts', 'statements-remarks', 'testimonies')]
+    items.append({'url': '/press-releases/jy1839/', 'date': '2023-10-24', 'datetime': '2023-10-24T18:00:00Z'})
+    docs, next_url = obj.treasury_listing(response(url, json.dumps({'category': 'press-releases', 'count': 4, 'items': items}), lane='history'), 'history')
+    assert next_url is None and len(docs) == 1
+    assert docs[0]['url'].endswith('/press-releases/jy1839/')
+
+
+@pytest.mark.parametrize('failed', [False, True])
+def test_treasury_transport_migration_commits_only_with_json_lanes(trading, monkeypatch, failed):
+    from alphapulse.crawler.spiders import base
+    obj = spider(trading, 'treasury')
+    old = {'entry': 0, 'page': SOURCES['treasury'].entries[0] + '?page=2'}
+    source = SimpleNamespace(history_target=obj.run.history_target, history_cursor={'history': old, 'realtime': old}, consecutive_failures=0)
+    class Session:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def execute(self, *args): pass
+        async def get(self, *args, **kwargs): return source
+        async def commit(self): pass
+    monkeypatch.setattr(base, 'SessionLocal', Session)
+    obj.cursor = copy.deepcopy(source.history_cursor)
+    obj.first_requests()
+    obj.cursor['history'] = {'entry': 0, 'page': 'https://home.treasury.gov/news-data/press-releases/manifest.json'}
+    obj.run.history_position = obj.run.history_target
+    obj.run.errors = ['temporary failure'] if failed else []
+    asyncio.run(obj._finish_run(obj.run))
+    if failed:
+        assert 'transport' not in source.history_cursor
+        assert source.history_cursor['history'] == old
+    else:
+        assert source.history_cursor['transport'] == 'treasury-json-v1'
+        assert '/news-data/' in source.history_cursor['history']['page']
+    resumed = spider(trading, 'treasury')
+    resumed.cursor = copy.deepcopy(source.history_cursor)
+    assert resumed.first_requests()[0].url.endswith('/news-data/press-releases/manifest.json')

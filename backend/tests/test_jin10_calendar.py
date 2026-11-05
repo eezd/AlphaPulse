@@ -351,3 +351,22 @@ def test_cross_day_membership_does_not_withdraw_until_all_buckets_remove_it(trad
         await save_entry(session, original, 4, now)
         assert row.schedule_status == 'scheduled'
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('country', [None, '', '  \t '])
+def test_optional_empty_country_is_unlabelled_without_inference(country):
+    body = deepcopy(FIXTURE['event:2025-01-08'])
+    body['list'] = body['list'][:1]
+    body['list'][0]['country'] = country
+    entry, = normalize(body, 'event', date(2025, 1, 8))
+    assert entry.values['_jin10']['country_name'] == '未标注'
+    assert entry.values['_jin10']['country_code'] == 'UNKNOWN'
+    assert body['list'][0]['country'] == country
+
+
+@pytest.mark.parametrize('country', [7, [], {}])
+def test_optional_country_still_rejects_non_string_values(country):
+    body = deepcopy(FIXTURE['event:2025-01-08'])
+    body['list'][0]['country'] = country
+    with pytest.raises(ValueError, match='country'):
+        normalize(body, 'event', date(2025, 1, 8))

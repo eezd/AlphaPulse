@@ -247,6 +247,9 @@ class NewsSpider(RedisSpider):
                 # Retain completed reads and explicit gaps, never failed lane positions.
                 cursor = dict(source.history_cursor or {})
                 for key in ('transport', 'checked', 'document_retries', 'attachment_retries', 'bill_retries'):
+                    # Treasury's HTML lanes must be reset again if the first JSON round fails.
+                    if key == 'transport' and self.name == 'treasury':
+                        continue
                     if key in run.official_cursor:
                         cursor[key] = run.official_cursor[key]
                 source.history_cursor = cursor

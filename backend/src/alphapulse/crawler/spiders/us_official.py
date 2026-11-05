@@ -4,11 +4,13 @@ import json
 import re
 import time
 import uuid
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from html import escape, unescape
 from email.utils import parsedate_to_datetime
 
 from lxml import etree
+from pypdf import apply_configuration
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from scrapy import Request
@@ -108,6 +110,11 @@ class USOfficialSpider(NewsSpider):
 
     def first_requests(self):
         self.run.completed_documents_safe = True
+        if self.name == 'treasury' and self.cursor.get('transport') != 'treasury-json-v1':
+            # HTML page numbers no longer select distinct pages. Retain completion and gap evidence.
+            self.cursor = {k: v for k, v in self.cursor.items() if k not in ('history', 'realtime')}
+            self.cursor['transport'] = 'treasury-json-v1'
+            self.run.official_cursor = self.cursor
         if self.name == 'doj' and self.cursor.get('transport') != 'doj-api-v1':
             # Retain retry evidence; HTML discovery cursors cannot use API pagination.
             self.cursor = {k: v for k, v in self.cursor.items() if k not in ('history', 'realtime', 'checked')}
@@ -211,6 +218,8 @@ class USOfficialSpider(NewsSpider):
                 self.cursor['realtime'] = {'entry': 0}
             return []
         url = state.get('page') or spec.entries[state['entry']]
+        if self.name == 'treasury' and not state.get('page'):
+            url = 'https://home.treasury.gov/news-data/press-releases/manifest.json'
         if self.name == 'congress' and not state.get('page'):
             begin = self.run.history_target if lane == 'history' else self.run.cutoff
             url = configure_url(url, fromDateTime=begin.strftime('%Y-%m-%dT%H:%M:%SZ'), toDateTime=self.run.started_at.strftime('%Y-%m-%dT%H:%M:%SZ'))
@@ -225,11 +234,62 @@ class USOfficialSpider(NewsSpider):
         state['page'] = url
         return [self.request_for(url, self.parse_listing, lane)]
 
+    def treasury_listing(self, response, lane):
+        state = self.cursor[lane]
+        data = response.json()
+        if not isinstance(data, dict) or data.get('category') != 'press-releases':
+            raise ValueError('Treasury JSON 索引结构未识别')
+        if urlsplit(response.url).path.endswith('/manifest.json'):
+            shards = data.get('shards')
+            if not isinstance(shards, list) or not shards or type(data.get('total')) is not int:
+                raise ValueError('Treasury JSON 分片清单不完整')
+            begin = self.run.history_target if lane == 'history' else self.run.cutoff
+            offset, selected, seen = 0, [], set()
+            for shard in shards:
+                if not isinstance(shard, dict) or any(type(shard.get(k)) is not int for k in ('count', 'offset', 'endOffset', 'startYear', 'endYear')):
+                    raise ValueError('Treasury JSON 分片元数据无效')
+                if shard['count'] <= 0 or shard['offset'] != offset or shard['endOffset'] != offset + shard['count'] or shard['startYear'] > shard['endYear']:
+                    raise ValueError('Treasury JSON 分片范围不连续')
+                url = official_url(self.name, shard['path'], response.url)
+                if not re.fullmatch(r'https://home\.treasury\.gov/news-data/press-releases/\d{4}-\d{4}\.json', url) or url in seen:
+                    raise ValueError('Treasury JSON 分片地址无效或重复')
+                seen.add(url)
+                offset = shard['endOffset']
+                if shard['endYear'] >= begin.year and shard['startYear'] <= self.run.started_at.year:
+                    selected.append({'url': url, 'count': shard['count']})
+            if offset != data['total'] or not selected:
+                raise ValueError('Treasury JSON 分片总数或目标年份不符')
+            state['treasury_shards'] = selected
+            return [], selected[0]['url']
+        shards = state.get('treasury_shards', [])
+        items = data.get('items')
+        if not shards or shards[0]['url'] != response.url or not isinstance(items, list) or type(data.get('count')) is not int or len(items) != data['count'] or len(items) != shards[0]['count']:
+            raise ValueError('Treasury JSON 分片内容不完整')
+        docs = []
+        for item in items:
+            url = official_url(self.name, item['url'], response.url)
+            path = urlsplit(url).path
+            # The official index also contains these category landing pages.
+            if path.rstrip('/') in {f'/news/press-releases/{name}' for name in ('readouts', 'statements-remarks', 'testimonies')}:
+                continue
+            if not re.fullmatch(r'/(?:news/)?press-releases/[a-z]+\d+/?', path):
+                raise ValueError('Treasury JSON 文章地址无效')
+            at, _ = published(item['datetime'])
+            if at.date().isoformat() != item['date']:
+                raise ValueError('Treasury JSON 文章日期不符')
+            docs.append({'url': url, 'kind': 'article', 'listing_date': at.isoformat()})
+        if len({doc['url'] for doc in docs}) != len(docs):
+            raise ValueError('Treasury JSON 分片文章重复')
+        state['treasury_shards'] = shards[1:]
+        return docs, shards[1]['url'] if len(shards) > 1 else None
+
     def parse_listing(self, response):
         lane = response.meta['lane']
         state = self.cursor[lane]
         docs, next_url = [], None
-        if self.name == 'doj':
+        if self.name == 'treasury' and urlsplit(response.url).path.startswith('/news-data/'):
+            docs, next_url = self.treasury_listing(response, lane)
+        elif self.name == 'doj':
             data = response.json()
             resultset = data['metadata']['resultset']
             if data['metadata']['responseInfo']['status'] != 200 or not isinstance(data['results'], list):
@@ -583,7 +643,7 @@ class USOfficialSpider(NewsSpider):
         elif doc['kind'] == 'text' or doc.get('format') == 'pdf':
             at, precision = published(doc['listing_date'] if doc.get('format') == 'pdf' else doc['at'])
             if response.body.startswith(b'%PDF'):
-                content = '<pre>' + escape(pdf_text(response.body)) + '</pre>'
+                content = '<pre>' + escape(self.pdf_text(response.body)) + '</pre>'
             else:
                 content = response.text
                 validate_body(content)
@@ -692,6 +752,12 @@ class USOfficialSpider(NewsSpider):
                 self.run.stats['unclassified_attachment_gaps'] = self.run.stats.get('unclassified_attachment_gaps', 0) + 1
         yield from self.complete(lane)
 
+    def pdf_text(self, body):
+        # Bound the known complex FinCEN report without changing other collectors' limits.
+        context = apply_configuration(stream_parsing_work_maximum_count=4_000_000) if self.name == 'fincen' else nullcontext()
+        with context:
+            return pdf_text(body)
+
     def parse_attachment(self, response):
         parsed = response.meta['parsed']
         attachment = next(a for a in parsed['extra']['attachments'] if a['url'] == response.url or a['status'] == 'pending')
@@ -701,7 +767,7 @@ class USOfficialSpider(NewsSpider):
                 raise ValueError(f'HTTP {response.status}')
             if response.headers.get('Content-Type', b'').lower().startswith(b'image/') and response.body.startswith((b'\x89PNG\r\n\x1a\n', b'\xff\xd8\xff', b'GIF87a', b'GIF89a')):
                 raise ValueError('官方图片附件尚未提取文字，请核对原文')
-            text = pdf_text(response.body)
+            text = self.pdf_text(response.body)
             attachment['status'] = 'complete'
             parsed['content_html'] += f"<section><h2>{escape(attachment['title'])}</h2><pre>{escape(text)}</pre></section>"
         except (ValueError, OSError) as exc:

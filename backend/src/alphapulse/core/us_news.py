@@ -154,7 +154,9 @@ def article(source: str, html: str, url: str, *, release_date: str | None = None
     if not body:
         raise ValueError('官方正文结构未识别')
     for node in body.css('script, style, nav, header, footer, form'):
-        node.root.getparent().remove(node.root)
+        parent = node.root.getparent()
+        if parent is not None:
+            parent.remove(node.root)
     body = sorted(body, key=lambda node: len(node.xpath('string(.)').get()), reverse=True)
     content = body[0].get()
     text = ' '.join(body[0].xpath('.//text()').getall()).strip()

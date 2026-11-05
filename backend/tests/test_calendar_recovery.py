@@ -268,3 +268,31 @@ def test_restart_honors_persisted_source_pause(trading, monkeypatch):
             await worker.http.aclose()
             await worker.bls.aclose()
     asyncio.run(run())
+
+def test_dol_release_day_prefers_dated_archive_without_rolling_request(trading, monkeypatch):
+    from alphapulse.calendar import worker as module, dol
+    from test_dol import REPORT
+    class ReleaseDay(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 10, 29, 14, tzinfo=UTC).astimezone(tz)
+    monkeypatch.setattr(module, 'datetime', ReleaseDay)
+    monkeypatch.setattr(module, 'pdf_text', lambda _: REPORT)
+    async def run():
+        worker = module.CalendarWorker()
+        row = SimpleNamespace(source='dol', family='initial_claims', scheduled_at=datetime(2026, 10, 29, 12, 30, tzinfo=UTC),
+                              release_url=dol.LATEST, first_received_at=None)
+        page = httpx.Response(200, content=b'%PDF', request=httpx.Request('GET', 'https://oui.doleta.gov/press/2026/102926.pdf'))
+        worker.archive_page = AsyncMock(return_value=(page, 7))
+        worker.fetch = AsyncMock(side_effect=AssertionError('rolling host must not be fetched'))
+        try:
+            assert await worker.result_page(row) == (page, 7)
+            worker.archive_page.assert_awaited_once_with(row)
+            worker.fetch.assert_not_awaited()
+            row.scheduled_at -= timedelta(days=7)
+            with pytest.raises(ValueError, match='所选日程不符'):
+                await worker.result_page(row)
+        finally:
+            await worker.http.aclose()
+            await worker.bls.aclose()
+    asyncio.run(run())

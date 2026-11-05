@@ -7,7 +7,7 @@ from urllib.parse import urljoin
 
 from parsel import Selector
 from pypdf import PdfReader
-from pypdf.errors import PdfReadError
+from pypdf.errors import LimitReachedError, PdfReadError
 
 from alphapulse.calendar.parsers import EASTERN, MONTHS, Scheduled, cells, compact, number
 
@@ -16,6 +16,8 @@ def pdf_text(body: bytes, pages: int | None = None) -> str:
     try:
         reader = PdfReader(BytesIO(body))
         text = "\n".join(page.extract_text() for page in reader.pages[:pages])
+    except LimitReachedError as exc:
+        raise ValueError(f"官方 PDF 解析超过资源上限：{exc}") from exc
     except PdfReadError as exc:
         raise ValueError("官方 PDF 无法读取") from exc
     if not text.strip():

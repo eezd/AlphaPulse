@@ -359,7 +359,8 @@ class CalendarWorker:
                 raise ValueError("EIA 公告统计周或时间与所选日程不符，未填入其他期次的数据")
             return response, raw_id
         if row.source == "dol":
-            if row.scheduled_at.astimezone(EASTERN).date() < datetime.now(EASTERN).date() and (not row.release_url or "/press/" not in urlparse(row.release_url).path):
+            # Prefer dated official PDFs even on release day; the rolling host may deny access.
+            if not row.release_url or "/press/" not in urlparse(row.release_url).path:
                 try:
                     response, raw_id = await self.archive_page(row)
                 except ArchiveMissing:

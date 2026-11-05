@@ -79,7 +79,8 @@ def normalize(body: dict, kind: str, day: date) -> list[Entry]:
         if identity in identities:
             raise ValueError("金十同一响应存在重复事件标识")
         identities.add(identity)
-        country = text(raw, "country", nullable=True)
+        country_value = raw.get("country")
+        country = None if isinstance(country_value, str) and not country_value.strip() else text(raw, "country", nullable=True)
         precision = "day" if kind == "holiday" else "minute"
         if kind == "holiday":
             if raw.get("date") != day.isoformat():
