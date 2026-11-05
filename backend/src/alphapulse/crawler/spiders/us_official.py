@@ -400,6 +400,10 @@ class USOfficialSpider(NewsSpider):
                         self.block_until(until)
                 except (ValueError, TypeError, OverflowError):
                     self.logger.warning('忽略无效 Retry-After 响应头')
+        if self.name in ('sec', 'doj', 'congress') and (parsed := failure.request.meta.get('parsed')):
+            attachment = next(a for a in parsed['extra']['attachments'] if a['status'] == 'pending')
+            attachment.update(status='unavailable', error=f'请求失败：{status or repr(failure.value)}')
+            return list(self.attach_or_finish(parsed, failure.request.meta['lane']))
         if status not in (403, 429) or self.name in ('sec', 'doj', 'congress'):
             requests = self.document_failed(failure.request, f'请求失败 {failure.request.url}：{status or repr(failure.value)}')
             if requests is not None:
@@ -650,9 +654,11 @@ class USOfficialSpider(NewsSpider):
             self.cursor.setdefault('checked', {})[context['document_url']] = self.run.started_at.timestamp()
 
     def attach_or_finish(self, parsed, lane):
-        if self.cursor.get('attachment_retries', {}).get(parsed['url'], {}).get('retired_at'):
-            yield from self.complete(lane)
-            return
+        retired = self.cursor.get('attachment_retries', {}).get(parsed['url'], {})
+        if retired.get('retired_at'):
+            for attachment in parsed['extra']['attachments']:
+                if attachment['status'] == 'pending':
+                    attachment.update(status='unavailable', error=retired['error'])
         pending = next((a for a in parsed['extra']['attachments'] if a['status'] == 'pending'), None)
         if pending:
             request = self.request_for(pending['url'], self.parse_attachment, lane, parsed=parsed)
@@ -665,10 +671,10 @@ class USOfficialSpider(NewsSpider):
         incomplete = any(a['status'] != 'complete' for a in parsed['extra']['attachments'])
         retry_doc = parsed.pop('retry_document', None)
         retries = self.cursor.setdefault('attachment_retries', {})
-        if incomplete and retry_doc:
+        if incomplete and retry_doc and not retired.get('retired_at'):
             previous = retries.get(parsed['url'], {})
             error = '；'.join(f"{a['url']}：{a.get('error') or '附件尚未完成文字提取'}" for a in parsed['extra']['attachments'] if a['status'] != 'complete')
-            retries[parsed['url']] = {'document': retry_doc, 'attempts': previous.get('attempts', 0) + 1, 'next_at': (datetime.now(UTC) + timedelta(hours=1)).timestamp(), 'error': error}
+            retries[parsed['url']] = {'document': retry_doc, 'attempts': previous.get('attempts', 0) + 1, 'next_at': (datetime.now(UTC) + timedelta(hours=1)).timestamp(), 'error': error, 'failed_urls': [a['url'] for a in parsed['extra']['attachments'] if a['status'] != 'complete']}
         elif not incomplete:
             retries.pop(parsed['url'], None)
         self.retire_exhausted()

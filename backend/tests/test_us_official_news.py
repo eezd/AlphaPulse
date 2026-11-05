@@ -1348,11 +1348,18 @@ def test_real_congress_api_fixture_replays_with_visible_source_gap(trading, tmp_
 def test_terminal_news_gap_survives_rediscovery(trading):
     obj = spider(trading, 'doj')
     url = 'https://www.justice.gov/opa/pr/example'
-    obj.cursor['attachment_retries'] = {url: {'attempts': 3, 'error': 'unsupported image'}}
+    doc = {'url': url, 'kind': 'article'}
+    obj.cursor['history']['pending'] = [doc]
+    obj.run.history_deadline = time.monotonic() - 1
+    obj.cursor['attachment_retries'] = {url: {'attempts': 3, 'error': 'unsupported image', 'failed_urls': [url + '.png']}}
     obj.retire_exhausted()
+    parsed = {'url': url, 'title': 'Crypto exchange regulation', 'external_id': 'x', 'content_html': '<p>Updated cryptocurrency exchange regulations.</p>',
+              'published_at': datetime(2026, 11, 4, tzinfo=UTC), 'raw_response_id': 12, 'retry_document': doc,
+              'extra': {'attachments': [{'url': url + '.png', 'title': 'Document', 'status': 'pending'}]}}
+    item, = obj.attach_or_finish(parsed, 'history')
+    assert 'Updated' in item['content_html']
+    assert obj.cursor['attachment_retries'][url]['attempts'] == 3
     assert obj.cursor['attachment_retries'][url]['retired_at']
-    obj.complete = lambda lane: []
-    assert list(obj.attach_or_finish({'url': url}, 'realtime')) == []
 
 
 def test_selected_news_requests_have_one_retry_owner(trading):
@@ -1386,3 +1393,21 @@ def test_sec_uses_official_dateline_not_last_reviewed_date():
     item = article('sec', body, 'https://www.sec.gov/newsroom/press-releases/example')
     assert item['published_at'] == datetime(2026, 9, 30, tzinfo=UTC)
     assert item['extra']['published_at_precision'] == 'date'
+
+
+def test_attachment_http_failure_spends_durable_retry_budget(trading):
+    obj = spider(trading, 'doj')
+    obj.run.history_deadline = time.monotonic() - 1
+    url = 'https://www.justice.gov/opa/pr/example'
+    doc = {'url': url, 'kind': 'doj'}
+    obj.cursor['history']['pending'] = [doc]
+    parsed = {'url': url, 'title': 'Crypto exchange regulation', 'external_id': 'x', 'content_html': '<p>Cryptocurrency exchange regulations.</p>',
+              'published_at': datetime(2026, 11, 4, tzinfo=UTC), 'raw_response_id': 12, 'retry_document': doc,
+              'extra': {'attachments': [{'url': 'https://www.justice.gov/media/1/dl', 'title': 'Document', 'status': 'pending'}]}}
+    request = Request('https://www.justice.gov/media/1/dl', meta={'lane': 'history', 'parsed': parsed})
+    failure = Failure(HttpError(Response(request.url, status=503, request=request)))
+    failure.request = request
+    item, = obj.on_request_error(failure)
+    assert item['extra']['content_scope'] == 'partial'
+    assert obj.cursor['attachment_retries'][url]['attempts'] == 1
+    assert '503' in obj.cursor['attachment_retries'][url]['error']
