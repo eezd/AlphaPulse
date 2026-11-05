@@ -431,3 +431,23 @@ repair budget for existing news gaps. It preserves the previous retry evidence
 and records a durable initialization marker. Repeating it cannot renew the budget.
 Set the authorized SEC contact in the private instance environment before enabling
 SEC; do not put the address or credentials in tracked configuration.
+
+### Authorized 2025 history backfill
+
+`scripts/backfill_sources.py` previews the current baseline without writing data.
+`--execute` creates or resumes `/docker/gitea/dev/AlphaPulse/backfill-20250101/state.json`;
+`--once` runs one eligible pass. The frozen start is 2025-01-01 Asia/Shanghai.
+Both WallstreetCN sources are excluded. Existing US official history lanes are
+activated without resetting document retry budgets. Nine other news sources use
+real archive captures and the existing idempotent importer; all thirteen official
+calendar sources use the archive backfill. Jin10 retains its existing daily gap
+scheduler and validated checkpoints. News AI must remain paused.
+
+Each external archive phase retains its reports and capture files. Actual failed
+phases wait at least one hour (or a longer Retry-After) and stop after three
+attempts; rerunning the driver preserves this budget. Already collected full news
+and retired calendar results are retained. A source can remain limited even when
+some documents were imported: ECB dynamic index version coverage, inaccessible
+BoE speeches and CoinDesk access blocks are reported rather than labeled complete.
+The deployment lock serializes writes; crawler/calendar processes are restored in
+finally blocks. Do not start a second driver or remove its state to renew quotas.

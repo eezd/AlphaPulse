@@ -298,8 +298,9 @@ class USOfficialSpider(NewsSpider):
                             if not title:
                                 raise ValueError('FinCEN PDF 列表缺少标题')
                             doc.update(format='pdf', title=title, listing_url=response.url)
-                    elif self.name in ('treasury', 'cftc', 'fincen', 'whitehouse'):
+                    elif self.name in ('sec', 'treasury', 'cftc', 'fincen', 'whitehouse'):
                         container = {
+                            'sec': 'ancestor::tr[1]',
                             'treasury': 'ancestor::div[h3][1]',
                             'cftc': 'ancestor::tr[1]',
                             'fincen': 'ancestor::div[contains(@class,"fincen-news-article__content")][1]',
@@ -332,7 +333,7 @@ class USOfficialSpider(NewsSpider):
                     return True
                 return day >= begin.date()
             docs = [doc for doc in docs if in_range(doc)]
-        if self.name in ('treasury', 'cftc', 'fincen', 'whitehouse') and docs:
+        if self.name in ('sec', 'treasury', 'cftc', 'fincen', 'whitehouse') and docs:
             begin = self.run.history_target if lane == 'history' else self.run.cutoff
             dates = [published(d['listing_date'])[0] for d in docs if d.get('listing_date')]
             if len(dates) == len(docs) and dates == sorted(dates, reverse=True) and dates[-1].date() < begin.date():

@@ -129,15 +129,17 @@ async def fetch_documents(start: date, end: date, known: set[str], errors: list[
 
     def report_error(source: str, url: str, exc: Exception) -> None:
         failure = {"source": source, "url": url, "error": str(exc)}
-        if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (429, 503):
+        if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (403, 429, 503):
             stopped_sources.add(source)
             failure.update(retry_after=exc.response.headers.get("Retry-After"), stop_reason="已停止该来源，历史覆盖不完整。")
         errors.append(failure)
 
     ctx = ssl.create_default_context()
     ctx.set_ciphers("DEFAULT")
-    async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client, httpx.AsyncClient(timeout=15, verify=ctx) as bls:
+    async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client, httpx.AsyncClient(timeout=15, verify=ctx) as bls:
         async def fetch(source: str, url: str, *, query: dict | None = None) -> Document:
+            if source in stopped_sources:
+                raise ValueError("该来源本轮已停止，保留冷却等待下次尝试")
             parsed = urlparse(url)
             if parsed.scheme != "https" or parsed.hostname not in HOSTS[source]:
                 raise ValueError("归档链接不是对应机构官方 HTTPS 地址")
@@ -156,6 +158,8 @@ async def fetch_documents(start: date, end: date, known: set[str], errors: list[
                     query = None
             else:
                 raise ValueError("官方归档重定向超过 5 次")
+            if response.status_code in (403, 429, 503):
+                stopped_sources.add(source)
             response.raise_for_status()
             return Document(source, str(response.url), response.content, datetime.now(UTC), headers=dict(response.headers))
 
@@ -191,7 +195,7 @@ async def fetch_documents(start: date, end: date, known: set[str], errors: list[
                             documents.append(await fetch(source, link))
                             known.add(link)
                         except (httpx.HTTPError, ValueError) as exc:
-                            if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (429, 503):
+                            if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (403, 429, 503):
                                 raise
                             report_error(source, link, exc)
                     url = following
@@ -203,7 +207,7 @@ async def fetch_documents(start: date, end: date, known: set[str], errors: list[
                 documents.append(await fetch("dol", dol.LATEST))
             except (httpx.HTTPError, ValueError) as exc:
                 report_error("dol", dol.LATEST, exc)
-        if "adp" in selected:
+        if "adp" in selected and "adp" not in stopped_sources:
             url = adp.INDEX
             visited = set()
             while url:
@@ -221,7 +225,7 @@ async def fetch_documents(start: date, end: date, known: set[str], errors: list[
                 except (httpx.HTTPError, ValueError) as exc:
                     report_error("adp", str(exc.request.url) if isinstance(exc, httpx.HTTPError) else url, exc)
                     break
-        if "eia" in selected:
+        if "eia" in selected and "eia" not in stopped_sources:
             try:
                 documents.append(await fetch("eia", eia.SCHEDULE))
                 index = await fetch("eia", eia.ARCHIVE)
@@ -271,7 +275,7 @@ async def fetch_documents(start: date, end: date, known: set[str], errors: list[
                             documents.append(await fetch("umich", link))
                             known.add(link)
                         except (httpx.HTTPError, ValueError) as exc:
-                            if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (429, 503):
+                            if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (403, 429, 503):
                                 raise
                             report_error("umich", link, exc)
             except (httpx.HTTPError, ValueError) as exc:
@@ -290,6 +294,8 @@ async def save_announcement(session, document: Document, family: str, announceme
         raise ValueError("同日同系列匹配到多个日历事件，未写入")
     raw_id = document.raw_id
     row = candidates[0] if candidates else None
+    if row is not None and row.collection_retired_at is not None:
+        return False
     # 回补不回滚已采集的结果；只为已知事件补充缺失的统计期和发布阶段。
     if row is not None and row.first_received_at is not None:
         if (row.period is not None or announcement.period is None) and (row.stage is not None or announcement.stage is None):
@@ -318,9 +324,13 @@ async def save_announcement(session, document: Document, family: str, announceme
     return True
 
 
-async def run(start: date, end: date, *, commit: bool = False, stored_only: bool = False, sources: set[str] | None = None) -> dict:
+async def run(start: date, end: date, *, commit: bool = False, stored_only: bool = False, sources: set[str] | None = None, until: datetime | None = None) -> dict:
     begin = datetime.combine(start, time.min, LOCAL).astimezone(UTC)
     finish = datetime.combine(end + timedelta(days=1), time.min, LOCAL).astimezone(UTC)
+    if until is not None:
+        if until.tzinfo is None or until <= begin:
+            raise ValueError("回补终点须带时区且晚于起点")
+        finish = min(finish, until)
     errors = []
     selected = sources if sources is not None else US_SOURCES
     async with SessionLocal() as session:

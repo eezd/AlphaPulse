@@ -1411,3 +1411,17 @@ def test_attachment_http_failure_spends_durable_retry_budget(trading):
     assert item['extra']['content_scope'] == 'partial'
     assert obj.cursor['attachment_retries'][url]['attempts'] == 1
     assert '503' in obj.cursor['attachment_retries'][url]['error']
+
+
+@pytest.mark.parametrize('dated', [True, False])
+def test_sec_historical_listing_stops_only_with_verified_dates(trading, dated, monkeypatch):
+    monkeypatch.setattr('alphapulse.crawler.spiders.us_official.configuration_error', lambda code: None)
+    obj = spider(trading, 'sec')
+    stamp = '<time datetime="2024-12-30T12:00:00Z">Dec 30</time>' if dated else ''
+    body = '<h1>Press releases</h1><table><tr><td>' + stamp + '</td><td><a href="/newsroom/press-releases/2024-199">Release</a></td></tr></table><a rel="next" href="?page=1">Next</a>'
+    requests = list(obj.parse_listing(response(SOURCES['sec'].entries[0], body, lane='history')))
+    if dated:
+        assert all('/2024-199' not in r.url and '?page=1' not in r.url for r in requests)
+    else:
+        assert any('/2024-199' in r.url for r in requests)
+        assert obj.cursor['history']['next'].endswith('?page=1')
