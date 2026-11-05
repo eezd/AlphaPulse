@@ -116,6 +116,15 @@ class USOfficialSpider(NewsSpider):
         if error:
             self.run.errors.append(error)
             return []
+        if self.name == 'cftc':
+            # Earlier discovery treated commissioner indexes as article gaps.
+            retries = self.cursor.get('document_retries', {})
+            indexes = {url for url in retries if re.fullmatch(r'/PressRoom/SpeechesTestimony/[^/]+/index\.htm', urlsplit(url).path)}
+            for url in indexes:
+                retries.pop(url)
+            for lane in ('realtime', 'history'):
+                if 'pending' in self.cursor.get(lane, {}):
+                    self.cursor[lane]['pending'] = [d for d in self.cursor[lane]['pending'] if d['url'] not in indexes]
         state = self.cursor.setdefault('realtime', {'entry': 0})
         retries = self.cursor.get('document_retries', {})
         due_documents = [{**value['document'], 'document_retry': True} for value in retries.values() if value['attempts'] < 3 and value['next_at'] <= self.run.started_at.timestamp()]
@@ -262,9 +271,23 @@ class USOfficialSpider(NewsSpider):
                     url = official_url(self.name, a.attrib['href'], response.url)
                 except ValueError:
                     continue
-                if re.search(pattern, urlsplit(url).path) and url not in SOURCES[self.name].entries and not re.search(r'/\d{4}-(?:press|speeches|testimony)\.htm$', urlsplit(url).path) and not url.lower().endswith('.pdf'):
+                fincen_row = a.xpath('ancestor::tr[ancestor::main][1]') if self.name == 'fincen' and response.url.split('?')[0] in SOURCES['fincen'].entries[1:] else []
+                fincen_pdf = bool(fincen_row and urlsplit(url).path.lower().endswith('.pdf'))
+                if fincen_pdf or (re.search(pattern, urlsplit(url).path) and url not in SOURCES[self.name].entries and not re.search(r'/\d{4}-(?:press|speeches|testimony)\.htm$', urlsplit(url).path) and not url.lower().endswith('.pdf')):
                     doc = {'url': url, 'kind': 'article'}
-                    if self.name in ('treasury', 'cftc', 'fincen', 'whitehouse'):
+                    if fincen_row:
+                        # Table times use noon as a date marker, not a release instant.
+                        date = fincen_row.xpath('normalize-space(td[2])').get()
+                        begin = self.run.history_target if lane == 'history' else self.run.cutoff
+                        if re.fullmatch(r'(?:0?[1-9]|1[0-2])/\d{4}', date) and int(date[-4:]) < begin.year:
+                            continue
+                        doc['listing_date'] = published(date)[0].date().isoformat()
+                        if fincen_pdf:
+                            title = fincen_row.xpath('normalize-space(td[3])').get() if response.url.split('?')[0] == SOURCES['fincen'].entries[2] else a.xpath('normalize-space(.)').get()
+                            if not title:
+                                raise ValueError('FinCEN PDF 列表缺少标题')
+                            doc.update(format='pdf', title=title, listing_url=response.url)
+                    elif self.name in ('treasury', 'cftc', 'fincen', 'whitehouse'):
                         container = {
                             'treasury': 'ancestor::div[h3][1]',
                             'cftc': 'ancestor::tr[1]',
@@ -522,16 +545,20 @@ class USOfficialSpider(NewsSpider):
                     parsed['source_updated_at'] = published(times[0])[0]
             parsed['extra']['official_uuid'] = record['uuid']
             doc = {**doc, 'canonical': canonical}
-        elif doc['kind'] == 'text':
-            at, precision = published(doc['at'])
+        elif doc['kind'] == 'text' or doc.get('format') == 'pdf':
+            at, precision = published(doc['listing_date'] if doc.get('format') == 'pdf' else doc['at'])
             if response.body.startswith(b'%PDF'):
                 content = '<pre>' + escape(pdf_text(response.body)) + '</pre>'
             else:
                 content = response.text
                 validate_body(content)
+                if doc.get('format') == 'pdf':
+                    raise ValueError('官方 PDF 返回非 PDF 正文')
                 if '<' not in content:
                     content = '<pre>' + escape(content) + '</pre>'
             parsed = {'title': doc['title'], 'content_html': content, 'published_at': at, 'extra': {'content_scope': 'article', 'language': 'en', 'published_at_precision': precision, 'published_date': at.date().isoformat(), 'rule_version': RULE_VERSION, 'official_document': doc, 'attachments': []}}
+            if doc.get('format') == 'pdf':
+                parsed['extra'].update(published_at_basis='official_listing', published_at_source=doc['listing_url'])
             if doc.get('pdf'):
                 parsed['extra']['attachments'].append({'url': official_url(self.name, doc['pdf']), 'title': 'Official PDF', 'status': 'pending'})
         else:

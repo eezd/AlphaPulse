@@ -81,6 +81,93 @@ def test_treasury_real_realtime_stops_at_date_boundary_before_broken_pagination(
         list(obj.parse_listing(response(sample['url'], sample['body'], lane='history')))
 
 
+@pytest.mark.parametrize('suffix', ['/news/enforcement-actions', '/resources/advisoriesbulletinsfact-sheets'])
+def test_fincen_real_pdf_tables_finish_outside_realtime_window(trading, suffix):
+    obj = spider(trading, 'fincen')
+    sample = collection_sample('fincen', suffix)
+    obj.cursor['realtime']['entry'] = SOURCES['fincen'].entries.index(sample['url'])
+    requests = list(obj.parse_listing(response(sample['url'], sample['body'], lane='realtime')))
+    assert not obj.cursor['realtime'].get('pending')
+    assert all(not r.meta.get('document') for r in requests)
+    assert not obj.run.errors
+
+
+@pytest.mark.parametrize('suffix,title', [('/news/enforcement-actions', 'Bank of America'), ('/resources/advisoriesbulletinsfact-sheets', 'Foreign-Agent-Directed')])
+def test_fincen_real_pdf_tables_preserve_title_and_date_for_history(trading, suffix, title):
+    obj = spider(trading, 'fincen')
+    sample = collection_sample('fincen', suffix)
+    request, = obj.parse_listing(response(sample['url'], sample['body'], lane='history'))
+    doc = request.meta['document']
+    assert doc['kind'] == 'article' and doc['format'] == 'pdf'
+    assert title in doc['title'] and len(doc['listing_date']) == 10
+    assert doc['listing_url'] == sample['url']
+    assert request.url.endswith('.pdf')
+
+
+def test_fincen_pdf_keeps_listing_date_raw_evidence_and_selection(trading, monkeypatch):
+    from alphapulse.crawler.spiders import us_official
+    obj = spider(trading, 'fincen')
+    doc = {'url': 'https://www.fincen.gov/system/files/crypto.pdf', 'kind': 'article', 'format': 'pdf', 'title': 'Crypto exchange consent order', 'listing_date': '2026-11-03', 'listing_url': SOURCES['fincen'].entries[1]}
+    obj.cursor['realtime'].update(pending=[doc], entry=len(SOURCES['fincen'].entries))
+    monkeypatch.setattr(us_official, 'pdf_text', lambda body: 'This enforcement action concerns a virtual currency exchange financial institution.')
+    request = Request(doc['url'], meta={'lane': 'realtime', 'document': doc, 'raw_response_id': 12})
+    async def collect():
+        return [item async for item in obj.parse_document(Response(doc['url'], body=b'%PDF-test', request=request))]
+    item, = asyncio.run(collect())
+    assert item['published_at'] == datetime(2026, 11, 3, tzinfo=UTC)
+    assert item['raw_response_id'] == 12
+    assert item['extra']['published_at_precision'] == 'date'
+    assert item['extra']['published_at_basis'] == 'official_listing'
+    assert item['extra']['selection_reasons']
+    assert doc['url'] in obj.cursor['checked']
+
+
+def test_fincen_invalid_pdf_remains_a_document_gap(trading):
+    obj = spider(trading, 'fincen')
+    doc = {'url': 'https://www.fincen.gov/system/files/crypto.pdf', 'kind': 'article', 'format': 'pdf', 'title': 'Crypto exchange consent order', 'listing_date': '2026-11-03', 'listing_url': SOURCES['fincen'].entries[1]}
+    obj.cursor['realtime'].update(pending=[doc], entry=len(SOURCES['fincen'].entries))
+    async def collect():
+        return [item async for item in obj.parse_document(response(doc['url'], '<h1>Document</h1><p>The server returned an HTML document instead of the expected official PDF.</p>', lane='realtime', document=doc))]
+    assert not asyncio.run(collect())
+    assert doc['url'] not in obj.cursor.get('checked', {})
+    assert obj.cursor['document_retries'][doc['url']]['attempts'] == 1
+    assert '非 PDF' in obj.run.errors[0]
+
+
+def test_fincen_pdf_table_missing_date_fails_explicitly(trading):
+    obj = spider(trading, 'fincen')
+    body = '<main><h1>Actions</h1><table><tr><td><a href="/system/files/order.pdf">Consent order</a></td><td></td></tr></table></main>'
+    with pytest.raises(ValueError, match='发布时间'):
+        list(obj.parse_listing(response(SOURCES['fincen'].entries[1], body, lane='realtime')))
+
+
+def test_fincen_pdf_table_does_not_invent_day_for_current_month(trading):
+    obj = spider(trading, 'fincen')
+    body = '<main><h1>Actions</h1><table><tr><td><a href="/system/files/order.pdf">Consent order</a></td><td>11/2026</td></tr></table></main>'
+    with pytest.raises(ValueError, match='发布时间'):
+        list(obj.parse_listing(response(SOURCES['fincen'].entries[1], body, lane='realtime')))
+
+
+def test_cftc_commissioner_index_is_not_a_speech(trading):
+    obj = spider(trading, 'cftc')
+    body = '<main><h1>Speeches</h1><a href="/PressRoom/SpeechesTestimony/MichaelSelig/index.htm">Commissioner</a><a href="/PressRoom/SpeechesTestimony/opaselig1">Speech</a></main>'
+    request, = obj.parse_listing(response(SOURCES['cftc'].entries[1], body, lane='realtime'))
+    assert request.url.endswith('/opaselig1')
+    assert len(obj.cursor['realtime']['pending']) == 1
+
+
+def test_cftc_drops_only_confirmed_profile_gaps_from_old_cursor(trading):
+    obj = spider(trading, 'cftc')
+    profile = {'url': 'https://www.cftc.gov/PressRoom/SpeechesTestimony/MichaelSelig/index.htm', 'kind': 'article'}
+    speech = {'url': 'https://www.cftc.gov/PressRoom/SpeechesTestimony/opaselig1', 'kind': 'article'}
+    obj.cursor['realtime']['pending'] = [profile, speech]
+    obj.cursor['document_retries'] = {doc['url']: {'document': doc, 'attempts': 1, 'next_at': obj.run.started_at.timestamp() + 3600} for doc in (profile, speech)}
+    list(obj.first_requests())
+    assert profile['url'] not in obj.cursor['document_retries']
+    assert speech['url'] in obj.cursor['document_retries']
+    assert all(d['url'] != profile['url'] for d in obj.cursor['realtime'].get('pending', []))
+
+
 def test_undated_or_unordered_lists_do_not_stop_early(trading):
     obj = spider(trading, 'treasury')
     url = SOURCES[obj.name].entries[0]
