@@ -1376,3 +1376,13 @@ def test_doj_captioned_photo_is_not_a_document_gap(trading):
     item, = asyncio.run(collect())
     assert item['extra']['attachments'] == []
     assert not obj.cursor.get('attachment_retries')
+
+
+def test_sec_uses_official_dateline_not_last_reviewed_date():
+    body = '''<main><h1>SEC regulatory announcement</h1>
+    <div class="field--name-dynamic-twig-fieldnode-press-release-lead-in">Washington D.C., Sept. 30, 2026 —</div>
+    <div class="node-details-layout__main-region__content"><div class="field--name-body">The Commission proposes digital asset market rules for regulated financial institutions.</div></div>
+    <div class="date-modified">Last Reviewed or Updated: November 5, 2026</div></main>'''
+    item = article('sec', body, 'https://www.sec.gov/newsroom/press-releases/example')
+    assert item['published_at'] == datetime(2026, 9, 30, tzinfo=UTC)
+    assert item['extra']['published_at_precision'] == 'date'

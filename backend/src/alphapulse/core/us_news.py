@@ -69,6 +69,7 @@ def published(value: str) -> tuple[datetime, str]:
     if not isinstance(value, str):
         raise ValueError('官方材料缺少可识别的发布时间')
     value = value.strip().replace('\xa0', ' ')
+    value = re.sub(r'\bSept(?=\.? \d)', 'Sep', value)
     if re.fullmatch(r'\d{4}-\d{2}-\d{2}', value):
         return datetime.fromisoformat(value).replace(tzinfo=UTC), 'date'
     try:
@@ -120,6 +121,8 @@ def article(source: str, html: str, url: str, *, release_date: str | None = None
     if not title:
         raise ValueError('官方正文缺少标题')
     values = sel.css('meta[property="article:published_time"]::attr(content), meta[name="DC.date.issued"]::attr(content), meta[name="dcterms.date"]::attr(content), time::attr(datetime)').getall()
+    if source == 'sec':
+        values += sel.css('.field--name-dynamic-twig-fieldnode-press-release-lead-in').xpath('normalize-space(.)').getall()
     for script in sel.css('script[type="application/ld+json"]::text').getall():
         try:
             data = json.loads(script)
