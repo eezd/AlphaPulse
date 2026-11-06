@@ -54,6 +54,49 @@ def validate_evidence(refs, articles):
         if source is None or not ref.quote.strip() or not any(ref.quote in (source.get(k) or '') for k in ('title', 'summary', 'content')):
             raise ValueError('模型证据并非对应文章原文引用')
 
+def align_quotes(value, articles):
+    """Recover unique original spans only when punctuation-adjacent whitespace differs."""
+    punctuation = set('，。！？；：、,.;:!?“”‘’"\'()（）[]【】')
+    def normalized(text):
+        chars, positions = [], []
+        for match in re.finditer(r'\S|\s+', text):
+            part = match.group()
+            if part.isspace() and ((match.start() and text[match.start()-1] in punctuation)
+                    or (match.end() < len(text) and text[match.end()] in punctuation)):
+                continue
+            chars.extend(part)
+            positions.extend(range(match.start(), match.end()))
+        return ''.join(chars), positions
+    changes = []
+    def visit(item, path):
+        if isinstance(item, list):
+            for i, child in enumerate(item): visit(child, f'{path}.{i}')
+        elif isinstance(item, dict):
+            if 'article_id' in item and 'quote' in item:
+                quote = item['quote']
+                source = articles.get(item['article_id'], {})
+                if not quote.strip() or any(quote in (source.get(k) or '') for k in ('title','summary','content')):
+                    return
+                needle, _ = normalized(quote)
+                matches = []
+                if needle:
+                    for field in ('title','summary','content'):
+                        original = source.get(field) or ''
+                        haystack, positions = normalized(original)
+                        start = haystack.find(needle)
+                        while start >= 0:
+                            matches.append(original[positions[start]:positions[start+len(needle)-1]+1])
+                            start = haystack.find(needle, start+1)
+                if len(matches) == 1 and len(matches[0]) <= 500:
+                    item['quote'] = matches[0]
+                    changes.append({'path':path+'.quote','original':quote,'replacement':matches[0],
+                                    'reason':'unique_punctuation_whitespace_alignment'})
+            else:
+                for key, child in item.items(): visit(child, f'{path}.{key}')
+    visit(value, '')
+    return changes
+
+
 def validate_event(result, articles):
     if result.excluded_article_ids:
         raise ValueError('事件包含不相关文章：'+str(result.excluded_article_ids))

@@ -14,6 +14,7 @@ from alphapulse.news_research.pipeline import (
     validate_evidence,
     Evidence,
     validate_event,
+    align_quotes,
     extract_articles,
     compact_extractions,
 )
@@ -72,6 +73,22 @@ def validate_keywords(result, source):
             for alias in keyword.aliases
         ):
             raise ValueError("关键词别名必须实际出现在本篇原文中")
+
+
+def clean_aliases(result, source):
+    """Retain every TAG; audit invalid aliases only when a valid alias remains."""
+    cleaned = result.model_copy(deep=True)
+    changes = []
+    for i, keyword in enumerate(cleaned.keywords):
+        valid = [alias for alias in keyword.aliases if alias.strip() and any(
+            alias in (source.get(field) or '') for field in ('title','summary','content'))]
+        if not valid:
+            raise ValueError('关键词没有任何原文有效别名')
+        if valid != keyword.aliases:
+            changes.append({'path':f'keywords.{i}.aliases','original':keyword.aliases,
+                            'replacement':valid,'reason':'aliases_absent_from_source'})
+            keyword.aliases = valid
+    return cleaned, changes
 
 
 def validate_assignment(result, source, candidate_ids, keywords):
@@ -462,7 +479,10 @@ async def _process_package(identifier, config, expected_stage):
                 IndexResult if stage == "index" else Assignment,
             )
             if stage == "index":
-                validate_keywords(output, source)
+                cleaned, changes = clean_aliases(output, source)
+                validate_keywords(cleaned, source)
+                output = cleaned
+                attempt.rules = {**attempt.rules, "output_adjustments": changes}
             else:
                 validate_assignment(output, source, {e.id for e in catalog}, payload["keywords"])
             async with publication_lock:
@@ -691,14 +711,15 @@ class Research(ResearchTools):
                             .limit(20)
                         )
                         result = [
-                            {"id": r.id, "title": r.title, "tags": r.tags} for r in rows
+                            {"id": r.id, "title": r.title, "tags": [t for t in r.tags
+                             if any(term.lower() in t.lower() for term in terms[:6])]} for r in rows
                         ]
                     else:
                         # Retain the phrase in addition to the bounded search terms.
                         condition, score = package_matching([query, *terms[:6]], vocabulary)
                         phrase, _ = package_matching([query], vocabulary)
                         rows = await session.execute(
-                            select(Package, NewsItem.content_hash)
+                            select(Package, NewsItem.content_hash, NewsItem.title)
                             .join(NewsItem)
                             .where(condition)
                             .order_by(
@@ -710,9 +731,13 @@ class Research(ResearchTools):
                             .limit(20)
                         )
                         result = [
-                            {"id": r.id, "news_id": r.news_id,
-                             "keywords": r.keywords if r.content_hash == source_hash else []}
-                            for r, source_hash in rows
+                            {"id": r.id, "news_id": r.news_id, "title": title,
+                             "keywords": [{"canonical": k["canonical"], "aliases": [a for a in k["aliases"]
+                                 if any(t.lower() in a.lower() for t in terms[:6])]}
+                                 for k in r.keywords if any(t.lower() in word.lower()
+                                     for t in terms[:6] for word in [k["canonical"], *k["aliases"]])]
+                                 if r.content_hash == source_hash else []}
+                            for r, source_hash, title in rows
                         ]
                 elif name == "read_package":
                     row = await session.get(Package, arguments["id"])
@@ -902,10 +927,13 @@ async def process_event(identifier, config, force=False):
             )
             if preparations:
                 used = {"preparation": preparations, "research": used}
-            validate_event(
-                output,
-                {**{a["id"]: a for a in payload["articles"]}, **researcher.sources},
-            )
+            sources = {**{a["id"]: a for a in payload["articles"]}, **researcher.sources}
+            raw_output = output.model_dump(mode="json")
+            changes = align_quotes(raw_output, sources)
+            if changes:
+                output = ResearchResult.model_validate(raw_output)
+            version.rules = {**version.rules, "output_adjustments": changes}
+            validate_event(output, sources)
             if output.id != identifier:
                 raise ValueError("返回事件ID不匹配")
             package_news = {p.id: n.id for p, m, n in members}

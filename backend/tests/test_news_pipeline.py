@@ -174,3 +174,75 @@ def test_oversized_scope_fails_before_model_call_with_article_identity(pipeline,
         asyncio.run(pipeline.extract_articles(SimpleNamespace(max_tokens=100, context_window=1500), '规则',
             [{'id': 9, 'title': '标题', 'content': '正文'}], scopes=[{'news_id': 9, 'scope_quote': '长' * 5000}]))
     complete.assert_not_awaited()
+
+
+def test_alias_cleanup_preserves_tags_valid_aliases_and_raw_output(trading):
+    from alphapulse.news_research.contracts import IndexResult
+    from alphapulse.news_research.service import clean_aliases, validate_keywords
+    raw = IndexResult(keywords=[dict(canonical='插件调用计费', aliases=['插件调用','插件调用收费'], quote='插件调用单独计费')])
+    source = {'id':1, 'content':'插件调用单独计费'}
+    output, changes = clean_aliases(raw, source)
+    validate_keywords(output, source)
+    assert output.keywords[0].aliases == ['插件调用']
+    assert raw.keywords[0].aliases == ['插件调用','插件调用收费']
+    assert changes[0]['original'] == raw.keywords[0].aliases
+    with pytest.raises(ValueError, match='没有任何原文有效别名'):
+        clean_aliases(raw, {'id':1,'content':'其他文字'})
+
+
+@pytest.mark.parametrize('source,quote,corrected', [
+    ('官员“感到担忧”。','官员“感到担忧” 。',True),
+    ('官员“感到担忧”。官员“感到担忧”。','官员“感到担忧” 。',False),
+    ('金额100美元。','金额1000美元。',False),
+    ('US D company.','USD company.',False),
+])
+def test_quote_alignment_only_recovers_unique_punctuation_whitespace(pipeline, source, quote, corrected):
+    value = {'claims':[{'evidence_refs':[{'article_id':-2,'quote':quote}]}]}
+    changes = pipeline.align_quotes(value, {-2:{'content':source}})
+    assert bool(changes) == corrected
+    if corrected:
+        pipeline.validate_evidence([pipeline.Evidence.model_validate(value['claims'][0]['evidence_refs'][0])], {-2:{'content':source}})
+        assert changes[0]['original'] == quote
+    else:
+        assert value['claims'][0]['evidence_refs'][0]['quote'] == quote
+
+
+def test_oversized_tool_response_is_not_delivered_or_registered(trading, monkeypatch):
+    from alphapulse.news_research.tools import Research
+    from alphapulse.news_research import model
+    from alphapulse.ai.llm import Completion
+    from pydantic import BaseModel
+    class Result(BaseModel):
+        facts: str
+    reader = Research()
+    calls = []
+    async def stream(provider, system, messages, tools, effort):
+        calls.append(messages.copy())
+        if len(calls) == 1:
+            yield Completion(tool_calls=[{'id':'1','name':'read_news','arguments':{'id':99}}],usage={'input_tokens':10})
+        else:
+            assert [t.name for t in tools] == ['submit']
+            assert 'context_limit' in messages[-1]['result']
+            assert 'x'*100 not in messages[-1]['result']
+            yield Completion(tool_calls=[{'id':'2','name':'submit','arguments':{'facts':'证据不足'}}],usage={'input_tokens':20})
+    async def tool(name, args):
+        result = {'article_id':-1,'content':'x'*20000}
+        reader.sources[-1] = result
+        reader.provided_news[99] = -1
+        reader.records.append({'tool':name,'arguments':args,'result':result})
+        return result
+    monkeypatch.setattr(reader, 'tool', tool)
+    monkeypatch.setattr(model.llm, 'stream', stream)
+    output, usage = asyncio.run(reader.run(SimpleNamespace(model='test',reasoning_effort='medium',max_tokens=100,context_window=8000), '规则', {}, Result))
+    assert output.facts == '证据不足' and len(usage['rounds']) == 2
+    assert not reader.sources and not reader.provided_news
+    assert reader.records[0]['result']['status'] == 'context_limit'
+    assert len(reader.records[0]['undelivered_result']['content']) == 20000
+
+
+def test_undelivered_source_is_not_restored_as_read(trading):
+    from alphapulse.news_research.tools import Research
+    reader = Research()
+    reader.restore([{'tool':'read_news','arguments':{'id':99},
+        'result':{'status':'context_limit'},'undelivered_result':{'article_id':-1,'content':'原文'}}])
+    assert not reader.sources and not reader.cache and not reader.provided_news

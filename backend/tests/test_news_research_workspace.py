@@ -221,7 +221,7 @@ def test_retry_refreshes_local_search_with_current_vocabulary(
     session = AsyncMock()
     session.__aenter__.return_value = session
     session.execute.return_value = [
-        (N(id=2, news_id=12, content_hash="current", keywords=[]), "current")
+        (N(id=2, news_id=12, content_hash="current", keywords=[]), "current", "Fresh news")
     ]
     session.scalars.return_value = [N(id=2, title="Fresh event", tags=["binance"])]
     monkeypatch.setattr(service, "SessionLocal", lambda: session)

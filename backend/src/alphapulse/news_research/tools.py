@@ -1,5 +1,6 @@
 """Read-only news and external research tools with bounded calls."""
 import json
+import copy
 from sqlalchemy import select, or_
 from pydantic import BaseModel, Field
 from alphapulse.ai import llm
@@ -47,18 +48,20 @@ class Research:
     def tool_specs():
         return [llm.ToolSpec(n, description, model.model_json_schema()) for n, (model, description) in TOOLS.items()]
 
-    def fits_messages(self, provider, system, messages, schema):
+    def fits_messages(self, provider, system, messages, schema, *, final=False):
         return fits_context(provider, system, {'messages': messages, 'tools': [
-            {'name': t.name, 'description': t.description, 'parameters': t.parameters} for t in self.tool_specs()]}, schema)
+            {'name': t.name, 'description': t.description, 'parameters': t.parameters} for t in ([] if final else self.tool_specs())]}, schema)
 
     def fits(self, provider, system, payload, schema):
-        return self.fits_messages(provider, system, [{'role': 'user', 'text': json.dumps(payload, ensure_ascii=False)}], schema)
+        reserved = copy.copy(provider)
+        reserved.context_window -= min(32768, max(0, (provider.context_window-provider.max_tokens)//5))
+        return self.fits_messages(reserved, system, [{'role': 'user', 'text': json.dumps(payload, ensure_ascii=False)}], schema)
 
     def restore(self, records):
         for record in records:
             name, args, result = record['tool'], record['arguments'], record['result']
             if name not in TOOLS: continue
-            if isinstance(result, dict) and 'error' in result: continue
+            if isinstance(result, dict) and ('error' in result or result.get('status') == 'context_limit'): continue
             # Membership and revisions can change between attempts; reread local objects.
             if name in ('read_event', 'read_package'): continue
             self.cache[name+json.dumps(args, sort_keys=True)] = result
@@ -121,12 +124,14 @@ class Research:
         messages = [{'role': 'user', 'text': json.dumps(payload, ensure_ascii=False)}]
         usages = self.usages = []
         from alphapulse.news_research.progress import step, current
+        final_only = False
         for round_no in range(9):
             if current.get() is not None: step('模型研判', round=round_no+1, model=provider.model, reasoning_effort=provider.reasoning_effort)
-            if not self.fits_messages(provider, system, messages, schema):
+            final_only |= round_no == 8
+            if not self.fits_messages(provider, system, messages, schema, final=final_only):
                 raise ValueError('研究上下文不足，请增大上下文配置；证据未截断')
             completion = None
-            async for item in model_stream(provider, system, messages, [*specs, submit] if round_no < 8 else [submit], provider.reasoning_effort):
+            async for item in model_stream(provider, system, messages, [submit] if final_only else [*specs, submit], provider.reasoning_effort):
                 if isinstance(item, llm.Completion): completion = item
             if completion is not None: usages.append(completion.usage)
             if completion is None or completion.truncated: raise ValueError('研究输出未完成或被截断')
@@ -135,14 +140,28 @@ class Research:
                 if len(calls) != 1: raise ValueError('提交结果不能同时执行查询')
                 result = await validate_submission(provider, system, messages, schema, completion, usages)
                 return result, {'rounds': usages, 'tools': self.records}
-            if round_no == 8 or not calls: raise ValueError('研究模型未提交结果')
+            if final_only or not calls: raise ValueError('研究模型未提交结果')
             assistant = {'role': 'assistant', 'text': completion.text, 'tool_calls': calls}
             if completion.thinking_blocks: assistant['thinking_blocks'] = completion.thinking_blocks
             messages.append(assistant)
-            for call in calls:
-                try: result = await self.tool(call['name'], call['arguments'])
+            for index, call in enumerate(calls):
+                snapshot = {name: copy.deepcopy(getattr(self, name)) for name in (
+                    'sources', 'provided_news', 'provided_packages', 'read_event_versions', 'read_event_ids')}
+                records_before = len(self.records)
+                try: result = await self.tool(call['name'], call['arguments']) if not final_only else {'status':'context_limit', 'instruction':'停止查询，依据已有证据提交并说明缺口。'}
                 except Exception as error:
                     result = {'error': str(error)}
                     self.records.append({'tool': call['name'], 'arguments': call['arguments'], 'result': result})
-                messages.append({'role': 'tool', 'tool_call_id': call['id'], 'result': json.dumps(result, ensure_ascii=False, default=str)})
+                response = {'role':'tool', 'tool_call_id':call['id'], 'result':json.dumps(result, ensure_ascii=False, default=str)}
+                remaining = [{'role':'tool', 'tool_call_id':c['id'], 'result':json.dumps({'status':'context_limit'})} for c in calls[index+1:]]
+                if not self.fits_messages(provider, system, [*messages, response, *remaining], schema, final=True):
+                    for name, value in snapshot.items(): setattr(self, name, value)
+                    result = {'status':'context_limit', 'instruction':'资料未完整交付，不得引用；依据已有证据提交并说明缺口。'}
+                    for record in self.records[records_before:]:
+                        record['undelivered_result'] = record['result']
+                        record['result'] = result
+                    response['result'] = json.dumps(result, ensure_ascii=False)
+                    final_only = True
+                messages.append(response)
+                if not self.fits_messages(provider, system, messages, schema): final_only = True
         raise ValueError('研究轮次已用尽')
