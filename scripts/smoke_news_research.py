@@ -393,14 +393,20 @@ async def main():
             assert report.json()["data"]["start_at"] == "2026-09-30T16:00:00Z"
             assert set(report.json()["data"]["outside"]) == {"unprocessed", "stale", "pending", "processing", "failed"}
         assert (await client.get("/api/risk/settings")).json()["data"]["start_at"] == previous_start
+        assert (await client.post("/api/risk/enable", json={"start_at": selected_start})).status_code == 422
+        settings = (await client.get("/api/risk/settings")).json()["data"]
+        saved = await client.put("/api/risk/settings", json={**config, "start_at": selected_start, "base_revision": settings["control_revision"]})
+        assert saved.status_code == 200, saved.text
         with patch.object(model_service, "complete", validation):
-            response = await client.post("/api/risk/enable", json={"start_at": selected_start})
+            response = await client.post("/api/risk/enable")
             assert response.status_code == 200, response.text
             assert response.json()["data"]["start_at"] == "2026-09-30T16:00:00Z"
         assert (await client.get("/api/risk/settings")).json()["data"][
             "enabled"
         ] is True
         assert (await client.get("/api/risk/settings")).json()["data"]["start_at"] == "2026-09-30T16:00:00Z"
+        fixed_anchor = (await client.get("/api/risk/settings")).json()["data"]["realtime_from"]
+        assert fixed_anchor is not None
         assert (await client.post("/api/risk/enable")).status_code == 409
         assert (await client.post("/api/risk/pause")).status_code == 200
         for action in ("pause", "save"):
@@ -421,12 +427,13 @@ async def main():
                 return await validation(provider, skill, payload, schema)
 
             with patch.object(model_service, "complete", interrupted_validation):
-                response = await client.post("/api/risk/enable", json={"start_at": "2026-09-01T00:00:00Z"})
+                response = await client.post("/api/risk/enable")
                 assert response.status_code == 409, response.text
             assert (await client.get("/api/risk/settings")).json()["data"][
                 "enabled"
             ] is False
             assert (await client.get("/api/risk/settings")).json()["data"]["start_at"] == "2026-09-30T16:00:00Z"
+            assert (await client.get("/api/risk/settings")).json()["data"]["realtime_from"] == fixed_anchor
         package_id = (await client.get(f"/api/risk/news/{news_id}/packages")).json()[
             "data"
         ][0]["id"]

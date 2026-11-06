@@ -5,6 +5,7 @@ from sqlalchemy import select, or_, and_, exists, func, any_, case
 from alphapulse.models import NewsItem
 from alphapulse.news_research.models import Batch, BatchPackage, BatchEvent, Package, Event, Membership, Attempt
 from alphapulse.news_research.service import enroll
+from alphapulse.news_research.scheduling import scoped_event, ready_event
 
 
 async def coverage(session, start_at, cutoff=None):
@@ -48,13 +49,22 @@ async def coverage(session, start_at, cutoff=None):
 
 async def freeze(session, settings):
     cutoff = datetime.now(UTC)
-    ids = list(await session.scalars(select(NewsItem.id).outerjoin(Package, Package.news_id == NewsItem.id).where(
-        or_(and_(NewsItem.published_at >= settings.start_at, NewsItem.published_at <= cutoff, Package.id.is_(None)),
-            and_(Package.id.is_not(None), Package.content_hash != NewsItem.content_hash)))))
-    existing_ids = list(await session.scalars(select(Package.id).where(
-        Package.state.in_(['index_pending', 'assign_pending', 'index_failed', 'assign_failed']))))
-    event_cutoff = list(await session.scalars(select(Event.id).where(Event.state == "pending")))
+    scope = [NewsItem.published_at >= settings.start_at, NewsItem.published_at <= cutoff]
+    realtime_from = getattr(settings, 'realtime_from', None)
+    if realtime_from is not None:
+        scope.append(NewsItem.published_at < realtime_from)
+    candidates = select(NewsItem.id).outerjoin(Package, Package.news_id == NewsItem.id).where(
+        *scope, or_(Package.id.is_(None), Package.content_hash != NewsItem.content_hash,
+                    Package.state.in_(['index_pending', 'assign_pending'])))
+    ids = list(await session.scalars(candidates.order_by(NewsItem.published_at, NewsItem.id).limit(30)))
     await enroll(session, ids)
+    existing_ids = list(await session.scalars(select(Package.id).where(Package.news_id.in_(ids))))
+    deferred = exists(select(BatchEvent.batch_id).where(BatchEvent.event_id == Event.id,
+        BatchEvent.revision == Event.revision, BatchEvent.state == 'deferred'))
+    event_query = select(Event.id).where(Event.state == 'pending', scoped_event(settings), ready_event(), Event.due_at <= cutoff, ~deferred)
+    if realtime_from is not None:
+        event_query = event_query.where(~Event.realtime_pending)
+    event_cutoff = list(await session.scalars(event_query.order_by(Event.due_at, Event.id).limit(30)))
     # Failed items are reported once; only explicit retries or new source revisions rerun them.
     previous_failure = exists(select(BatchPackage.batch_id).where(
         BatchPackage.package_id == Package.id, BatchPackage.content_hash == Package.content_hash,
@@ -63,8 +73,6 @@ async def freeze(session, settings):
         or_(Package.id == any_(existing_ids), Package.news_id == any_(ids)), or_(
         Package.state.in_(['index_pending', 'assign_pending']),
         Package.state.in_(['index_failed', 'assign_failed']) & ~previous_failure))))
-    deferred = exists(select(BatchEvent.batch_id).where(BatchEvent.event_id == Event.id,
-        BatchEvent.revision == Event.revision, BatchEvent.state == 'deferred'))
     events = list(await session.scalars(select(Event).where(Event.id == any_(event_cutoff), Event.state == 'pending', ~deferred)))
     if not packages and not events:
         return None
@@ -83,7 +91,7 @@ async def freeze(session, settings):
     return batch
 
 
-async def actions(session, batch, active, slots):
+async def actions(session, batch, active, slots, settings=None):
     """Return stage/ID pairs; callers commit before launching and never overlap phases."""
     if batch.phase == 'assigning':
         rows = list(await session.execute(select(BatchPackage, Package, NewsItem).join(
@@ -94,7 +102,9 @@ async def actions(session, batch, active, slots):
         for item, package, news in rows:
             if item.state != 'pending':
                 continue
-            if item.content_hash != news.content_hash or item.content_hash != package.content_hash:
+            if settings is not None and news.published_at < settings.start_at:
+                item.state = 'range_paused'
+            elif item.content_hash != news.content_hash or item.content_hash != package.content_hash:
                 item.state = 'deferred'
             elif package.state == 'done':
                 item.state = 'done'
@@ -102,10 +112,12 @@ async def actions(session, batch, active, slots):
                 item.state = 'failed'
             elif package.state in ('index_pending', 'assign_pending'):
                 stage = 'index' if package.state == 'index_pending' else 'assign'
-                if (stage, package.id) not in active and len(result) < slots and (stage != 'assign' or not assigning):
+                if not any(identifier == package.id and task != 'event' for task, identifier in active) and len(result) < slots and (stage != 'assign' or not assigning):
                     result.append((stage, package.id))
                     assigning |= stage == 'assign'
-        if any(item.state == 'pending' for item, _, _ in rows) or active:
+        package_ids = {package.id for _, package, _ in rows}
+        batch_active = any(stage != 'event' and identifier in package_ids for stage, identifier in active)
+        if any(item.state == 'pending' for item, _, _ in rows) or batch_active:
             return result
         # Memberships now include events created by this batch. Existing affected events
         # were frozen up front, including memberships that have since been removed.
@@ -131,7 +143,13 @@ async def actions(session, batch, active, slots):
     for item, event in rows:
         if item.state not in ('pending', 'urgent_pending', 'processing') or ('event', event.id) in active:
             continue
-        if item.revision != event.revision:
+        if settings is not None and not await session.scalar(select(Event.id).where(Event.id == event.id, scoped_event(settings))):
+            item.state = 'range_paused'
+        elif settings is not None and event.realtime_pending:
+            item.state = 'realtime'
+        elif event.due_at > datetime.now(UTC):
+            item.state = 'aggregating'
+        elif item.revision != event.revision:
             item.state = 'deferred'
         elif event.state == 'done' or event.state == 'retired':
             item.state = 'done'
@@ -143,11 +161,17 @@ async def actions(session, batch, active, slots):
             invalid = await session.scalar(select(Membership.event_id).join(Package).join(NewsItem).where(
                 Membership.event_id == event.id, or_(Package.state != 'done', Package.content_hash != NewsItem.content_hash)).limit(1))
             if invalid:
-                item.state = 'deferred'
+                item.state = 'blocked'
             elif len(result) < slots:
                 item.state = 'processing'
                 result.append(('event', event.id))
-    if not result and not active and all(item.state not in ('pending', 'urgent_pending', 'processing') for item, _ in rows):
+    event_ids = {event.id for _, event in rows}
+    batch_active = any(stage == 'event' and identifier in event_ids for stage, identifier in active)
+    active_packages = {identifier for stage, identifier in active if stage != 'event'}
+    if active_packages:
+        batch_active |= bool(await session.scalar(select(BatchPackage.package_id).where(
+            BatchPackage.batch_id == batch.id, BatchPackage.package_id.in_(active_packages)).limit(1)))
+    if not result and not batch_active and all(item.state not in ('pending', 'urgent_pending', 'processing') for item, _ in rows):
         bad = any(item.state in ('failed', 'deferred') for item, _ in rows)
         bad |= bool(await session.scalar(select(BatchPackage.batch_id).where(
             BatchPackage.batch_id == batch.id, BatchPackage.state.in_(['failed', 'deferred'])).limit(1)))
@@ -163,5 +187,5 @@ async def progress(session):
     result = {'id': batch.id, 'phase': batch.phase, 'cutoff_at': batch.cutoff_at}
     for name, model in [('packages', BatchPackage), ('events', BatchEvent)]:
         counts = Counter(await session.scalars(select(model.state).where(model.batch_id == batch.id)))
-        result.update({name + '_total': sum(counts.values()), **{name + '_' + s: counts[s] for s in ('done', 'failed', 'deferred')}})
+        result.update({name + '_total': sum(counts.values()), **{name + '_' + s: counts[s] for s in ('done', 'failed', 'deferred', 'range_paused', 'blocked', 'realtime')}})
     return result

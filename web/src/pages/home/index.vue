@@ -6,7 +6,14 @@ import * as api from "@@/apis/news-research"
 import { listProviderModelsApi, listProvidersApi } from "@@/apis/settings"
 import { listSkillTreeApi } from "@@/apis/skills"
 import { EFFORTS } from "@@/constants/ai"
+import dayjs from "dayjs"
+
+import timezone from "dayjs/plugin/timezone"
+import utc from "dayjs/plugin/utc"
 import { useUserStore } from "@/pinia/stores/user"
+
+dayjs.extend(utc)
+dayjs.extend(timezone)
 
 const vocabularyOpened = ref(false)
 const vocabulary = ref<Vocabulary>({ revision: 0, entries: [] })
@@ -90,8 +97,19 @@ const settingsOpened = ref(false)
 const enabled = ref(false)
 const startAt = ref<Date | null>(null)
 const savedStartAt = ref<Date | null>(null)
+const settingsRevision = ref(0)
+const queue = ref<{ running: number, draining: boolean, realtime?: Record<string, number>, backfill?: Record<string, number> } | null>(null)
+function disabledBackfillDate(date: Date) {
+  return dayjs.tz(dayjs(date).format("YYYY-MM-DD"), "Asia/Shanghai").valueOf() > Date.now()
+}
+const startText = computed({
+  get: () => startAt.value ? dayjs(startAt.value).tz("Asia/Shanghai").format("YYYY-MM-DD HH:mm:ss") : "",
+  set: (value: string) => {
+    startAt.value = value ? dayjs.tz(value, "Asia/Shanghai").toDate() : null
+  }
+})
 const selectedStartAt = computed({
-  get: () => enabled.value ? savedStartAt.value : startAt.value,
+  get: () => enabled.value && !settingsOpened.value ? savedStartAt.value : startAt.value,
   set: (value: Date | null) => {
     startAt.value = value
   }
@@ -134,6 +152,7 @@ async function load() {
     const [settings, rows] = await Promise.all([api.getSettingsApi(), tab.value === "events" ? api.listEventsApi(q.value, page.value) : api.listPackagesApi(q.value, page.value)])
     if (!valid() || seq !== sequence) return
     enabled.value = settings.enabled
+    queue.value = settings.queue ?? null
     if (!startAt.value || startAt.value.getTime() === savedStartAt.value?.getTime()) startAt.value = new Date(settings.start_at)
     savedStartAt.value = new Date(settings.start_at)
     batch.value = settings.batch ?? null
@@ -166,13 +185,7 @@ async function checkCoverage() {
 }
 async function enable() {
   if (!valid()) return
-  if (!startAt.value || !Number.isFinite(startAt.value.getTime()) || startAt.value.getTime() > Date.now()) {
-    ElMessage.error("请选择不晚于当前时间的回补起始时间")
-    return
-  }
-  const start = startAt.value.toISOString()
-  const result = await api.enableApi(start)
-  if (valid() && selectedStartAt.value?.toISOString() === start) coverage.value = result
+  await api.enableApi()
 }
 async function openEvent(id: number) {
   eventId = id
@@ -248,6 +261,8 @@ async function settings() {
   providers.value = choices
   skills.value = nodes.filter(s => s.scope === "news" && s.kind === "skill")
   if (value.config.index && value.config.research) config.value = value.config as Config
+  startAt.value = new Date(value.start_at)
+  settingsRevision.value = value.control_revision
   settingsOpened.value = true
 }
 async function action(fn: () => Promise<unknown>) {
@@ -275,7 +290,12 @@ async function retryPackage() {
   if (id) await action(() => api.retryPackageApi(id))
 }
 async function save() {
-  await action(() => api.saveSettingsApi(config.value))
+  if (!valid() || busy.value) return
+  if (!startAt.value || !Number.isFinite(startAt.value.getTime()) || startAt.value.getTime() > Date.now()) {
+    ElMessage.error("请选择不晚于当前时间的回补起始时间")
+    return
+  }
+  await action(() => api.saveSettingsApi({ ...config.value, start_at: startAt.value!.toISOString(), base_revision: settingsRevision.value }))
   if (valid()) settingsOpened.value = false
 }
 async function prepareSkills() {
@@ -364,7 +384,7 @@ onBeforeUnmount(() => {
       <el-button @click="settings">
         模型与 Skills
       </el-button>
-      <el-button :loading="busy" :disabled="!enabled && (loading || error || !startAt)" @click="action(enabled ? api.pauseApi : enable)">
+      <el-button :loading="busy" :disabled="!enabled && (loading || error || queue?.draining)" @click="action(enabled ? api.pauseApi : enable)">
         {{ enabled ? '暂停新任务' : '启用两阶段处理' }}
       </el-button>
       <el-button @click="openVocabulary">
@@ -377,45 +397,20 @@ onBeforeUnmount(() => {
     <p class="mb-4 text-sm text-slate-500">
       新闻包保存原文和关键词；事件汇集相关报道，持续更新判断与时间线。
     </p>
-    <div class="mb-4 rounded border border-slate-200 p-3">
-      <div class="flex flex-wrap items-center gap-3">
-        <label for="research-start-at">回补起始时间</label>
-        <el-date-picker
-          id="research-start-at"
-          v-model="selectedStartAt"
-          type="datetime"
-          :clearable="false"
-          :disabled="enabled || busy"
-          :disabled-date="(date: Date) => date.getTime() > Date.now()"
-          placeholder="选择回补起始时间"
-        />
-        <span class="text-sm text-slate-500">按浏览器本地时区</span>
-        <el-button :loading="coverageLoading" :disabled="!startAt || busy" @click="checkCoverage">
-          核查遗漏
-        </el-button>
-      </div>
-      <p class="mt-2 text-sm text-slate-500">
-        启用时保存起点，自动核查并补齐该时间以来已采集的新闻；先完成关键词与归属，再集中研究事件。调整起点不会取消已有队列。
-      </p>
-      <p v-if="coverage" class="mt-2 text-sm">
-        范围内 {{ coverage.total }} 条，全部阶段已完成 {{ coverage.completed }} 条，未完成 {{ coverage.unprocessed }} 条：
-        未入队 {{ coverage.missing }}，原文更新需重判 {{ coverage.stale }}，待处理 {{ coverage.pending }}，处理中 {{ coverage.processing }}，失败 {{ coverage.failed }}。
-        失败项需手动重试，当前批次以外的遗漏排入下一批。
-      </p>
-      <p v-if="coverage && coverage.outside.unprocessed" class="mt-2 text-sm text-amber-700">
-        范围外另有已入队但未完成的新闻 {{ coverage.outside.unprocessed }} 条：
-        原文更新需重判 {{ coverage.outside.stale }}，待处理 {{ coverage.outside.pending }}，处理中 {{ coverage.outside.processing }}，失败 {{ coverage.outside.failed }}。
-        已有任务继续按批次处理，失败项需手动重试。
-      </p>
-      <p v-if="coverageError" class="mt-2 text-sm text-red-600">
-        核查失败，请重试。
-      </p>
-    </div>
+    <p class="mb-4 text-sm text-slate-500">
+      实时任务优先取得空闲并发；历史回补至 {{ savedStartAt ? dayjs(savedStartAt).tz("Asia/Shanghai").format("YYYY-MM-DD HH:mm:ss") : '—' }}（北京时间）。
+      <span v-if="queue?.draining">正在完成 {{ queue.running }} 个已接收调用，收尾后可重新启用。</span>
+    </p>
+    <p v-if="queue" class="mb-4 text-sm text-slate-500">
+      实时队列：等待索引 {{ queue.realtime?.index_pending ?? 0 }}，等待归属 {{ queue.realtime?.assign_pending ?? 0 }}；
+      回补队列：等待索引 {{ queue.backfill?.index_pending ?? 0 }}，等待归属 {{ queue.backfill?.assign_pending ?? 0 }}。
+      正在调用 {{ queue.running }}；范围外暂停、失败和中断结果不明的任务不会自动重试。
+    </p>
     <p v-if="batch" class="mb-4 text-sm text-slate-500">
       批次 #{{ batch.id }} · {{ batchPhases[batch.phase] ?? batch.phase }} ·
       新闻归属 {{ batch.packages_done }}/{{ batch.packages_total }}，失败 {{ batch.packages_failed }}，延期 {{ batch.packages_deferred }} ·
       事件研究 {{ batch.events_done }}/{{ batch.events_total }}，失败 {{ batch.events_failed }}，延期 {{ batch.events_deferred }}。
-      新新闻和重试请求排入下一批，研究仅使用站内资料。
+      实时任务可中途插队；回补任务分批归属后集中研究，研究仅使用站内资料。
     </p>
     <el-alert v-if="error" title="读取失败，保留上次结果，可刷新重试" type="error" :closable="false" />
     <div class="mb-4 flex flex-wrap gap-3">
@@ -474,6 +469,9 @@ onBeforeUnmount(() => {
     <el-drawer v-model="opened" title="事件研究与时间线" size="min(820px, 100vw)">
       <el-alert v-if="detailError" title="事件详情读取失败，请重新打开重试" type="error" :closable="false" />
       <template v-if="detail">
+        <p v-if="detail.wait_reason" class="mb-3 text-amber-700">
+          {{ detail.wait_reason }}
+        </p>
         <h2>{{ detail.title }}</h2><p>{{ states[detail.state] ?? detail.state }}</p>
         <el-button :loading="busy" @click="retryEvent">
           重新研究
@@ -627,6 +625,42 @@ onBeforeUnmount(() => {
     </el-drawer>
     <el-drawer v-model="settingsOpened" title="两阶段模型与 Skills" size="min(640px, 100vw)">
       <el-form label-position="top">
+        <div class="mb-4 rounded border border-slate-200 p-3">
+          <div class="flex flex-wrap items-center gap-3">
+            <label for="research-start-at">回补起始时间</label>
+            <el-date-picker
+              id="research-start-at"
+              v-model="startText"
+              value-format="YYYY-MM-DD HH:mm:ss"
+              type="datetime"
+              :clearable="false"
+              :disabled="busy"
+              :disabled-date="disabledBackfillDate"
+              placeholder="选择回补起始时间"
+            />
+            <span class="text-sm text-slate-500">北京时间（系统时区 UTC+8）</span>
+            <el-button :loading="coverageLoading" :disabled="!startAt || busy" @click="checkCoverage">
+              核查遗漏
+            </el-button>
+          </div>
+          <p class="mt-2 text-sm text-slate-500">
+            点击“保存并暂停”后生效；重新启用时重排未完成任务。实时新闻优先插队，历史新闻分批补齐。
+          </p>
+          <p v-if="coverage" class="mt-2 text-sm">
+            范围内 {{ coverage.total }} 条，全部阶段已完成 {{ coverage.completed }} 条，未完成 {{ coverage.unprocessed }} 条：
+            未入队 {{ coverage.missing }}，原文更新需重判 {{ coverage.stale }}，待处理 {{ coverage.pending }}，处理中 {{ coverage.processing }}，失败 {{ coverage.failed }}。
+            失败项需手动重试，当前批次以外的遗漏排入下一批。
+          </p>
+          <p v-if="coverage && coverage.outside.unprocessed" class="mt-2 text-sm text-amber-700">
+            范围外已暂停自动处理的新闻 {{ coverage.outside.unprocessed }} 条：
+            原文更新需重判 {{ coverage.outside.stale }}，待处理 {{ coverage.outside.pending }}，处理中 {{ coverage.outside.processing }}，失败 {{ coverage.outside.failed }}。
+            已接收调用允许完成，扩大范围后恢复尚未完成的阶段；失败项需手动重试。
+          </p>
+          <p v-if="coverageError" class="mt-2 text-sm text-red-600">
+            核查失败，请重试。
+          </p>
+        </div>
+
         <template v-for="stage in (['index', 'research'] as const)" :key="stage">
           <h3>{{ stage === 'index' ? '第一阶段：关键词索引与事件归属' : '第二阶段：事件整体研究' }}</h3>
           <el-form-item label="模型接入">

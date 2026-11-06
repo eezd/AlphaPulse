@@ -455,3 +455,42 @@ some documents were imported: ECB dynamic index version coverage, inaccessible
 BoE speeches and CoinDesk access blocks are reported rather than labeled complete.
 The deployment lock serializes writes; crawler/calendar processes are restored in
 finally blocks. Do not start a second driver or remove its state to renew quotas.
+
+### Realtime priority and historical AI backfill
+
+Migration `dd4567890123` adds the persistent realtime boundary and pending-event
+priority, plus partial unique indexes for active package attempts and event
+versions. Pause and drain news AI before applying it; duplicate active records
+must be investigated rather than deleted to force migration success. Preserve
+originals, attempts and version history. Deployment requires the candidate's
+schema head and must leave automatic processing paused during verification.
+
+The model/Skills drawer saves the historical start time with model settings via
+**Save and pause**. New settings default to 2026-11-05 00:00 Asia/Shanghai; existing
+saved values remain intact. Settings responses expose `control_revision`,
+`realtime_from`, `timezone` and queue counts. PUT accepts optional `start_at` and
+`base_revision`; version conflicts return 409. Enable uses the saved start only;
+a differing legacy enable body returns 422. The first successful enable fixes
+`realtime_from`; later saves, pauses and restarts never move it.
+
+Publication time, not ingestion time, determines realtime membership. Realtime
+work takes the next available slot without cancelling accepted calls. Historical
+work uses batches of at most 30 originals, ordered chronologically. Saving a new
+start pauses dispatch; enabling after drain retires unfinished batch schedules
+and rebuilds from durable stage states without repeating successes. Shrinking
+history does not exclude realtime backlog. Known in-range dependencies inherit
+a waiting realtime event's priority. Out-of-range or failed members block event
+research without silently dropping evidence or retrying paid failures.
+
+Ordinary event research uses the existing five-minute quiet window with a
+15-minute maximum; urgent events become ready immediately. A running research
+call is not duplicated when newer members arrive. New changes start another
+aggregation window and obsolete output cannot overwrite current conclusions.
+After a worker interruption, started calls become failed with an unknown-result
+message and need manual retry; unclaimed work resumes normally. Strict realtime
+priority can starve historical work under sustained overload.
+
+CI additionally runs `scripts/smoke_priority_queue.py` in its disposable internal
+network with synthetic credentials and no model calls. It covers preemption,
+late historical ingestion, stable realtime eligibility, range changes,
+dependencies, aggregation, control revisions and interrupted-call recovery.

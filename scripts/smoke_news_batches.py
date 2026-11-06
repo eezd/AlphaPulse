@@ -90,6 +90,7 @@ async def main():
     await backfill_regressions(now)
     await carryover_regressions(now)
     await regressions(now, settings)
+    await queue_review_regressions(now, settings)
     await engine.dispose()
     print('Frozen batches passed: assignment barrier, single research, failures, new arrivals, restart and source revisions.')
 
@@ -208,7 +209,13 @@ async def regressions(now, settings):
     async with SessionLocal() as s:
         event = Event(title='Deferred retry', tags=[], revision=7, state='pending', due_at=now)
         previous = Batch(phase='partial', cutoff_at=now)
-        s.add_all([event, previous])
+        original = NewsItem(source_code='wscn_news', external_id='retry-member', title='retry', summary='', content_text='retry', content_hash='a'*64, url='https://example.invalid/retry', published_at=now)
+        s.add_all([event, previous, original])
+        await s.flush()
+        member = Package(news_id=original.id, content_hash=original.content_hash, state='done', keywords=[])
+        s.add(member)
+        await s.flush()
+        s.add(Membership(event_id=event.id, package_id=member.id, evidence='retry', reason='retry', change_kind='new_fact'))
         await s.flush()
         s.add(BatchEvent(batch_id=previous.id, event_id=event.id, revision=7, state='deferred'))
         await s.commit()
@@ -236,39 +243,116 @@ async def regressions(now, settings):
         s.add_all([news, excluded])
         await s.commit()
         await service.enroll(s, [news.id])
-        batch = await batches.freeze(s, settings)
+        assert await batches.freeze(s, settings) is None
         package = await s.scalar(select(Package).where(Package.news_id == news.id))
         news.content_hash = 'b'*64
         await s.commit()
-        await batches.actions(s, batch, set(), 8)
-        await s.commit()
-        await batches.actions(s, batch, set(), 8)
-        await s.commit()
-        assert batch.phase == 'partial'
-        batch = await batches.freeze(s, settings)
+        assert await batches.freeze(s, settings) is None
+        assert package.content_hash != news.content_hash
+        expanded = SimpleNamespace(start_at=news.published_at)
+        batch = await batches.freeze(s, expanded)
         assert package.content_hash == news.content_hash and package.state == 'index_pending'
-        assert await batches.actions(s, batch, set(), 8) == [('index', package.id)]
-        assert await s.scalar(select(func.count()).select_from(Package)) == 1
-        # A previously completed manual original also refreshes outside the automatic boundary.
-        package.state = 'done'
-        news.content_hash = 'c'*64
-        await s.commit()
-        await batches.freeze(s, settings)
-        assert package.content_hash == news.content_hash and package.state == 'index_pending'
+        assert ('index', package.id) in await batches.actions(s, batch, set(), 8)
         await clear(s)
 
         count = 33000
         await s.execute(insert(NewsItem), [original('bulk-'+str(i), now) for i in range(count)])
         await s.commit()
         batch = await batches.freeze(s, settings)
-        assert await s.scalar(select(func.count()).select_from(BatchPackage).where(BatchPackage.batch_id == batch.id)) == count
-        assert await s.scalar(select(func.count()).select_from(Package)) == count
+        assert await s.scalar(select(func.count()).select_from(BatchPackage).where(BatchPackage.batch_id == batch.id)) == 30
+        assert await s.scalar(select(func.count()).select_from(Package)) == 30
         # Exercise the existing-pending-ID and membership arrays above the driver limit too.
         next_batch = await batches.freeze(s, settings)
-        assert await s.scalar(select(func.count()).select_from(BatchPackage).where(BatchPackage.batch_id == next_batch.id)) == count
+        assert await s.scalar(select(func.count()).select_from(BatchPackage).where(BatchPackage.batch_id == next_batch.id)) == 30
         assert len(await batches.actions(s, next_batch, set(), 8)) == 8
         await clear(s)
     print('Batch regressions passed: deferred retries, failed-evidence reuse, manual source revisions, and 33,000 originals without parameter overflow.')
+
+
+async def queue_review_regressions(now, settings):
+    async def clear(session):
+        await session.execute(text('TRUNCATE news_research_batches, news_research_packages, news_research_events, news_items CASCADE'))
+        await session.commit()
+
+    async with SessionLocal() as s:
+        news = NewsItem(source_code='wscn_news', external_id='review-barrier', title='historical',
+                        summary='', content_text='historical', content_hash='a'*64,
+                        url='https://example.invalid/review-barrier', published_at=now)
+        s.add(news)
+        await s.flush()
+        package = Package(news_id=news.id, content_hash=news.content_hash, state='assign_pending', keywords=[])
+        event = Event(title='historical event', tags=[], revision=1, state='pending', due_at=now)
+        batch = Batch(phase='assigning', cutoff_at=now)
+        s.add_all([package, event, batch])
+        await s.flush()
+        s.add(Membership(event_id=event.id, package_id=package.id,
+                         evidence='historical', reason='same event', change_kind='new_fact'))
+        s.add(BatchPackage(batch_id=batch.id, package_id=package.id, content_hash=package.content_hash, state='pending'))
+        await s.commit()
+        unrelated = package.id + 1000
+        # Assignment remains globally serial even when the other call is not in this batch.
+        assert await batches.actions(s, batch, {('assign', unrelated)}, 7) == []
+        assert batch.phase == 'assigning'
+        # Active work on this batch still holds its assignment barrier.
+        package.state = 'done'
+        await s.commit()
+        assert await batches.actions(s, batch, {('assign', package.id)}, 7) == []
+        assert batch.phase == 'assigning'
+        # Unrelated realtime package and event calls must not hold the barrier.
+        realtime = {('index', unrelated), ('event', event.id + 1000)}
+        assert await batches.actions(s, batch, realtime, 6) == []
+        await s.commit()
+        assert batch.phase == 'researching'
+        assert await batches.actions(s, batch, realtime, 6) == [('event', event.id)]
+        await s.commit()
+        event.state = 'done'
+        await s.commit()
+        # A completed result can be visible before the owning task has returned.
+        assert await batches.actions(s, batch, realtime | {('event', event.id)}, 5) == []
+        assert batch.phase == 'researching'
+        assert await batches.actions(s, batch, realtime | {('index', package.id)}, 5) == []
+        assert batch.phase == 'researching'
+        assert await batches.actions(s, batch, realtime, 6) == []
+        await s.commit()
+        assert batch.phase == 'done'
+        # Completed batches release admission of the next historical originals.
+        news2 = NewsItem(source_code='wscn_news', external_id='review-next', title='next', summary='',
+                         content_text='next', content_hash='b'*64,
+                         url='https://example.invalid/review-next', published_at=now)
+        s.add(news2)
+        await s.commit()
+        assert (await batches.freeze(s, settings)).id != batch.id
+        await clear(s)
+
+        # Thirty manual-only deferred heads cannot consume the thirty runnable slots.
+        news = NewsItem(source_code='wscn_news', external_id='review-deferred', title='source', summary='',
+                        content_text='source', content_hash='a'*64,
+                        url='https://example.invalid/review-deferred', published_at=now)
+        s.add(news)
+        await s.flush()
+        package = Package(news_id=news.id, content_hash=news.content_hash, state='done', keywords=[])
+        previous = Batch(phase='partial', cutoff_at=now)
+        events = [Event(title='deferred-head-'+str(i), tags=[], revision=7, state='pending',
+                        due_at=now-timedelta(minutes=35-i)) for i in range(35)]
+        s.add_all([package, previous, *events])
+        await s.flush()
+        for i, event in enumerate(events):
+            s.add(Membership(event_id=event.id, package_id=package.id, evidence='source', reason='same source', change_kind='new_fact'))
+            if i <= 30:
+                s.add(BatchEvent(batch_id=previous.id, event_id=event.id,
+                                 revision=7 if i < 30 else 6, state='deferred'))
+        await s.commit()
+        batch = await batches.freeze(s, settings)
+        assert batch is not None
+        selected = set(await s.scalars(select(BatchEvent.event_id).where(BatchEvent.batch_id == batch.id)))
+        assert selected == {event.id for event in events[30:]}, selected
+        assert all(event.state == 'pending' and event.revision == 7 for event in events[:30])
+        await batches.actions(s, batch, set(), 8)
+        await s.commit()
+        actions = await batches.actions(s, batch, set(), 8)
+        assert set(actions) == {('event', event.id) for event in events[30:]}
+        await clear(s)
+    print('Queue review regressions passed: unrelated realtime calls allow both batch barriers to advance, owning calls still block, assignment stays serial, and deferred heads cannot starve runnable events.')
 
 
 asyncio.run(main())

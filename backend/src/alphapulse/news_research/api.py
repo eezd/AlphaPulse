@@ -20,8 +20,9 @@ from alphapulse.news_research.models import (
     Version,
     Reference,
     BatchEvent,
+    Batch,
 )
-from alphapulse.news_research import service, batches, vocabulary as vocab
+from alphapulse.news_research import service, batches, scheduling, vocabulary as vocab
 from alphapulse.news_research.models import VocabularyVersion
 from alphapulse.news_research.contracts import (
     INDEX_ASSIGN_SKILL,
@@ -90,6 +91,8 @@ class SettingsInput(Strict):
     index: ModelConfig
     research: ModelConfig
     concurrency: int = Field(default=3, ge=1, le=16)
+    start_at: AwareDatetime | None = None
+    base_revision: int | None = Field(default=None, ge=0)
 
 
 async def settings_row(session):
@@ -101,7 +104,7 @@ async def settings_row(session):
                 id=1,
                 config={},
                 enabled=False,
-                start_at=datetime(2026, 10, 31, 16, tzinfo=UTC),
+                start_at=datetime(2026, 11, 4, 16, tzinfo=UTC),
             )
             .on_conflict_do_nothing(index_elements=["id"])
         )
@@ -115,6 +118,8 @@ async def settings(session: DB):
     row = await settings_row(session)
     return success(
         {"config": row.config, "enabled": row.enabled, "start_at": row.start_at,
+         "control_revision": row.control_revision, "realtime_from": row.realtime_from,
+         "timezone": "Asia/Shanghai", "queue": await scheduling.queue_status(session, row),
          "batch": await batches.progress(session)}
     )
 
@@ -125,21 +130,24 @@ async def coverage(session: DB, start_at: AwareDatetime | None = None):
     start = (start_at if start_at is not None else row.start_at).astimezone(UTC)
     if start > datetime.now(UTC):
         raise HTTPException(422, "回补起始时间不能晚于当前时间")
-    return success(await batches.coverage(session, start))
+    effective = min(start, row.realtime_from) if row.realtime_from else start
+    report = await batches.coverage(session, effective)
+    return success({**report, 'backfill_start_at': start, 'realtime_from': row.realtime_from})
 
 
 @router.put("/settings")
 async def save(body: SettingsInput, session: DB):
     await settings_row(session)
-    await session.execute(
-        update(ResearchSettings)
-        .where(ResearchSettings.id == 1)
-        .values(
-            config=body.model_dump(),
-            enabled=False,
-            control_revision=ResearchSettings.control_revision + 1,
-        )
-    )
+    row = await session.get(ResearchSettings, 1, populate_existing=True, with_for_update=True)
+    if body.base_revision is not None and body.base_revision != row.control_revision:
+        raise HTTPException(409, "设置已变化，请重新读取后保存")
+    if body.start_at is not None:
+        if body.start_at > datetime.now(UTC):
+            raise HTTPException(422, "回补起始时间不能晚于当前时间")
+        row.start_at = body.start_at.astimezone(UTC)
+    row.config = body.model_dump(exclude={"start_at", "base_revision"})
+    row.enabled = False
+    row.control_revision += 1
     await session.commit()
     return success(None)
 
@@ -164,6 +172,8 @@ class EnableInput(Strict):
 async def enable(session: DB, body: EnableInput | None = None):
     row = await settings_row(session)
     start_at = (body.start_at if body is not None else row.start_at).astimezone(UTC)
+    if start_at != row.start_at:
+        raise HTTPException(422, "请在模型与 Skills 中保存回补时间并暂停后再启用")
     if start_at > datetime.now(UTC):
         raise HTTPException(422, "回补起始时间不能晚于当前时间")
     if not await session.scalar(text("SELECT pg_try_advisory_xact_lock(20261103, 2)")):
@@ -172,11 +182,11 @@ async def enable(session: DB, body: EnableInput | None = None):
         raise HTTPException(409, "请先暂停两阶段处理")
     running = await session.scalar(
         select(func.count())
-        .select_from(Package)
-        .where(Package.state.in_(["index_processing", "assign_processing"]))
+        .select_from(Attempt)
+        .where(Attempt.state == "processing")
     )
     running += await session.scalar(
-        select(func.count()).select_from(Event).where(Event.state == "processing")
+        select(func.count()).select_from(Version).where(Version.state == "processing")
     )
     if running:
         raise HTTPException(409, "请等待已接收任务完成后再验证")
@@ -259,7 +269,10 @@ async def enable(session: DB, body: EnableInput | None = None):
     if row.control_revision != control_revision or row.config != original_config:
         raise HTTPException(409, "验证期间已暂停或设置变化，请重新验证")
     report = await batches.coverage(session, start_at)
-    row.start_at = start_at
+    if row.realtime_from is None:
+        row.realtime_from = datetime.now(UTC)
+    await session.execute(update(Batch).where(Batch.phase.in_(["assigning", "researching"]))
+                          .values(phase="rescheduled", finished_at=datetime.now(UTC)))
     row.enabled = True
     row.control_revision += 1
     await session.commit()
@@ -480,6 +493,18 @@ async def event(identifier: int, session: DB):
             .order_by(Version.id.desc())
         )
     )
+    wait_reason = None
+    if row.state == 'pending':
+        settings = await settings_row(session)
+        unfinished = [(p, n) for p, n in members if p.state != 'done' or p.content_hash != n.content_hash]
+        if any(n.published_at < scheduling.boundary(settings) for p, n in unfinished):
+            wait_reason = '范围外成员尚未完成，扩大回补范围后可继续研究'
+        elif any(p.state.endswith('_failed') for p, n in unfinished):
+            wait_reason = '成员包处理失败，需手动重试后才能研究'
+        elif unfinished:
+            wait_reason = '等待成员包完成关键词与事件归属'
+        elif row.due_at > datetime.now(UTC):
+            wait_reason = '正在汇集事件变化，聚合窗口结束后研究'
     latest = next((v for v in versions if v.state == "done"), None)
     references = await version_references(session, latest.id) if latest else []
     return success(
@@ -490,6 +515,7 @@ async def event(identifier: int, session: DB):
             "result": row.result,
             "error": row.error,
             "revision": row.revision,
+            "wait_reason": wait_reason,
             "packages": [await package_out(session, p, n) for p, n in members],
             "references": references,
             "versions": [

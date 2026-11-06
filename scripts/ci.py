@@ -183,6 +183,8 @@ def smoke(build, label):
         print(run('docker', 'exec', '-i', names['api'], 'python', '-',
                   input=(ROOT / 'scripts/smoke_news_batches.py').read_text()), flush=True)
         print(run('docker', 'exec', '-i', names['api'], 'python', '-',
+                  input=(ROOT / 'scripts/smoke_priority_queue.py').read_text()), flush=True)
+        print(run('docker', 'exec', '-i', names['api'], 'python', '-',
                   input=(ROOT / 'scripts/smoke_news_research.py').read_text()), flush=True)
         print(run('docker', 'exec', '-i', names['api'], 'python', '-',
                   input=(ROOT / 'scripts/smoke_calendar.py').read_text()), flush=True)

@@ -6,6 +6,8 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    Index,
+    text,
     String,
     Text,
     UniqueConstraint,
@@ -32,6 +34,7 @@ class ResearchSettings(Base):
         Integer, default=0, server_default="0"
     )
     start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    realtime_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Package(Base):
@@ -49,6 +52,7 @@ class Package(Base):
 
 class Attempt(Base):
     __tablename__ = "news_research_attempts"
+    __table_args__ = (Index("uq_news_attempt_active", "package_id", unique=True, postgresql_where=text("state = 'processing'")),)
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     package_id: Mapped[int] = mapped_column(
         ForeignKey("news_research_packages.id"), index=True
@@ -75,6 +79,7 @@ class Event(Base):
     state: Mapped[str] = mapped_column(String(16), default="pending", index=True)
     result: Mapped[dict | None] = mapped_column(JSONB)
     error: Mapped[str | None] = mapped_column(Text)
+    realtime_pending: Mapped[bool] = mapped_column(default=False, server_default="false")
     dirty_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     due_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
@@ -99,6 +104,7 @@ class Membership(Base):
 
 class Version(Base):
     __tablename__ = "news_research_versions"
+    __table_args__ = (Index("uq_news_version_active", "event_id", unique=True, postgresql_where=text("state = 'processing'")),)
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     event_id: Mapped[int] = mapped_column(
         ForeignKey("news_research_events.id"), index=True

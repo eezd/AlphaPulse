@@ -302,7 +302,7 @@ def test_failed_enable_does_not_save_the_selected_backfill_start(trading, monkey
     session = N(get=AsyncMock(return_value=row), scalar=AsyncMock(side_effect=[True, 0, 0]), commit=AsyncMock())
     monkeypatch.setattr(service, "model_config", AsyncMock(side_effect=ValueError("Skill 不可用")))
     with pytest.raises(HTTPException) as error:
-        asyncio.run(api.enable(session, api.EnableInput(start_at=previous - timedelta(days=30))))
+        asyncio.run(api.enable(session, api.EnableInput(start_at=previous)))
     assert error.value.status_code == 502
     assert row.start_at == previous and not row.enabled and row.control_revision == 7
     session.commit.assert_not_called()
@@ -842,6 +842,7 @@ def test_alias_adjustment_audit_survives_index_failures(trading, monkeypatch, fa
     session.get = AsyncMock(side_effect=lambda model, *args, **kwargs:
                             attempts[0] if model is Attempt else package if model is Package else news)
     session.execute = AsyncMock()
+    session.scalar = AsyncMock(return_value=None)
     monkeypatch.setattr(service, "SessionLocal", lambda: session)
     monkeypatch.setattr(service.vocab, "snapshot", AsyncMock(return_value={"entries": []}))
     monkeypatch.setattr(service, "model_config", AsyncMock(return_value=(None, "索引规则", {})))
@@ -903,3 +904,47 @@ def test_task_skill_keeps_custom_rules_and_accepts_crlf(trading):
     content = "## 归属规则\r\n自定义归属\r\n### 细则\r\n保留规则\r\n## 索引规则\r\n自定义索引"
     assert task_skill(content, "assign") == "自定义归属\n### 细则\n保留规则"
     assert task_skill(content, "index") == "自定义索引"
+
+
+def test_settings_save_atomically_pauses_and_preserves_model_contract(trading):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from alphapulse.news_research import api
+    row = N(start_at=datetime(2026, 11, 4, 16, tzinfo=UTC), config={}, enabled=True, control_revision=3)
+    session = N(get=AsyncMock(return_value=row), commit=AsyncMock())
+    model = dict(provider_id=1, model='test', skill_id=1)
+    body = api.SettingsInput(index=model, research=model, start_at='2026-10-20T00:00:00+08:00', base_revision=3)
+    asyncio.run(api.save(body, session))
+    assert not row.enabled and row.control_revision == 4
+    assert row.start_at == datetime(2026, 10, 19, 16, tzinfo=UTC)
+    assert set(row.config) == {'index', 'research', 'concurrency'}
+    session.commit.assert_awaited_once()
+
+
+def test_settings_save_rejects_other_tabs_revision_without_changes(trading):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from fastapi import HTTPException
+    from alphapulse.news_research import api
+    row = N(start_at=datetime(2026, 11, 4, 16, tzinfo=UTC), config={}, enabled=True, control_revision=4)
+    session = N(get=AsyncMock(return_value=row), commit=AsyncMock())
+    model = dict(provider_id=1, model='test', skill_id=1)
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(api.save(api.SettingsInput(index=model, research=model, base_revision=3), session))
+    assert error.value.status_code == 409
+    assert row.enabled and row.control_revision == 4
+    session.commit.assert_not_awaited()
+
+
+def test_enable_cannot_apply_an_unsaved_backfill_time(trading):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from fastapi import HTTPException
+    from alphapulse.news_research import api
+    row = N(start_at=datetime(2026, 11, 4, 16, tzinfo=UTC))
+    session = N(get=AsyncMock(return_value=row), scalar=AsyncMock(), commit=AsyncMock())
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(api.enable(session, api.EnableInput(start_at='2026-10-20T00:00:00+08:00')))
+    assert error.value.status_code == 422
+    session.scalar.assert_not_awaited()
+    session.commit.assert_not_awaited()

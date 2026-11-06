@@ -2,8 +2,8 @@ import type * as Research from "./type"
 import { request } from "@/http/axios"
 
 export const getSettingsApi = () => request<Research.Settings>({ url: "/risk/settings", method: "get" })
-export const saveSettingsApi = (data: Research.Config) => request<null>({ url: "/risk/settings", method: "put", data })
-export const enableApi = (start_at: string) => request<Research.Coverage>({ url: "/risk/enable", method: "post", data: { start_at } })
+export const saveSettingsApi = (data: Research.Config & { start_at: string, base_revision: number }) => request<null>({ url: "/risk/settings", method: "put", data })
+export const enableApi = () => request<Research.Coverage>({ url: "/risk/enable", method: "post" })
 export const getCoverageApi = (start_at: string) => request<Research.Coverage>({ url: "/risk/coverage", method: "get", params: { start_at } })
 export const pauseApi = () => request<null>({ url: "/risk/pause", method: "post" })
 export const createSkillsApi = () => request<{ index: number, research: number }>({ url: "/risk/skill-templates", method: "post" })

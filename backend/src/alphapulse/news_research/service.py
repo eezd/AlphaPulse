@@ -27,6 +27,7 @@ from alphapulse.news_research.models import (
     Version,
     Reference,
 )
+from alphapulse.news_research.scheduling import control, mark_priority, boundary
 from alphapulse.news_research.contracts import (
     INDEX_ASSIGN_SKILL,
     task_skill,
@@ -280,6 +281,7 @@ async def enroll(session, ids):
                 .with_for_update()
             ):
                 dirty(event)
+                await mark_priority(session, event, row)
     await session.commit()
 
 
@@ -429,6 +431,9 @@ async def process_package(identifier, config):
 
 async def _process_package(identifier, config, expected_stage):
     async with SessionLocal() as session:
+        settings = await control(session, config)
+        if settings is False:
+            return
         package = await session.get(Package, identifier, with_for_update=True)
         if package is None:
             return
@@ -437,6 +442,10 @@ async def _process_package(identifier, config, expected_stage):
         news = await session.get(NewsItem, package.news_id)
         if package.content_hash != news.content_hash:
             await enroll(session, [news.id])
+            return
+        if settings is not None and not boundary(settings) <= news.published_at <= datetime.now(UTC):
+            return
+        if await session.scalar(select(Attempt.id).where(Attempt.package_id == identifier, Attempt.state == 'processing').limit(1)):
             return
         source = article(news)
         source_hash = package.content_hash
@@ -566,12 +575,14 @@ async def _process_package(identifier, config, expected_stage):
                             existing.change_kind = target.change_kind
                         if target.change_kind != "repost" or event.result is None:
                             dirty(event, target.urgent)
+                            await mark_priority(session, event, news)
                     for old in previous:
                         if old.event_id not in assigned:
                             event = await session.get(
                                 Event, old.event_id, with_for_update=True
                             )
                             dirty(event)
+                            await mark_priority(session, event, news)
                             await session.delete(old)
                             affected[event.id] = event
                     package.state = "done"
@@ -805,12 +816,17 @@ def validate_timeline(result, package_news):
 
 async def process_event(identifier, config, force=False):
     async with SessionLocal() as session:
+        settings = await control(session, config)
+        if settings is False:
+            return
         event = await session.get(Event, identifier, with_for_update=True)
         if (
             event is None
             or event.state != "pending"
             or (not force and event.due_at > datetime.now(UTC))
         ):
+            return
+        if await session.scalar(select(Version.id).where(Version.event_id == identifier, Version.state == 'processing').limit(1)):
             return
         members = list(
             await session.execute(
@@ -821,6 +837,8 @@ async def process_event(identifier, config, force=False):
                 .order_by(Package.id)
             )
         )
+        if settings is not None and members and not any(boundary(settings) <= n.published_at <= datetime.now(UTC) for p, m, n in members):
+            return
         if not members:
             event.state = "retired"
             await session.commit()
@@ -859,6 +877,7 @@ async def process_event(identifier, config, force=False):
         )
         session.add(version)
         event.state = "processing"
+        event.dirty_since = None
         await session.commit()
         version_id, revision = version.id, event.revision
         researcher = Research(event={"id": identifier, "revision": revision})
@@ -977,6 +996,7 @@ async def process_event(identifier, config, force=False):
                     current.title = output.title
                     current.state = "done"
                     current.dirty_since = None
+                    current.realtime_pending = False
                     current.error = None
                     for ref in output.references:
                         session.add(

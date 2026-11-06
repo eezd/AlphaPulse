@@ -485,7 +485,7 @@ test("新闻列表只更新可见条目的匹配版本评级，保留滚动与�
 
 function researchPage(api: Record<string, unknown> = {}, user = vue.reactive({ sessionVersion: 1 }), extra: Record<string, unknown> = {}, dependencies: Record<string, unknown> = {}) {
   const load = moduleLoader({
-    "@@/apis/news-research": { getSettingsApi: async () => ({ config: {}, enabled: false, start_at: "2026-10-31T16:00:00Z" }), getCoverageApi: async (start_at: string) => ({ start_at, total: 0 }), listEventsApi: async () => ({ items: [], total: 0 }), listPackagesApi: async () => ({ items: [], total: 0 }), ...api },
+    "@@/apis/news-research": { getSettingsApi: async () => ({ config: {}, control_revision: 0, enabled: false, start_at: "2026-10-31T16:00:00Z" }), getCoverageApi: async (start_at: string) => ({ start_at, total: 0 }), listEventsApi: async () => ({ items: [], total: 0 }), listPackagesApi: async () => ({ items: [], total: 0 }), ...api },
     "@@/apis/skills": { listSkillTreeApi: async () => [] },
     "@@/apis/settings": { listProvidersApi: async () => [], listProviderModelsApi: async () => [] },
     "@/pinia/stores/user": { useUserStore: () => user },
@@ -516,11 +516,11 @@ test("回补时间按时区提交，刷新保留未提交的起点，核查不�
   assert.equal(enabled.length, 0)
   assert.equal(page.coverage.value.missing, 4)
   await page.enable()
-  assert.deepEqual(enabled, ["2026-09-30T16:00:00.000Z"])
+  assert.deepEqual(enabled, [undefined])
 })
 
 test("其他标签页启用后按实际起点核查，暂停后恢复草稿并丢弃旧范围响应", async () => {
-  let server = { config: {}, enabled: false, start_at: "2026-10-31T16:00:00Z" }
+  let server = { config: {}, control_revision: 0, enabled: false, start_at: "2026-10-31T16:00:00Z" }
   const pending = Promise.withResolvers()
   const checked: string[] = []
   let delayDraft = true
@@ -612,13 +612,13 @@ test("切换会话后，旧回补核查不能恢复统计结果", async () => {
   assert.equal(page.startAt.value, null)
 })
 
-test("回补时间无效或晚于当前时间时禁止启用", async () => {
+test("回补时间无效或晚于当前时间时禁止保存", async () => {
   let calls = 0
   const errors: string[] = []
-  const page = researchPage({ enableApi: async () => calls++ }, undefined, { ElMessage: { error: (message: string) => errors.push(message) } })
+  const page = researchPage({ saveSettingsApi: async () => calls++ }, undefined, { ElMessage: { error: (message: string) => errors.push(message) } })
   for (const value of [null, new Date("invalid"), new Date(Date.now() + 86400000)]) {
     page.startAt.value = value
-    await page.enable()
+    await page.save()
   }
   assert.equal(calls, 0)
   assert.equal(errors.length, 3)
@@ -718,12 +718,15 @@ test("两阶段保存各自思考强度，不提交第三阶段配置", async ()
   const page = researchPage({ saveSettingsApi: async (data: unknown) => {
     saved = JSON.parse(JSON.stringify(data))
   } })
+  await page.load()
   page.config.value.index.reasoning_effort = "low"
   page.config.value.research.reasoning_effort = "high"
   await page.save()
   assert.equal(saved.index.reasoning_effort, "low")
   assert.equal(saved.research.reasoning_effort, "high")
-  assert.equal(Object.keys(saved).length, 3)
+  assert.equal(Object.keys(saved).length, 5)
+  assert.equal(saved.start_at, "2026-10-31T16:00:00.000Z")
+  assert.equal(saved.base_revision, 0)
   page.config.value.research.reasoning_effort = null
   await page.save()
   assert.equal(saved.research.reasoning_effort, null)
@@ -756,6 +759,7 @@ test("两阶段操作拒绝重复提交和旧会话操作，失败保留配置�
     calls++
     return pending.promise
   } }, user)
+  await page.load()
   page.config.value.index.model = "draft"
   const first = page.save()
   await page.save()
@@ -963,4 +967,28 @@ test("词库保存拒绝重复提交，关闭后的响应不覆盖草稿，失�
   assert.equal(page.vocabulary.value.entries[0].canonical, "失败草稿")
   assert.equal(page.vocabularyOpened.value, true)
   assert.equal(page.vocabularyBusy.value, false)
+})
+
+test("侧栏时间统一使用北京时间，保存时间与配置版本但启用不提交草稿", async () => {
+  let saved: any
+  let enableArgs: unknown[] = []
+  const page = researchPage({
+    getSettingsApi: async () => ({ config: {}, enabled: true, control_revision: 7, start_at: "2026-11-04T16:00:00Z" }),
+    saveSettingsApi: async (value: unknown) => {
+      saved = value
+    },
+    enableApi: async (...args: unknown[]) => {
+      enableArgs = args
+    }
+  })
+  await page.settings()
+  assert.equal(page.startText.value, "2026-11-05 00:00:00")
+  page.startText.value = "2026-10-20 00:00:00"
+  await page.load()
+  assert.equal(page.startText.value, "2026-10-20 00:00:00")
+  await page.save()
+  assert.equal(saved.start_at, "2026-10-19T16:00:00.000Z")
+  assert.equal(saved.base_revision, 7)
+  await page.enable()
+  assert.deepEqual(enableArgs, [])
 })
