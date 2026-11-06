@@ -18,6 +18,7 @@ from alphapulse.core.db import get_session
 from alphapulse.core.redis import KEY_PREFIX, redis
 from alphapulse.core.official_sources import REGIONS
 from alphapulse.calendar.catalog import FAMILIES
+from alphapulse.crawler.content_policy import ignored_retry
 from alphapulse.crawler.events import CONTROL_CHANNEL, HISTORY_SOURCES, LOG_CHANNEL, STATUS_KEY
 from alphapulse.crawler.spiders.us_official import configuration_error
 from alphapulse.models import CrawlLog, CrawlRun, EconomicRelease, NewsItem, Source
@@ -196,13 +197,16 @@ async def list_sources(session: Annotated[AsyncSession, Depends(get_session)]) -
     db_size = await session.scalar(select(func.pg_database_size(func.current_database())))
     attachment_stats = {}
     for source in sources:
-        retries = (source.history_cursor or {}).get('attachment_retries', {})
+        groups = {key: {url: value for url, value in (source.history_cursor or {}).get(key, {}).items() if not ignored_retry(key, value)} for key in ('attachment_retries', 'document_retries', 'bill_retries')}
+        ignored = sum(ignored_retry(key, value) for key in groups for value in (source.history_cursor or {}).get(key, {}).values())
+        retries = groups['attachment_retries']
         pending = sum(value['attempts'] < 3 for value in retries.values())
-        documents = (source.history_cursor or {}).get('document_retries', {})
+        documents = groups['document_retries']
         document_pending = sum(value['attempts'] < 3 for value in documents.values())
-        bills = (source.history_cursor or {}).get('bill_retries', {})
+        bills = groups['bill_retries']
         bill_pending = sum(value['attempts'] < 3 for value in bills.values())
         attachment_stats[source.code] = {
+            'policy_ignored': ignored,
             'retired_count': sum(bool(v.get('retired_at')) for group in (retries, documents, bills) for v in group.values()),
             'active_gaps': sum(not v.get('retired_at') for group in (retries, documents, bills) for v in group.values()),
             'attachment_gaps': len(retries),

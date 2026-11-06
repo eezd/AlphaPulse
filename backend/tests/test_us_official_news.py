@@ -12,6 +12,7 @@ from scrapy.http import HtmlResponse, Response
 from scrapy.spidermiddlewares.httperror import HttpError
 from twisted.python.failure import Failure
 
+from alphapulse.crawler.content_policy import file_url
 from alphapulse.core.us_news import SOURCES, article, official_url, published, selection
 
 
@@ -40,6 +41,72 @@ def collection_sample(source, suffix=''):
     return next(s for s in samples if s['source'] == source and s['url'].endswith(suffix))
 
 
+@pytest.mark.parametrize('source', ['ofac', 'sec'])
+@pytest.mark.parametrize('status', [200, 403, 429, 503])
+def test_stopped_binary_response_preserves_http_errors(trading, source, status):
+    from scrapy.exceptions import StopDownload
+    from scrapy.http import Headers
+    from alphapulse.crawler.middlewares import NewsContentPolicyMiddleware
+    obj = spider(trading, source)
+    obj.run.history_deadline = time.monotonic() - 1
+    doc = {'url': SOURCES[source].entries[0] + '/document', 'kind': 'article'}
+    obj.cursor['history']['pending'] = [doc]
+    request = Request(doc['url'], meta={'document': doc, 'lane': 'history'})
+    headers = Headers({'Content-Type': 'application/octet-stream', 'Retry-After': '120'})
+    with pytest.raises(StopDownload) as stopped:
+        NewsContentPolicyMiddleware().headers_received(headers, request)
+    stopped.value.response = Response(request.url, status=status, headers=headers, request=request)
+    failure = Failure(stopped.value)
+    failure.request = request
+    obj.on_request_error(failure)
+    gap = obj.cursor.get('document_retries', {}).get(doc['url'], {})
+    if status == 200:
+        assert gap['skipped_policy']
+        assert obj.run.stats['policy_skipped'] == 1
+        assert not obj.run.errors
+    else:
+        assert not request.meta.get('policy_skipped')
+        assert not gap.get('skipped_policy')
+        assert not obj.run.stats.get('policy_skipped')
+        assert str(status) in obj.run.errors[0]
+        if gap:
+            assert gap['attempts'] == 1 and gap['next_at'] > obj.run.started_at.timestamp()
+        if source == 'sec' or status in (403, 429):
+            assert obj.run.blocked and obj.run.cooldown_until is not None
+
+
+@pytest.mark.parametrize('missing_material', [False, True])
+def test_legacy_bill_pdf_skip_does_not_hide_real_text_gaps(trading, monkeypatch, missing_material):
+    monkeypatch.setattr('alphapulse.crawler.spiders.us_official.configuration_error', lambda _: None)
+    obj = spider(trading, 'congress')
+    base = 'https://api.congress.gov/v3/bill/119/s/1'
+    pdf = {'url': 'https://www.congress.gov/old.pdf', 'kind': 'text', 'bill': base}
+    obj.cursor['history'].update(entry=len(SOURCES['congress'].entries), pending=[pdf, {'url': base, 'kind': 'bill_finish'}],
+        bill={'url': base, 'document_url': base, 'title': 'Crypto policy', 'version': 'v1', 'bodies': 0,
+              'reasons': ['crypto_policy'], 'missing_material': missing_material,
+              'material_errors': ['网页正文缺少官方日期'] if missing_material else []})
+    assert obj.advance('history') == []
+    assert obj.cursor['document_retries'][pdf['url']]['skipped_policy']
+    assert not obj.cursor['history']['pending']
+    if missing_material:
+        gap = obj.cursor['bill_retries'][base]
+        assert '网页正文缺少官方日期' in gap['error'] and gap['attempts'] == 1
+    else:
+        assert not obj.cursor['bill_retries']
+        assert obj.run.stats['unresolved_bills'] == 0
+
+
+def test_decoded_pdf_error_keeps_http_failure_before_raw_storage(trading):
+    from alphapulse.crawler.middlewares import RawResponseMiddleware
+    obj = spider(trading)
+    request = Request('https://ofac.treasury.gov/recent-actions/20261104')
+    response = Response(request.url, status=503, body=b'%PDF error body', request=request)
+    with pytest.raises(HttpError) as error:
+        asyncio.run(RawResponseMiddleware(SimpleNamespace(spider=obj)).process_response(request, response))
+    assert error.value.response.status == 503
+    assert not request.meta.get('policy_skipped')
+
+
 def test_real_empty_register_day_continues_to_previous_day(trading):
     obj = spider(trading, 'federal_register')
     obj.cursor['realtime']['day'] = '2026-11-05'
@@ -61,24 +128,18 @@ def test_register_completed_body_checkpoint_matches_discovery_after_restart(trad
     assert any(r.url == metadata for r in requests) is not recent
 
 
-def test_register_completes_metadata_only_after_body_and_pdf(trading, monkeypatch):
-    from alphapulse.crawler.spiders import us_official
+def test_register_completes_after_text_without_pdf(trading, monkeypatch):
     obj = spider(trading, 'federal_register')
-    metadata = 'https://www.federalregister.gov/api/v1/documents/2026-22248.json'
-    body = 'https://www.federalregister.gov/documents/full_text/html/2026/11/03/2026-22248.html'
-    pdf = 'https://www.govinfo.gov/content/pkg/FR-2026-11-03/pdf/2026-22248.pdf'
-    doc = {'url': metadata, 'kind': 'register'}
-    obj.cursor['realtime'].update(pending=[doc], entry=len(SOURCES[obj.name].entries))
-    data = {'body_html_url': body, 'title': 'Digital asset exchange rule', 'publication_date': '2026-11-03', 'html_url': 'https://www.federalregister.gov/documents/2026/11/03/2026-22248/rule', 'document_number': '2026-22248', 'pdf_url': pdf}
-    async def parse(res):
-        return [item async for item in obj.parse_document(res)]
-    body_request, = asyncio.run(parse(response(metadata, json.dumps(data), lane='realtime', document=doc)))
-    assert metadata not in obj.cursor.get('checked', {})
-    pdf_request, = asyncio.run(parse(response(body, '<p>This official rule regulates digital asset exchanges and financial institutions.</p>', **body_request.meta)))
-    assert metadata not in obj.cursor.get('checked', {})
-    monkeypatch.setattr(us_official, 'pdf_text', lambda value: 'The official digital asset exchange rule and supporting material.')
-    list(obj.parse_attachment(Response(pdf, body=b'%PDF-test', request=pdf_request.replace(meta={**pdf_request.meta, 'raw_response_id': 13}))))
-    assert metadata in obj.cursor['checked'] and body in obj.cursor['checked']
+    obj.run.history_deadline = time.monotonic() - 1
+    doc = {'url': 'https://www.federalregister.gov/body', 'kind': 'text', 'title': 'Digital asset rule', 'at': '2026-11-03', 'pdf': 'https://www.govinfo.gov/a.pdf', 'metadata_url': 'https://www.federalregister.gov/metadata'}
+    obj.cursor['history']['pending'] = [doc]
+    async def collect():
+        return [v async for v in obj.parse_document(response(doc['url'], '<p>Rules for digital asset exchanges and financial institutions.</p>', lane='history', document=doc))]
+    item, = asyncio.run(collect())
+    assert item['extra']['attachments'][0]['status'] == 'skipped_policy'
+    assert not obj.run.errors
+    assert not obj.cursor.get('attachment_retries')
+
 
 
 @pytest.mark.parametrize('data', [{'count': 2}, {'count': '0', 'description': 'x'}, {'count': 0}, {'count': 0, 'description': 'x', 'results': None}])
@@ -125,59 +186,55 @@ def test_fincen_real_pdf_tables_finish_outside_realtime_window(trading, suffix):
 
 
 @pytest.mark.parametrize('suffix,title', [('/news/enforcement-actions', 'Bank of America'), ('/resources/advisoriesbulletinsfact-sheets', 'Foreign-Agent-Directed')])
-def test_fincen_real_pdf_tables_preserve_title_and_date_for_history(trading, suffix, title):
+def test_fincen_pdf_tables_skip_files_and_continue_history(trading, suffix, title):
     obj = spider(trading, 'fincen')
     sample = collection_sample('fincen', suffix)
-    request, = obj.parse_listing(response(sample['url'], sample['body'], lane='history'))
-    doc = request.meta['document']
-    assert doc['kind'] == 'article' and doc['format'] == 'pdf'
-    assert title in doc['title'] and len(doc['listing_date']) == 10
-    assert doc['listing_url'] == sample['url']
-    assert request.url.endswith('.pdf')
+    output = list(obj.parse_listing(response(sample['url'], sample['body'], lane='history')))
+    assert all(not file_url(r.url) for r in output if isinstance(r, Request))
+    assert obj.run.stats.get('policy_skipped', 0) > 0
 
 
-def test_fincen_pdf_keeps_listing_date_raw_evidence_and_selection(trading, monkeypatch):
-    from alphapulse.crawler.spiders import us_official
+
+def test_fincen_direct_pdf_is_skipped(trading, monkeypatch):
     obj = spider(trading, 'fincen')
-    doc = {'url': 'https://www.fincen.gov/system/files/crypto.pdf', 'kind': 'article', 'format': 'pdf', 'title': 'Crypto exchange consent order', 'listing_date': '2026-11-03', 'listing_url': SOURCES['fincen'].entries[1]}
-    obj.cursor['realtime'].update(pending=[doc], entry=len(SOURCES['fincen'].entries))
-    monkeypatch.setattr(us_official, 'pdf_text', lambda body: 'This enforcement action concerns a virtual currency exchange financial institution.')
-    request = Request(doc['url'], meta={'lane': 'realtime', 'document': doc, 'raw_response_id': 12})
+    obj.run.history_deadline = time.monotonic() - 1
+    doc = {'url': 'https://www.fincen.gov/system/files/report.pdf', 'kind': 'article', 'format': 'pdf'}
+    obj.cursor['history']['pending'] = [doc]
     async def collect():
-        return [item async for item in obj.parse_document(Response(doc['url'], body=b'%PDF-test', request=request))]
-    item, = asyncio.run(collect())
-    assert item['published_at'] == datetime(2026, 11, 3, tzinfo=UTC)
-    assert item['raw_response_id'] == 12
-    assert item['extra']['published_at_precision'] == 'date'
-    assert item['extra']['published_at_basis'] == 'official_listing'
-    assert item['extra']['selection_reasons']
-    assert doc['url'] in obj.cursor['checked']
+        return [v async for v in obj.parse_document(response(doc['url'], '<h1>PDF or error document</h1>', lane='history', document=doc))]
+    assert asyncio.run(collect()) == []
+    assert obj.cursor['document_retries'][doc['url']]['skipped_policy']
+    assert not obj.run.errors and not obj.cursor['history']['pending']
 
 
-def test_fincen_invalid_pdf_remains_a_document_gap(trading):
+
+def test_fincen_pdf_error_response_is_still_policy_skipped(trading):
     obj = spider(trading, 'fincen')
-    doc = {'url': 'https://www.fincen.gov/system/files/crypto.pdf', 'kind': 'article', 'format': 'pdf', 'title': 'Crypto exchange consent order', 'listing_date': '2026-11-03', 'listing_url': SOURCES['fincen'].entries[1]}
-    obj.cursor['realtime'].update(pending=[doc], entry=len(SOURCES['fincen'].entries))
+    obj.run.history_deadline = time.monotonic() - 1
+    doc = {'url': 'https://www.fincen.gov/system/files/report.pdf', 'kind': 'article', 'format': 'pdf'}
+    obj.cursor['history']['pending'] = [doc]
     async def collect():
-        return [item async for item in obj.parse_document(response(doc['url'], '<h1>Document</h1><p>The server returned an HTML document instead of the expected official PDF.</p>', lane='realtime', document=doc))]
-    assert not asyncio.run(collect())
-    assert doc['url'] not in obj.cursor.get('checked', {})
-    assert obj.cursor['document_retries'][doc['url']]['attempts'] == 1
-    assert '非 PDF' in obj.run.errors[0]
+        return [v async for v in obj.parse_document(response(doc['url'], '<h1>PDF or error document</h1>', lane='history', document=doc))]
+    assert asyncio.run(collect()) == []
+    assert obj.cursor['document_retries'][doc['url']]['skipped_policy']
+    assert not obj.run.errors and not obj.cursor['history']['pending']
+
 
 
 def test_fincen_pdf_table_missing_date_fails_explicitly(trading):
     obj = spider(trading, 'fincen')
     body = '<main><h1>Actions</h1><table><tr><td><a href="/system/files/order.pdf">Consent order</a></td><td></td></tr></table></main>'
-    with pytest.raises(ValueError, match='发布时间'):
-        list(obj.parse_listing(response(SOURCES['fincen'].entries[1], body, lane='realtime')))
+    output = list(obj.parse_listing(response(SOURCES['fincen'].entries[1], body, lane='realtime')))
+    assert all(not file_url(r.url) for r in output)
+    assert not obj.run.errors
 
 
 def test_fincen_pdf_table_does_not_invent_day_for_current_month(trading):
     obj = spider(trading, 'fincen')
     body = '<main><h1>Actions</h1><table><tr><td><a href="/system/files/order.pdf">Consent order</a></td><td>11/2026</td></tr></table></main>'
-    with pytest.raises(ValueError, match='发布时间'):
-        list(obj.parse_listing(response(SOURCES['fincen'].entries[1], body, lane='realtime')))
+    output = list(obj.parse_listing(response(SOURCES['fincen'].entries[1], body, lane='realtime')))
+    assert all(not file_url(r.url) for r in output)
+    assert not obj.run.errors
 
 
 def test_cftc_commissioner_index_is_not_a_speech(trading):
@@ -262,41 +319,29 @@ def test_due_retry_in_old_pending_cursor_is_not_discarded_by_moving_window(tradi
 
 
 @pytest.mark.parametrize('restored_pending', [False, True])
-def test_attachment_retry_outside_realtime_window_fetches_and_completes_pdf(trading, monkeypatch, restored_pending):
-    from alphapulse.crawler.spiders import us_official
+def test_legacy_attachment_retry_is_not_scheduled(trading, monkeypatch, restored_pending):
     obj = spider(trading)
     doc = {'url': 'https://ofac.treasury.gov/recent-actions/20250101', 'kind': 'article', 'listing_date': '2025-01-01'}
     obj.cursor['attachment_retries'] = {doc['url']: {'document': doc, 'attempts': 1, 'next_at': 0}}
     if restored_pending:
         obj.cursor['realtime']['pending'] = [copy.deepcopy(doc)]
-    request, = obj.first_requests()
-    body = '<h1>Crypto sanctions</h1><main><article class="node--type-ofac-recent-action"><div class="field--name-field-body"><p>New sanctions against a virtual currency exchange institution.</p><a href="/media/123/download">Order</a></div></article></main>'
-    async def collect():
-        return [item async for item in obj.parse_document(response(request.url, body, **request.meta))]
-    attachment, = asyncio.run(collect())
-    assert isinstance(attachment, Request) and attachment.url.endswith('/media/123/download')
+    requests = obj.first_requests()
+    assert all(not r.meta.get('parsed') and not r.meta.get('document', {}).get('attachment_retry') for r in requests)
     assert obj.cursor['attachment_retries'][doc['url']]['attempts'] == 1
-    assert doc['url'] not in obj.cursor.get('checked', {})
-    monkeypatch.setattr(us_official, 'pdf_text', lambda body: 'The official sanctions order applies to a virtual currency exchange.')
-    items = list(obj.parse_attachment(Response(attachment.url, body=b'%PDF-test', request=attachment.replace(meta={**attachment.meta, 'raw_response_id': 13}))))
-    item = next(item for item in items if isinstance(item, dict))
-    assert item['extra']['content_scope'] == 'article'
-    assert item['extra']['attachments'][0]['status'] == 'complete'
-    assert not obj.cursor['attachment_retries']
-    assert doc['url'] in obj.cursor['checked']
 
 
-def test_due_attachment_is_queued_alongside_document_retry_without_duplicates(trading):
+
+def test_only_document_retry_is_scheduled(trading):
     obj = spider(trading)
     documents = [{'url': f'https://ofac.treasury.gov/recent-actions/2026110{day}', 'kind': 'article'} for day in (3, 4)]
     obj.cursor['document_retries'] = {documents[0]['url']: {'document': documents[0], 'attempts': 1, 'next_at': 0, 'error': 'HTTP503'}}
     obj.cursor['attachment_retries'] = {doc['url']: {'document': doc, 'attempts': 1, 'next_at': 0} for doc in documents}
     request, = obj.first_requests()
     pending = obj.cursor['realtime']['pending']
-    assert [doc['url'] for doc in pending] == [doc['url'] for doc in documents]
-    assert request.meta['document']['document_retry'] and request.meta['document']['attachment_retry']
+    assert [doc['url'] for doc in pending] == [documents[0]['url']]
+    assert request.meta['document']['document_retry'] and not request.meta['document'].get('attachment_retry')
     requests = obj.complete('realtime')
-    assert requests[0].url == documents[1]['url'] and requests[0].meta['document']['attachment_retry']
+    assert all(r.url != documents[1]['url'] for r in requests)
 
 
 @pytest.mark.parametrize('first_lane', ['realtime', 'history'])
@@ -529,14 +574,13 @@ def test_unrelated_failed_attachment_is_not_news(trading):
     parsed = {'url': doc['url'], 'title': 'Federal prosecutor receives national award', 'external_id': 'award', 'content_html': '<p>The department recognized superior performance in Indian Country.</p>', 'published_at': datetime(2026, 11, 4, tzinfo=UTC), 'raw_response_id': 12, 'retry_document': doc,
               'extra': {'attachments': [{'url': 'https://www.justice.gov/media/1/dl', 'status': 'unavailable'}]}}
     assert list(obj.attach_or_finish(parsed, 'history')) == []
-    assert obj.run.stats['unclassified_attachment_gaps'] == 1
-    assert obj.cursor['attachment_retries'][doc['url']]['attempts'] == 1
+    assert not obj.run.stats.get('unclassified_attachment_gaps')
+    assert not obj.cursor.get('attachment_retries')
 
 
 @pytest.mark.parametrize('content_type,body', [('image/png', b'\x89PNG\r\n\x1a\n'), ('image/jpeg', b'\xff\xd8\xff'), ('image/gif', b'GIF89a')])
 @pytest.mark.parametrize('relevant', [True, False])
-def test_image_attachment_preserves_unknown_text_gap(trading, monkeypatch, content_type, body, relevant):
-    from alphapulse.crawler.spiders import us_official
+def test_legacy_image_attachment_does_not_create_a_gap(trading, monkeypatch, content_type, body, relevant):
     obj = spider(trading, 'doj')
     obj.run.history_deadline = time.monotonic() - 1
     url = 'https://www.justice.gov/media/1/dl'
@@ -544,25 +588,21 @@ def test_image_attachment_preserves_unknown_text_gap(trading, monkeypatch, conte
     obj.cursor['history']['pending'] = [doc]
     parsed = {'url': doc['url'], 'title': 'Cryptocurrency exchange charged' if relevant else 'Department announces an enforcement action', 'external_id': 'case', 'content_html': '<p>The cryptocurrency exchange was charged with money laundering.</p>' if relevant else '<p>See the attached consent order for the findings and penalty.</p>', 'published_at': datetime(2026, 11, 4, tzinfo=UTC), 'raw_response_id': 12, 'retry_document': doc,
               'extra': {'attachments': [{'url': url, 'title': 'Consent Order', 'status': 'pending'}]}}
-    monkeypatch.setattr(us_official, 'pdf_text', lambda body: pytest.fail('Images must not reach the PDF parser'))
     res = Response(url, body=body, headers={'Content-Type': content_type}, request=Request(url, meta={'lane': 'history', 'parsed': parsed, 'raw_response_id': 13}))
     items = list(obj.parse_attachment(res))
     if relevant:
         item, = items
-        assert item['extra']['content_scope'] == 'partial'
+        assert item['extra']['content_scope'] == 'article'
     else:
         assert items == []
-        assert obj.run.stats['unclassified_attachment_gaps'] == 1
+        assert not obj.run.stats.get('unclassified_attachment_gaps')
     attachment = parsed['extra']['attachments'][0]
-    assert attachment['status'] == 'unavailable'
-    assert '图片' in attachment['error']
-    assert attachment['error'] in obj.cursor['attachment_retries'][doc['url']]['error']
-    assert url in obj.cursor['attachment_retries'][doc['url']]['error']
-    assert attachment['raw_response_id'] == 13
-    assert obj.cursor['attachment_retries'][doc['url']]['attempts'] == 1
+    assert attachment['status'] == 'skipped_policy'
+    assert '采集规则' in attachment['error']
+    assert not obj.cursor.get('attachment_retries')
 
 
-def test_source_api_keeps_attachment_gaps_visible_across_rounds(trading, monkeypatch):
+def test_source_api_separates_ignored_attachments_from_real_gaps(trading, monkeypatch):
     from unittest.mock import AsyncMock
     from alphapulse.api import crawler
     from alphapulse.models import Source
@@ -586,9 +626,10 @@ def test_source_api_keeps_attachment_gaps_visible_across_rounds(trading, monkeyp
     for stats in ({'discovered': 2, 'attachment_gaps': 999, 'unresolved_bills': 999}, {}):
         latest.stats = stats
         result = asyncio.run(crawler.list_sources(Session())).data.sources[0]
-        assert result.collection_stats['attachment_gaps'] == 3
-        assert result.collection_stats['attachment_retry_pending'] == 2
-        assert result.collection_stats['attachment_retry_exhausted'] == 1
+        assert result.collection_stats['attachment_gaps'] == 0
+        assert result.collection_stats['policy_ignored'] == 3
+        assert result.collection_stats['attachment_retry_pending'] == 0
+        assert result.collection_stats['attachment_retry_exhausted'] == 0
         assert result.collection_stats['document_gaps'] == 2
         assert result.collection_stats['document_retry_pending'] == 1
         assert result.collection_stats['document_retry_exhausted'] == 1
@@ -603,8 +644,9 @@ def test_source_api_keeps_attachment_gaps_visible_across_rounds(trading, monkeyp
         assert result.collection_stats['round_running'] == 0
     source.history_cursor['attachment_retries'].pop('a')
     result = asyncio.run(crawler.list_sources(Session())).data.sources[0]
-    assert result.collection_stats['attachment_gaps'] == 2
-    assert result.collection_stats['attachment_retry_pending'] == 1
+    assert result.collection_stats['attachment_gaps'] == 0
+    assert result.collection_stats['policy_ignored'] == 2
+    assert result.collection_stats['attachment_retry_pending'] == 0
     source.history_cursor = {}
     latest.stats = {'attachment_gaps': 999}
     result = asyncio.run(crawler.list_sources(Session())).data.sources[0]
@@ -816,7 +858,7 @@ def test_h41_uses_publisher_release_dates_not_assumed_thursdays(trading):
     assert obj.cursor['history']['pending'][1]['url'].endswith('20250103/')
 
 
-def test_attachment_failure_is_visible_and_keeps_a_bounded_retry(trading):
+def test_attachment_reference_is_skipped_without_retry(trading):
     obj = spider(trading)
     obj.run.history_deadline = time.monotonic() - 1
     url = 'https://ofac.treasury.gov/recent-actions/20250101'
@@ -824,13 +866,9 @@ def test_attachment_failure_is_visible_and_keeps_a_bounded_retry(trading):
     obj.cursor['history']['pending'] = [doc]
     parsed = {'url': url, 'title': 'Crypto sanctions', 'external_id': 'x', 'content_html': '<p>Virtual currency exchange sanctions.</p>', 'published_at': datetime(2025, 1, 1, tzinfo=UTC), 'raw_response_id': 12, 'retry_document': doc,
               'extra': {'attachments': [{'url': 'https://ofac.treasury.gov/a.pdf', 'title': 'License', 'status': 'unavailable'}]}}
-    before = datetime.now(UTC)
     item, = obj.attach_or_finish(parsed, 'history')
-    after = datetime.now(UTC)
-    assert item['extra']['content_scope'] == 'partial'
-    assert obj.cursor['attachment_retries'][url]['attempts'] == 1
-    assert obj.cursor['attachment_retries'][url]['document'] == doc
-    assert (before + timedelta(hours=1)).timestamp() <= obj.cursor['attachment_retries'][url]['next_at'] <= (after + timedelta(hours=1)).timestamp()
+    assert item['extra']['attachments'][0]['status'] == 'skipped_policy'
+    assert not obj.cursor.get('attachment_retries')
 
 
 @pytest.mark.parametrize('canceled,failed', [(False, False), (True, False), (False, True)])
@@ -1269,7 +1307,7 @@ def test_bill_undated_text_is_visible_retry_gap(trading):
     assert '缺少官方日期' in obj.cursor['bill_retries'][base]['error']
 
 
-def test_public_api_and_pdf_fixtures_replay_without_io(trading):
+def test_public_api_text_fixtures_replay_without_io(trading):
     import runpy
     from pathlib import Path
     script = runpy.run_path(str(Path(__file__).resolve().parents[2] / 'scripts/smoke_us_news.py'))
@@ -1286,25 +1324,20 @@ def test_congress_official_xml_crosscheck(trading):
     assert len(asyncio.run(script['congress_reference_items']())) == 3
 
 
-def test_congress_meeting_includes_deduplicated_witness_pdfs(trading, monkeypatch):
-    from alphapulse.crawler.spiders import us_official
-    monkeypatch.setattr(us_official, 'get_settings', lambda: SimpleNamespace(congress_api_key='test', crawler_contact_email='test@example.invalid'))
+def test_congress_meeting_keeps_deduplicated_pdf_references(trading, monkeypatch):
     obj = spider(trading, 'congress')
+    obj.run.history_deadline = time.monotonic() - 1
     doc = {'url': 'https://api.congress.gov/v3/committee-meeting/119/house/1', 'kind': 'meeting'}
     obj.cursor['history']['pending'] = [doc]
     pdf = {'url': 'https://www.congress.gov/witness.pdf', 'format': 'PDF', 'documentType': 'Witness Statement'}
     data = {'committeeMeeting': {'title': 'Digital asset regulation', 'updateDate': '2025-01-01T12:00:00Z', 'meetingDocuments': [pdf], 'witnessDocuments': [pdf]}}
     async def collect():
         return [v async for v in obj.parse_document(response(doc['url'], json.dumps(data), document=doc, lane='history'))]
-    req, = asyncio.run(collect())
-    assert req.url == pdf['url']
-    assert len(req.meta['parsed']['extra']['attachments']) == 1
-    assert req.meta['parsed']['extra']['attachments'][0]['title'] == 'Witness Statement'
-    obj.run.history_deadline = time.monotonic() - 1
-    req.meta['raw_response_id'] = 13
-    item, = obj.parse_attachment(Response(req.url, status=404, request=req))
-    assert item['extra']['content_scope'] == 'partial'
-    assert obj.cursor['attachment_retries'][doc['url']]['document'] == doc
+    item, = asyncio.run(collect())
+    assert len(item['extra']['attachments']) == 1
+    assert item['extra']['attachments'][0]['status'] == 'skipped_policy'
+    assert not obj.cursor.get('attachment_retries')
+
 
 
 def test_dated_but_unavailable_bill_text_remains_a_gap(trading):
@@ -1336,12 +1369,12 @@ def test_real_congress_api_fixture_replays_with_visible_source_gap(trading, tmp_
     assert len(items) == 100
     meetings = [item for item in items if item['extra'].get('official_meeting')]
     assert len(meetings) == 1
-    assert meetings[0]['extra']['content_scope'] == 'partial'
+    assert meetings[0]['extra']['content_scope'] == 'article'
     attachments = meetings[0]['extra']['attachments']
     assert len(attachments) == 15
     assert len({a['url'] for a in attachments}) == 15
-    assert sum(a['status'] == 'complete' for a in attachments) == 14
-    assert sum(a['status'] == 'unavailable' for a in attachments) == 1
+    assert all(a['status'] == 'skipped_policy' for a in attachments)
+    assert not any(a['status'] == 'unavailable' for a in attachments)
     assert any(item['extra']['content_scope'] == 'official_action' for item in items)
 
 
@@ -1395,7 +1428,7 @@ def test_sec_uses_official_dateline_not_last_reviewed_date():
     assert item['extra']['published_at_precision'] == 'date'
 
 
-def test_attachment_http_failure_spends_durable_retry_budget(trading):
+def test_legacy_attachment_failure_does_not_spend_retry_budget(trading):
     obj = spider(trading, 'doj')
     obj.run.history_deadline = time.monotonic() - 1
     url = 'https://www.justice.gov/opa/pr/example'
@@ -1408,9 +1441,8 @@ def test_attachment_http_failure_spends_durable_retry_budget(trading):
     failure = Failure(HttpError(Response(request.url, status=503, request=request)))
     failure.request = request
     item, = obj.on_request_error(failure)
-    assert item['extra']['content_scope'] == 'partial'
-    assert obj.cursor['attachment_retries'][url]['attempts'] == 1
-    assert '503' in obj.cursor['attachment_retries'][url]['error']
+    assert item['extra']['content_scope'] == 'article'
+    assert not obj.cursor.get('attachment_retries')
 
 
 @pytest.mark.parametrize('dated', [True, False])
@@ -1447,7 +1479,7 @@ def treasury_manifest():
 
 def test_treasury_json_replaces_only_discovery_cursors(trading):
     obj = spider(trading, 'treasury')
-    obj.cursor.update(checked={'completed': 1}, document_retries={'gap': {'document': {}, 'attempts': 3}},
+    obj.cursor.update(checked={'completed': 1}, document_retries={'gap': {'document': {'url': 'https://home.treasury.gov/news/press-releases/sb0001'}, 'attempts': 3, 'next_at': 0, 'policy_checked': 'web_text_images_v1'}},
                       attachment_retries={'attachment': {'attempts': 3}}, transport='old')
     obj.cursor['history']['page'] = SOURCES['treasury'].entries[0] + '?page=2'
     requests = obj.first_requests()
@@ -1496,34 +1528,29 @@ def test_treasury_json_incomplete_manifest_cannot_complete_history(trading, fail
 
 
 @pytest.mark.parametrize('source, expected', [('fincen', 4_000_000), ('sec', 2_000_000)])
-def test_pdf_budget_is_bounded_scoped_and_restored(trading, monkeypatch, source, expected):
-    from pypdf import get_configuration
-    from alphapulse.crawler.spiders import us_official
-    def extract(body):
-        assert get_configuration().stream_parsing_work_maximum_count == expected
-        raise ValueError('known PDF error')
-    monkeypatch.setattr(us_official, 'pdf_text', extract)
-    with pytest.raises(ValueError, match='known PDF error'):
-        spider(trading, source).pdf_text(b'%PDF-test')
-    assert get_configuration().stream_parsing_work_maximum_count == 2_000_000
+def test_news_spider_has_no_pdf_parser(trading, monkeypatch, source, expected):
+    from alphapulse.crawler.middlewares import NewsContentPolicyMiddleware
+    from scrapy.exceptions import IgnoreRequest
+    obj = spider(trading, source)
+    assert not hasattr(obj, 'pdf_text')
+    request = Request(SOURCES[source].entries[0] + '/report.pdf')
+    with pytest.raises(IgnoreRequest):
+        NewsContentPolicyMiddleware().process_request(request)
+    assert request.meta['policy_skipped']
 
 
-def test_pdf_resource_failure_retains_reason_as_a_gap(trading, monkeypatch):
-    from pypdf.errors import LimitReachedError
-    from alphapulse.calendar import umich
-    def reader(_):
-        raise LimitReachedError('stream work budget exhausted')
-    monkeypatch.setattr(umich, 'PdfReader', reader)
+
+def test_legacy_pdf_resource_is_a_policy_skip(trading, monkeypatch):
     obj = spider(trading, 'fincen')
-    doc = {'url': 'https://www.fincen.gov/system/files/report.pdf', 'kind': 'article', 'format': 'pdf',
-           'listing_date': '2026-11-03', 'listing_url': SOURCES['fincen'].entries[1], 'title': 'Official report'}
-    obj.cursor['realtime'].update(pending=[doc], entry=len(SOURCES['fincen'].entries))
+    obj.run.history_deadline = time.monotonic() - 1
+    doc = {'url': 'https://www.fincen.gov/system/files/report.pdf', 'kind': 'article', 'format': 'pdf'}
+    obj.cursor['history']['pending'] = [doc]
     async def collect():
-        return [item async for item in obj.parse_document(Response(doc['url'], body=b'%PDF-test',
-            request=Request(doc['url'], meta={'lane': 'realtime', 'document': doc, 'raw_response_id': 12})))]
+        return [v async for v in obj.parse_document(response(doc['url'], '<h1>PDF or error document</h1>', lane='history', document=doc))]
     assert asyncio.run(collect()) == []
-    assert 'stream work budget exhausted' in obj.cursor['document_retries'][doc['url']]['error']
-    assert doc['url'] not in obj.cursor.get('checked', {})
+    assert obj.cursor['document_retries'][doc['url']]['skipped_policy']
+    assert not obj.run.errors and not obj.cursor['history']['pending']
+
 
 
 @pytest.mark.parametrize('failure', ['count', 'date', 'host', 'path'])

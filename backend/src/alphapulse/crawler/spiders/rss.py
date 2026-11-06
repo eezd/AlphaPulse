@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from scrapy.crawler import Crawler
-from scrapy.http import Request, Response
+from scrapy.http import Request, Response, Headers
 from scrapy.settings.default_settings import RETRY_EXCEPTIONS
 
 from alphapulse.crawler.spiders.base import NewsSpider, html_to_text
@@ -164,7 +164,16 @@ class BlsDownloadHandler:
         async with httpx.AsyncClient(verify=self.ssl_context, timeout=request.meta.get("download_timeout", self.timeout)) as client:
             async with client.stream("GET", request.url, headers=headers) as response:
                 # 保留原始压缩体，避免 httpx 与 Scrapy 的 HttpCompressionMiddleware 重复解压。
-                body = b"".join([chunk async for chunk in response.aiter_raw()])
+                from alphapulse.crawler.content_policy import binary_headers
+                if binary_headers(Headers(response.headers.multi_items())):
+                    raise ValueError('订阅返回不支持的文件类型')
+                chunks, prefix = [], b''
+                async for chunk in response.aiter_raw():
+                    chunks.append(chunk)
+                    prefix = (prefix + chunk)[:8]
+                    if prefix.lstrip().startswith(b'%PDF'):
+                        raise ValueError('订阅返回 PDF 文件')
+                body = b''.join(chunks)
                 return Response(
                     str(response.url), status=response.status_code, headers=response.headers.multi_items(),
                     body=body, request=request,

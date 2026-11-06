@@ -4,24 +4,24 @@ import json
 import re
 import time
 import uuid
-from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from html import escape, unescape
 from email.utils import parsedate_to_datetime
 
 from lxml import etree
-from pypdf import apply_configuration
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from scrapy import Request
+from scrapy.exceptions import StopDownload
 from scrapy.http import Response
 from scrapy.spidermiddlewares.httperror import HttpError
 from sqlalchemy import select
+from twisted.python.failure import Failure
 
-from alphapulse.calendar.umich import pdf_text
+from alphapulse.crawler.content_policy import POLICY, SKIP_REASON, file_url
 from alphapulse.core.config import get_settings
 from alphapulse.core.db import SessionLocal
-from alphapulse.core.us_news import RULE_VERSION, SOURCES, article, identity, official_url, published, selection, validate_body
+from alphapulse.core.us_news import RULE_VERSION, SOURCES, UnsupportedDocument, article, identity, official_url, published, selection, validate_body
 from alphapulse.crawler.spiders.base import HISTORY_RUN_SECONDS, NewsSpider, html_to_text
 from alphapulse.models import NewsItem, Source
 
@@ -143,17 +143,11 @@ class USOfficialSpider(NewsSpider):
                     self.cursor[lane]['pending'] = [d for d in self.cursor[lane]['pending'] if d['url'] not in indexes]
         state = self.cursor.setdefault('realtime', {'entry': 0})
         retries = self.cursor.get('document_retries', {})
-        due_documents = [{**value['document'], 'document_retry': True} for value in retries.values() if value['attempts'] < 3 and value['next_at'] <= self.run.started_at.timestamp()]
+        rechecks = [{**v['document'], 'document_retry': True, 'policy_recheck': True} for v in retries.values() if v['attempts'] >= 3 and not v.get('policy_checked') and not v.get('skipped_policy') and not file_url(v['document']['url'])][:3]
+        state.setdefault('pending', []).extend(d for d in rechecks if d['url'] not in {p['url'] for p in state['pending']})
+        due_documents = [{**value['document'], 'document_retry': True} for value in retries.values() if not value.get('skipped_policy') and value['attempts'] < 3 and value['next_at'] <= self.run.started_at.timestamp()]
         if due_documents:
             state.setdefault('pending', []).extend(copy.deepcopy(d) for d in due_documents if d['url'] not in {p['url'] for p in state['pending']})
-        due = [value['document'] for value in self.cursor.get('attachment_retries', {}).values() if value['attempts'] < 3 and value['next_at'] <= self.run.started_at.timestamp()]
-        for doc in due:
-            pending = state.setdefault('pending', [])
-            existing = next((value for value in pending if value['url'] == doc['url']), None)
-            if existing is None:
-                pending.append({**copy.deepcopy(doc), 'attachment_retry': True})
-            else:
-                existing['attachment_retry'] = True
         bill_due = [{**v['document'], 'bill_retry': True} for v in self.cursor.get('bill_retries', {}).values() if v['attempts'] < 3 and v['next_at'] <= self.run.started_at.timestamp()]
         if bill_due:
             state.setdefault('pending', []).extend(d for d in bill_due if d['url'] not in {p['url'] for p in state['pending']})
@@ -182,10 +176,15 @@ class USOfficialSpider(NewsSpider):
             return []
         if state.get('pending'):
             doc = state['pending'][0]
+            if file_url(doc['url']) or doc.get('format') == 'pdf':
+                return self.skip_document(lane, doc)
             gap = self.cursor.get('document_retries', {}).get(doc['url'])
-            if doc['url'] in self.run.document_retries_started or (gap and (gap['attempts'] >= 3 or gap['next_at'] > self.run.started_at.timestamp())):
+            recheck = doc.get('policy_recheck') and gap and not gap.get('policy_checked')
+            if doc['url'] in self.run.document_retries_started or (not recheck and gap and (gap.get('skipped_policy') or gap['attempts'] >= 3 or gap['next_at'] > self.run.started_at.timestamp())):
                 state['pending'].pop(0)
                 return self.advance(lane)
+            if recheck:
+                gap['policy_checked'] = POLICY
             if gap:
                 doc['document_retry'] = True
                 self.run.document_retries_started.add(doc['url'])
@@ -344,6 +343,9 @@ class USOfficialSpider(NewsSpider):
                     continue
                 fincen_row = a.xpath('ancestor::tr[ancestor::main][1]') if self.name == 'fincen' and response.url.split('?')[0] in SOURCES['fincen'].entries[1:] else []
                 fincen_pdf = bool(fincen_row and urlsplit(url).path.lower().endswith('.pdf'))
+                if file_url(url) and re.search(pattern, urlsplit(url).path) and not fincen_pdf:
+                    docs.append({'url': url, 'kind': 'article', 'format': 'pdf'})
+                    continue
                 if fincen_pdf or (re.search(pattern, urlsplit(url).path) and url not in SOURCES[self.name].entries and not re.search(r'/\d{4}-(?:press|speeches|testimony)\.htm$', urlsplit(url).path) and not url.lower().endswith('.pdf')):
                     doc = {'url': url, 'kind': 'article'}
                     if fincen_row:
@@ -352,11 +354,13 @@ class USOfficialSpider(NewsSpider):
                         begin = self.run.history_target if lane == 'history' else self.run.cutoff
                         if re.fullmatch(r'(?:0?[1-9]|1[0-2])/\d{4}', date) and int(date[-4:]) < begin.year:
                             continue
-                        doc['listing_date'] = published(date)[0].date().isoformat()
+                        try:
+                            doc['listing_date'] = published(date)[0].date().isoformat()
+                        except ValueError:
+                            if not fincen_pdf:
+                                raise
                         if fincen_pdf:
                             title = fincen_row.xpath('normalize-space(td[3])').get() if response.url.split('?')[0] == SOURCES['fincen'].entries[2] else a.xpath('normalize-space(.)').get()
-                            if not title:
-                                raise ValueError('FinCEN PDF 列表缺少标题')
                             doc.update(format='pdf', title=title, listing_url=response.url)
                     elif self.name in ('sec', 'treasury', 'cftc', 'fincen', 'whitehouse'):
                         container = {
@@ -410,7 +414,7 @@ class USOfficialSpider(NewsSpider):
             self.cursor['checked'] = {k: v for k, v in checked.items() if v >= threshold}
             docs = [d for d in docs if self.cursor['checked'].get(d['url'], 0) < threshold]
         retries = self.cursor.get('document_retries', {})
-        docs = [d for d in docs if d['url'] not in retries or (retries[d['url']]['attempts'] < 3 and retries[d['url']]['next_at'] <= self.run.started_at.timestamp())]
+        docs = [d for d in docs if d['url'] not in retries or (not retries[d['url']].get('skipped_policy') and retries[d['url']]['attempts'] < 3 and retries[d['url']]['next_at'] <= self.run.started_at.timestamp())]
         docs = [{**d, 'document_retry': True} if d['url'] in retries else d for d in docs]
         if next_url and official_url(self.name, next_url, response.url) == response.url:
             raise ValueError('官方列表翻页重复当前页面，未推进断点')
@@ -440,7 +444,7 @@ class USOfficialSpider(NewsSpider):
         now = datetime.now(UTC)
         if not previous or previous['next_at'] <= now.timestamp():
             retries[doc['url']] = {'document': copy.deepcopy(doc), 'attempts': previous.get('attempts', 0) + 1,
-                                  'next_at': (now + timedelta(hours=1)).timestamp(), 'error': error}
+                                  'next_at': (now + timedelta(hours=1)).timestamp(), 'error': error, **({'policy_checked': POLICY} if previous.get('policy_checked') else {})}
         self.run.document_retries_started.add(doc['url'])
         self.run.errors.append(error)
         self.logger.error('文档缺口：%s；%s', doc['url'], error)
@@ -449,7 +453,15 @@ class USOfficialSpider(NewsSpider):
         return self.advance(request.meta['lane'])
 
     def on_request_error(self, failure):
+        # 文件响应可在响应头阶段被截断，但 HTTP 故障仍须保留退避和重试语义。
+        if failure.check(StopDownload) and not 200 <= failure.value.response.status < 300:
+            response, request = failure.value.response, failure.request
+            request.meta.pop('policy_skipped', None)
+            failure = Failure(HttpError(response))
+            failure.request = request
         status = failure.value.response.status if failure.check(HttpError) else None
+        if failure.request.meta.get('parsed'):
+            return list(self.attach_or_finish(failure.request.meta['parsed'], failure.request.meta['lane']))
         if self.name in ('sec', 'doj', 'congress') and status in (403, 429, 503):
             if status in (403, 429):
                 self.block_until(datetime.now(UTC) + timedelta(hours=1))
@@ -461,10 +473,10 @@ class USOfficialSpider(NewsSpider):
                         self.block_until(until)
                 except (ValueError, TypeError, OverflowError):
                     self.logger.warning('忽略无效 Retry-After 响应头')
-        if self.name in ('sec', 'doj', 'congress') and (parsed := failure.request.meta.get('parsed')):
-            attachment = next(a for a in parsed['extra']['attachments'] if a['status'] == 'pending')
-            attachment.update(status='unavailable', error=f'请求失败：{status or repr(failure.value)}')
-            return list(self.attach_or_finish(parsed, failure.request.meta['lane']))
+        if failure.request.meta.get('policy_skipped'):
+            if doc := failure.request.meta.get('document'):
+                return self.skip_document(failure.request.meta['lane'], doc)
+            return super().on_request_error(failure)
         if status not in (403, 429) or self.name in ('sec', 'doj', 'congress'):
             requests = self.document_failed(failure.request, f'请求失败 {failure.request.url}：{status or repr(failure.value)}')
             if requests is not None:
@@ -475,6 +487,9 @@ class USOfficialSpider(NewsSpider):
         try:
             async for result in self._parse_document(response):
                 yield result
+        except UnsupportedDocument:
+            for request in self.skip_document(response.meta['lane'], response.meta['document']):
+                yield request
         except (ValueError, KeyError, TypeError) as exc:
             if '验证' in str(exc) or '登录页面' in str(exc):
                 self.block_until(datetime.now(UTC) + timedelta(minutes=15))
@@ -487,6 +502,10 @@ class USOfficialSpider(NewsSpider):
     async def _parse_document(self, response):
         lane, doc = response.meta['lane'], response.meta['document']
         begin = self.run.history_target if lane == 'history' else self.run.cutoff
+        if file_url(doc['url']) or doc.get('format') == 'pdf':
+            for request in self.skip_document(lane, doc):
+                yield request
+            return
         if not (doc.get('document_retry') or doc.get('attachment_retry')) and doc.get('listing_date') and published(doc['listing_date'])[0].date() < begin.date():
             self.run.stats['outside_range'] = self.run.stats.get('outside_range', 0) + 1
             for result in self.complete(lane):
@@ -572,12 +591,16 @@ class USOfficialSpider(NewsSpider):
                     yield item
             else:
                 for version in data['textVersions']:
+                    if version.get('formats') and all(f['type'] == 'PDF' for f in version['formats']):
+                        self.cursor[lane]['bill']['policy_skipped'] = True
+                        self.run.stats['policy_skipped'] = self.run.stats.get('policy_skipped', 0) + 1
+                        continue
                     if not version.get('date'):
                         self.cursor[lane]['bill']['missing_material'] = True
                         self.cursor[lane]['bill'].setdefault('material_errors', []).append(f"{version.get('type', '正文版本')} 缺少官方日期")
                         continue
                     formats = version.get('formats', [])
-                    chosen = next((f for f in formats if f['type'] == 'Formatted Text'), None) or next((f for f in formats if f['type'] == 'Formatted XML'), None) or next((f for f in formats if f['type'] == 'PDF'), None)
+                    chosen = next((f for f in formats if f['type'] == 'Formatted Text'), None) or next((f for f in formats if f['type'] == 'Formatted XML'), None) or None
                     if not chosen:
                         self.cursor[lane]['bill']['missing_material'] = True
                         self.cursor[lane]['bill'].setdefault('material_errors', []).append(f"{version.get('type', '正文版本')} 缺少支持的正文格式")
@@ -628,7 +651,7 @@ class USOfficialSpider(NewsSpider):
                 attachment_html = ''
             elif not isinstance(attachment_html, str):
                 raise ValueError('DOJ API 附件结构未识别')
-            html = f'<h1>{escape(title)}</h1><time datetime="{date}"></time><article><div class="field--name-body">{record["body"]}{attachment_html}</div></article>'
+            html = f'<h1>{escape(title)}</h1><time datetime="{date}"></time><article><div class="field--name-body">{record["body"]}{record.get("image") or ""}{attachment_html}</div></article>'
             validate_body(record['body'])
             parsed = article(self.name, html, canonical)
             known = {a['url'] for a in parsed['extra']['attachments']}
@@ -640,20 +663,13 @@ class USOfficialSpider(NewsSpider):
                     parsed['source_updated_at'] = published(times[0])[0]
             parsed['extra']['official_uuid'] = record['uuid']
             doc = {**doc, 'canonical': canonical}
-        elif doc['kind'] == 'text' or doc.get('format') == 'pdf':
-            at, precision = published(doc['listing_date'] if doc.get('format') == 'pdf' else doc['at'])
-            if response.body.startswith(b'%PDF'):
-                content = '<pre>' + escape(self.pdf_text(response.body)) + '</pre>'
-            else:
-                content = response.text
-                validate_body(content)
-                if doc.get('format') == 'pdf':
-                    raise ValueError('官方 PDF 返回非 PDF 正文')
-                if '<' not in content:
-                    content = '<pre>' + escape(content) + '</pre>'
+        elif doc['kind'] == 'text':
+            at, precision = published(doc['at'])
+            content = response.text
+            validate_body(content)
+            if '<' not in content:
+                content = '<pre>' + escape(content) + '</pre>'
             parsed = {'title': doc['title'], 'content_html': content, 'published_at': at, 'extra': {'content_scope': 'article', 'language': 'en', 'published_at_precision': precision, 'published_date': at.date().isoformat(), 'rule_version': RULE_VERSION, 'official_document': doc, 'attachments': []}}
-            if doc.get('format') == 'pdf':
-                parsed['extra'].update(published_at_basis='official_listing', published_at_source=doc['listing_url'])
             if doc.get('pdf'):
                 parsed['extra']['attachments'].append({'url': official_url(self.name, doc['pdf']), 'title': 'Official PDF', 'status': 'pending'})
         else:
@@ -698,7 +714,7 @@ class USOfficialSpider(NewsSpider):
     def finish_bill(self, lane):
         context = self.cursor[lane].pop('bill')
         retries = self.cursor.setdefault('bill_retries', {})
-        if not context['bodies'] or context.get('missing_material'):
+        if (not context['bodies'] and not context.get('policy_skipped')) or context.get('missing_material'):
             previous = retries.get(context['url'], {})
             errors = list(context.get('material_errors', []))
             if not context['bodies']:
@@ -714,66 +730,38 @@ class USOfficialSpider(NewsSpider):
         if lane == 'realtime':
             self.cursor.setdefault('checked', {})[context['document_url']] = self.run.started_at.timestamp()
 
+    def skip_document(self, lane, doc):
+        if doc.get('bill'):
+            self.cursor[lane]['bill']['policy_skipped'] = True
+        previous = self.cursor.get('document_retries', {}).get(doc['url'], {})
+        self.cursor.setdefault('document_retries', {})[doc['url']] = {
+            **previous, 'document': doc, 'attempts': previous.get('attempts', 0),
+            'next_at': 0, 'skipped_policy': POLICY, 'error': SKIP_REASON,
+            'previous_error': previous.get('previous_error') or previous.get('error'),
+        }
+        self.run.stats['policy_skipped'] = self.run.stats.get('policy_skipped', 0) + 1
+        self.cursor[lane]['pending'].pop(0)
+        return self.advance(lane)
+
     def attach_or_finish(self, parsed, lane):
-        retired = self.cursor.get('attachment_retries', {}).get(parsed['url'], {})
-        if retired.get('retired_at'):
-            for attachment in parsed['extra']['attachments']:
-                if attachment['status'] == 'pending':
-                    attachment.update(status='unavailable', error=retired['error'])
-        pending = next((a for a in parsed['extra']['attachments'] if a['status'] == 'pending'), None)
-        if pending:
-            request = self.request_for(pending['url'], self.parse_attachment, lane, parsed=parsed)
-            request.meta['handle_httpstatus_list'] = [404, 410]
-            yield request
-            return
-        self.retire_exhausted()
+        for attachment in parsed['extra'].get('attachments', []):
+            attachment.update(status='skipped_policy', error=SKIP_REASON)
+        parsed['extra']['collection_policy'] = POLICY
+        parsed['extra'].setdefault('content_scope', 'article')
+        parsed.pop('retry_document', None)
         text = html_to_text(parsed['content_html'])
         reasons = selection(self.name, parsed['title'], text) or parsed['extra'].get('selection_reasons', [])
-        incomplete = any(a['status'] != 'complete' for a in parsed['extra']['attachments'])
-        retry_doc = parsed.pop('retry_document', None)
-        retries = self.cursor.setdefault('attachment_retries', {})
-        if incomplete and retry_doc and not retired.get('retired_at'):
-            previous = retries.get(parsed['url'], {})
-            error = '；'.join(f"{a['url']}：{a.get('error') or '附件尚未完成文字提取'}" for a in parsed['extra']['attachments'] if a['status'] != 'complete')
-            retries[parsed['url']] = {'document': retry_doc, 'attempts': previous.get('attempts', 0) + 1, 'next_at': (datetime.now(UTC) + timedelta(hours=1)).timestamp(), 'error': error, 'failed_urls': [a['url'] for a in parsed['extra']['attachments'] if a['status'] != 'complete']}
-        elif not incomplete:
-            retries.pop(parsed['url'], None)
-        self.retire_exhausted()
         if reasons:
             parsed['extra']['selection_reasons'] = reasons
-            parsed['extra']['content_scope'] = 'partial' if incomplete else 'article'
-            self.run.stats['partial'] = self.run.stats.get('partial', 0) + int(incomplete)
             raw_id = parsed.pop('raw_response_id')
-            item = self.item(Response(parsed['url'], request=Request(parsed['url'], meta={'raw_response_id': raw_id})), summary='', **parsed)
-            yield item
+            yield self.item(Response(parsed['url'], request=Request(parsed['url'], meta={'raw_response_id': raw_id})), summary='', **parsed)
         else:
             self.run.stats['excluded'] = self.run.stats.get('excluded', 0) + 1
-            if incomplete:
-                self.run.stats['unclassified_attachment_gaps'] = self.run.stats.get('unclassified_attachment_gaps', 0) + 1
         yield from self.complete(lane)
 
-    def pdf_text(self, body):
-        # Bound the known complex FinCEN report without changing other collectors' limits.
-        context = apply_configuration(stream_parsing_work_maximum_count=4_000_000) if self.name == 'fincen' else nullcontext()
-        with context:
-            return pdf_text(body)
-
     def parse_attachment(self, response):
-        parsed = response.meta['parsed']
-        attachment = next(a for a in parsed['extra']['attachments'] if a['url'] == response.url or a['status'] == 'pending')
-        attachment['raw_response_id'] = response.meta['raw_response_id']
-        try:
-            if response.status != 200:
-                raise ValueError(f'HTTP {response.status}')
-            if response.headers.get('Content-Type', b'').lower().startswith(b'image/') and response.body.startswith((b'\x89PNG\r\n\x1a\n', b'\xff\xd8\xff', b'GIF87a', b'GIF89a')):
-                raise ValueError('官方图片附件尚未提取文字，请核对原文')
-            text = self.pdf_text(response.body)
-            attachment['status'] = 'complete'
-            parsed['content_html'] += f"<section><h2>{escape(attachment['title'])}</h2><pre>{escape(text)}</pre></section>"
-        except (ValueError, OSError) as exc:
-            attachment.update(status='unavailable', error=str(exc))
-            self.logger.warning('附件缺口：%s', response.url)
-        yield from self.attach_or_finish(parsed, response.meta['lane'])
+        """只供 Redis 遗留回调反序列化；新流程不创建此请求。"""
+        yield from self.attach_or_finish(response.meta['parsed'], response.meta['lane'])
 
     def retire_exhausted(self):
         if self.name not in ('sec', 'doj', 'congress'):

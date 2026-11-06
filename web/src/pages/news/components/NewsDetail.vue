@@ -112,11 +112,12 @@ const diffStats = computed(() => ({
         title="此条新闻仅采集公开摘要，完整内容请查看原文链接。"
         type="info" :closable="false" show-icon
       />
+      <el-alert v-if="detail.extra.collection_policy === 'web_text_images_v1'" title="仅采集网页文字与图片引用，未读取链接中的 PDF 或附件。" type="info" :closable="false" />
       <el-alert v-if="detail.extra.content_scope === 'partial'" title="正文或关键附件存在采集缺口，请核对官方原文。" type="warning" :closable="false" />
       <div v-if="Array.isArray(detail.extra.attachments)" class="flex flex-wrap gap-2 text-xs">
         <span v-for="attachment in (detail.extra.attachments as { url: string, title: string, status: string }[])" :key="attachment.url">
           <el-link :href="attachment.url" target="_blank" type="primary">{{ attachment.title || '附件' }}</el-link>
-          （{{ attachment.status === 'complete' ? '已采集' : '存在缺口' }}）
+          （{{ attachment.status === 'complete' ? '已采集' : attachment.status === 'skipped_policy' ? '按规则未采集' : '历史采集缺口' }}）
         </span>
       </div>
       <el-tabs v-model="activeTab" class="min-h-0 flex flex-1 flex-col">

@@ -25,6 +25,7 @@ RETRY_TIMES = 2
 RETRY_HTTP_CODES = [500, 502, 503, 504, 522, 524, 408]
 
 DOWNLOADER_MIDDLEWARES = {
+    "alphapulse.crawler.middlewares.NewsContentPolicyMiddleware": 90,
     "alphapulse.crawler.middlewares.RedisRateLimitMiddleware": 100,
     # process_response 按优先级从大到小调用：排在 HttpCompression(590) 之后拿到解压后的响应体，
     # 排在 Retry(550) 之前，被重试的每次响应也都会记录

@@ -62,6 +62,8 @@ test("gap details retain reasons, exhausted state and legacy records while colle
   assert.equal(gaps[0].nextAt, new Date(1793853098 * 1000).toISOString())
   assert.equal(gaps[1].url, "https://www.justice.gov/release")
   assert.match(gaps[1].error, /图片/)
+  assert.equal(gaps[1].ignored, true)
+  assert.equal(gaps[0].ignored, false)
   assert.equal(gaps[1].exhausted, false)
   assert.equal(gaps[2].exhausted, true)
   assert.equal(gaps[2].url, "https://www.congress.gov/bill/119th-congress/house-bill/1")

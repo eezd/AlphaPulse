@@ -47,8 +47,9 @@ export function collectionGaps(source: Pick<SourceInfo, "history_cursor">) {
     key: `${key}:${url}`,
     label,
     url: originalUrl(retry.document.canonical ?? retry.document.url),
-    error: retry.error || "历史记录未保存具体原因，请核对原文",
+    error: retry.previous_error || retry.error || "历史记录未保存具体原因，请核对原文",
     attempts: retry.attempts,
+    ignored: key === "attachment_retries" || !!retry.skipped_policy || /\.(?:pdf|docx?|xlsx?|pptx?|zip|gz|rar|7z|rtf|odt|ods|odp|exe|bin)(?:$|[?#/])/i.test(retry.document.url),
     retired: !!retry.retired_at,
     exhausted: retry.attempts >= 3,
     nextAt: new Date(retry.next_at * 1000).toISOString()

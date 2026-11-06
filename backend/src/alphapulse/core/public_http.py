@@ -19,6 +19,9 @@ async def public_address(url):
 async def fetch_public_response(url):
     async with httpx.AsyncClient(timeout=20, trust_env=False) as client:
         for _ in range(4):
+            from alphapulse.crawler.content_policy import file_url
+            if file_url(url):
+                raise ValueError('订阅地址不支持 PDF 或附件')
             parsed, address = await public_address(url)
             # Pin the checked address while retaining TLS hostname verification.
             target = httpx.URL(url).copy_with(host=address)
@@ -27,11 +30,18 @@ async def fetch_public_response(url):
                     location = response.headers.get('location')
                     if not location: raise ValueError('重定向缺少地址')
                     url = str(httpx.URL(url).join(location)); continue
-                chunks, size = [], 0
+                from scrapy.http import Headers
+                from alphapulse.crawler.content_policy import binary_headers
+                if binary_headers(Headers(response.headers.multi_items())):
+                    raise ValueError('订阅返回不支持的文件类型')
+                chunks, size, prefix = [], 0, b''
                 async for chunk in response.aiter_bytes():
                     size += len(chunk)
                     if size > 2*1024*1024: raise ValueError('响应超过2MiB限制')
                     chunks.append(chunk)
+                    prefix = (prefix + chunk)[:8]
+                    if prefix.lstrip().startswith(b'%PDF'):
+                        raise ValueError('订阅返回 PDF 文件')
                 body = b''.join(chunks)
                 # Bytes are already decompressed; Scrapy must not decode them again.
                 headers = [(k, v) for k, v in response.headers.multi_items()

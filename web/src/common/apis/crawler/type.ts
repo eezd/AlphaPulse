@@ -38,6 +38,8 @@ export interface SourceInfo {
 
 export interface CollectionRetry {
   retired_at?: string
+  skipped_policy?: string
+  previous_error?: string
   document: { url: string, canonical?: string }
   attempts: number
   next_at: number

@@ -69,7 +69,7 @@ const history = computed(() => {
   const percent = Math.min(100, Math.max(0, Math.round(covered / span * 1000) / 10))
   const reached = formatTime(position, "YYYY-MM-DD HH:mm")
   if (done && position && new Date(position) <= new Date(target))
-    return { text: `列表遍历完成，已到 ${reached}；正文及附件缺口以条目状态为准`, percent: 100, status: "success" } as const
+    return { text: `列表遍历完成，已到 ${reached}；仅遍历支持的文字与图片；正文缺口及格式跳过见详情`, percent: 100, status: "success" } as const
   if (done)
     return { text: `来源最早只能翻到 ${reached}，更早的数据接口不提供`, percent, status: "warning" } as const
   return { text: position ? `进行中，已到 ${reached}` : "等待下一轮开始", percent, status: undefined }
@@ -153,6 +153,9 @@ onMounted(loadLatest)
     <div v-if="source.collection_stats?.active_gaps !== 0 && source.collection_stats?.document_gaps" class="text-xs text-amber-600">
       正文待核验 {{ source.collection_stats.document_gaps }}；待重试 {{ source.collection_stats.document_retry_pending }}；重试已耗尽 {{ source.collection_stats.document_retry_exhausted }}，请核对来源日志
     </div>
+    <p v-if="source.collection_stats?.policy_ignored" class="text-xs text-slate-500">
+      按文字与图片规则不再采集 {{ source.collection_stats.policy_ignored }} 项历史文件记录；原始原因保留。
+    </p>
     <p v-if="source.collection_stats?.retired_count" class="text-xs text-slate-500">
       已停止采集 {{ source.collection_stats.retired_count }} 条，原因及原文保留在详情中。
     </p>
@@ -161,7 +164,7 @@ onMounted(loadLatest)
         缺口详情（{{ gaps.length }}）
       </summary>
       <div v-for="gap in gaps" :key="gap.key" class="mt-2 border border-amber-200 rounded border-solid p-2">
-        <div>{{ gap.label }}；已尝试 {{ gap.attempts }} 次；{{ gap.retired ? "已停止采集" : gap.exhausted ? "重试已耗尽" : `下次重试不早于 ${formatTime(gap.nextAt)}` }}</div>
+        <div>{{ gap.label }}；已尝试 {{ gap.attempts }} 次；{{ gap.ignored ? "按规则不再采集" : gap.retired ? "已停止采集" : gap.exhausted ? "重试已耗尽" : `下次重试不早于 ${formatTime(gap.nextAt)}` }}</div>
         <div class="my-1 whitespace-pre-wrap break-words">
           {{ gap.error }}
         </div>
@@ -169,7 +172,7 @@ onMounted(loadLatest)
       </div>
     </details>
     <div v-if="source.collection_stats?.discovered" class="text-xs text-slate-500">
-      本轮发现 {{ source.collection_stats.discovered }}；筛除 {{ source.collection_stats.excluded ?? 0 }}；不完整包 {{ source.collection_stats.partial ?? 0 }}
+      本轮格式跳过 {{ source.collection_stats.policy_skipped ?? 0 }}；发现 {{ source.collection_stats.discovered }}；筛除 {{ source.collection_stats.excluded ?? 0 }}；不完整包 {{ source.collection_stats.partial ?? 0 }}
     </div>
     <div class="flex justify-between text-xs text-slate-500">
       <span>今日新增 <b class="num text-[var(--el-color-primary)]">+{{ source.today_new }}</b></span>

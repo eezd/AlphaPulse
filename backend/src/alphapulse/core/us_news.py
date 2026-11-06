@@ -32,7 +32,7 @@ SOURCES = {
     'doj': OfficialSource('DOJ·加密机构执法', ('https://www.justice.gov/api/v1/press_releases.json?pagesize=50&sort=date&direction=DESC&fields=uuid,date',), r'/(?:opa|usao[^/]*|archives/opa)/(?:pr|speech)/[^/]+', '.field--name-body, .field--name-field-pr-body', ('www.justice.gov',)),
     'fed': OfficialSource('美联储·政策与讲话', tuple(f'https://www.federalreserve.gov/newsevents/{kind}/{year}-{suffix}.htm' for year in range(datetime.now(UTC).year, 2024, -1) for kind, suffix in (('pressreleases', 'press'), ('speech', 'speeches'), ('testimony', 'testimony'))) + ('https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm', 'https://www.federalreserve.gov/releases/h41/releaseDates.json'), r'/(?:newsevents/(?:pressreleases|speech|testimony)/[^/]+\.htm|monetarypolicy/(?:fomcminutes|fomcprojtabl)\d+\.htm|releases/h41/\d+/)', '#article, .col-xs-12.col-sm-8.col-md-8, #content', ('www.federalreserve.gov',), 60),
 }
-RULE_VERSION = 'us-policy-v2'
+RULE_VERSION = 'us-policy-v3-text-images'
 CRYPTO = re.compile(r'\b(?:crypto(?:currency|currencies|[ -]assets?)?|digital[ -]assets?|virtual[ -]currenc(?:y|ies)|stablecoins?|bitcoin|ethereum|blockchain|tokeniz(?:ed|ation))\b', re.I)
 POLICY = re.compile(r'\b(?:regulat\w*|rules?|guidance|legislation|acts?|sanctions?|licenses?|executive order|monetary policy|federal funds|interest rates?|balance sheet|liquidity|quantitative|refunding|borrowing|debt limit|tariffs?|fiscal|budget|appropriation|tax reform)\b', re.I)
 INSTITUTION = re.compile(r'\b(?:exchanges?|banks?|financial institutions?|payment processors?|custodians?|stablecoin issuers?|binance|coinbase|tether|circle|kraken|bybit|bitfinex)\b', re.I)
@@ -88,7 +88,7 @@ def published(value: str) -> tuple[datetime, str]:
     raise ValueError('官方材料缺少可识别的发布时间')
 
 
-def validate_body(content: str) -> None:
+def validate_body(content: str, *, allow_images: bool = False) -> None:
     """Reject error documents without requiring full-page HTML around fragments."""
     if content.lstrip().startswith('<?xml'):
         from lxml import etree
@@ -103,13 +103,21 @@ def validate_body(content: str) -> None:
         raise ValueError('官方正文返回验证或登录页面')
     if re.search(r'enable javascript and cookies to continue', text, re.I):
         raise ValueError('官方正文返回验证页面')
-    if len(text) < 40:
+    if len(text) < 40 and not (allow_images and sel.css('img[src], img[data-src]')):
         raise ValueError('官方正文为空或过短')
+
+
+class UnsupportedDocument(ValueError):
+    """官方页面只提供文件，没有支持的网页正文。"""
 
 
 def article(source: str, html: str, url: str, *, release_date: str | None = None) -> dict:
     sel = Selector(html)
-    validate_body(html)
+    from alphapulse.crawler.content_policy import SKIP_REASON
+    file_entry = (source == 'sec' and sel.css('article.node--type-regulation a[href*=".pdf"]')) or (source == 'fincen' and sel.css('main .field--name-field-advisory-file, main a[href*="/system/files/"]'))
+    if file_entry and not sel.css(SOURCES[source].body):
+        raise UnsupportedDocument(SKIP_REASON)
+    validate_body(html, allow_images=True)
     selectors = {
         'fed': ('#article h3.title', '#article h3', '#article h2', '#content .heading h3', '#content .col-xs-12.col-sm-8.col-md-8 h3'),
         'treasury': ('h2.uswds-page-title',),
@@ -158,9 +166,10 @@ def article(source: str, html: str, url: str, *, release_date: str | None = None
         if parent is not None:
             parent.remove(node.root)
     body = sorted(body, key=lambda node: len(node.xpath('string(.)').get()), reverse=True)
-    content = body[0].get()
+    from alphapulse.crawler.content_policy import clean_html
+    content = clean_html(body[0].get(), url)
     text = ' '.join(body[0].xpath('.//text()').getall()).strip()
-    if len(text) < 40:
+    if len(text) < 40 and not body[0].css('img[src], img[data-src]'):
         raise ValueError('官方正文为空或过短')
     attachments = []
     for link in body[0].css('a[href]'):

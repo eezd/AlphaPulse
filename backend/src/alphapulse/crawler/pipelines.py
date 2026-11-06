@@ -6,7 +6,9 @@ from scrapy.crawler import Crawler
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from alphapulse.crawler.content_policy import clean_html
 from alphapulse.core.db import SessionLocal
+from alphapulse.crawler.spiders.base import html_to_text
 from alphapulse.core.redis import redis
 from alphapulse.crawler.events import NEWS_CHANNEL
 from alphapulse.models import NewsItem, NewsRevision
@@ -31,6 +33,11 @@ class NewsPipeline:
 
     async def process_item(self, item: dict[str, Any]) -> dict[str, Any]:
         spider = self.crawler.spider
+        for field in ('title', 'summary', 'author'):
+            if isinstance(item.get(field), str):
+                item[field] = item[field].replace('\x00', '')
+        item['content_html'] = clean_html(item['content_html'], item['url'])
+        item['content_text'] = html_to_text(item['content_html'])
         digest = content_hash(item)
         raw_response_id = item.pop("raw_response_id")
         locked = (
@@ -56,11 +63,14 @@ class NewsPipeline:
             if inserted_id is not None:
                 kind = "new"
             else:
+                same_content = (news.title.replace('\x00', '') == item['title']
+                    and news.summary.replace('\x00', '') == item['summary']
+                    and clean_html(news.content_html, news.url) == item['content_html'])
                 # 主记录保存最新元数据；正文修订仍只由内容哈希变化决定。
                 for field in UPDATABLE_FIELDS:
                     setattr(news, field, item[field])
                 news.last_seen_at = func.now()
-                if news.content_hash != digest:
+                if not same_content and news.content_hash != digest:
                     kind = "revised"
                     news.content_hash = digest
                     news.revision_no += 1

@@ -26,16 +26,14 @@ BACKEND_ROOT = Path(pipelines.__file__).resolve().parents[3]
 
 
 async def public_api_items():
-    """Replay captured public API bodies and PDFs without network or database I/O."""
-    import base64
+    """Replay captured public API text bodies without network or database I/O."""
     import time
     import uuid
     from datetime import UTC, datetime
     from scrapy import Request
-    from scrapy.http import HtmlResponse, Response
+    from scrapy.http import HtmlResponse
     from alphapulse.crawler.spiders.base import RunState
     samples = json.load(gzip.open(BACKEND_ROOT / 'tests/fixtures/us_news/api_samples.json.gz', 'rt'))
-    pdfs = {s['url']: base64.b64decode(s['base64']) for s in samples if s['kind'] == 'pdf'}
     items = []
     for sample in (s for s in samples if s['kind'] != 'pdf'):
         obj = USOfficialSpider(name=sample['source'])
@@ -53,12 +51,8 @@ async def public_api_items():
         if sample.get('excluded'):
             assert not output
             continue
-        while output and isinstance(output[0], Request):
-            req = output[0]
-            req.meta['raw_response_id'] = None
-            output = list(obj.parse_attachment(Response(req.url, body=pdfs[req.url], request=req)))
         assert len(output) == 1 and output[0]['extra']['content_scope'] == 'article'
-        assert output[0]['extra']['attachments']
+        assert all(a['status'] == 'skipped_policy' for a in output[0]['extra']['attachments'])
         items += output
     assert len(items) == 3
     return items
@@ -107,7 +101,7 @@ async def congress_api_items():
     assert len(report['cases']) == 4
     assert all(case.get('parser_accepted') for case in report['cases'])
     assert report['cases'][0]['unresolved_bills'] == 1
-    assert report['accepted'] is False  # Undated GENIUS text and an unreadable meeting PDF remain gaps.
+    assert report['accepted'] is False  # Undated GENIUS text remains a genuine gap.
     assert len(items) == sum(case['items'] for case in report['cases'])
     return items
 
@@ -239,7 +233,7 @@ async def main():
     await obj._finish_run(unsafe_run)
     async with SessionLocal() as session:
         assert (await session.get(Source, 'ofac')).history_cursor['checked'] == completed
-    # API/PDF packages use the real parser and database revision pipeline too.
+    # API text packages use the real parser and database revision pipeline too.
     api_items = await public_api_items() + await congress_reference_items() + await congress_api_items()
     with patch.object(pipelines, 'redis', SimpleNamespace(publish=AsyncMock())):
         for item in api_items:
@@ -258,7 +252,7 @@ async def main():
     async with SessionLocal() as session:
         assert await session.scalar(select(func.count()).select_from(NewsRevision)) == baseline_count + 1
     await engine.dispose()
-    print('US source migration, HTML, API/PDF, GovInfo and Congress packages, API/PDF replay and revision, negative screening, daily XML, RSS identity, challenge rejection, checkpoint recovery and failed-document persistence passed')
+    print('US source migration, HTML, API text, GovInfo and Congress packages, API text replay and revision, negative screening, daily XML, RSS identity, challenge rejection, checkpoint recovery and failed-document persistence passed')
 
 
 if __name__ == '__main__':
