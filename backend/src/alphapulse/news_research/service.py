@@ -459,6 +459,7 @@ async def _process_package(identifier, config, expected_stage):
         attempt_id = attempt.id
         output = None
         used = None
+        output_audit = {}
         try:
             vocabulary = await vocab.snapshot(session)
             if stage == "assign":
@@ -480,9 +481,12 @@ async def _process_package(identifier, config, expected_stage):
             )
             if stage == "index":
                 cleaned, changes = clean_aliases(output, source)
+                output_audit = {"output_adjustments": changes}
+                if changes:
+                    output_audit["raw_output"] = output.model_dump(mode="json")
+                attempt.rules = {**attempt.rules, **output_audit}
                 validate_keywords(cleaned, source)
                 output = cleaned
-                attempt.rules = {**attempt.rules, "output_adjustments": changes}
             else:
                 validate_assignment(output, source, {e.id for e in catalog}, payload["keywords"])
             async with publication_lock:
@@ -586,6 +590,7 @@ async def _process_package(identifier, config, expected_stage):
         except Exception as error:
             await session.rollback()
             attempt = await session.get(Attempt, attempt_id)
+            attempt.rules = {**attempt.rules, **output_audit}
             attempt.state = "failed"
             attempt.error = str(error)[:2000]
             attempt.output = output.model_dump(mode="json") if output else None
@@ -859,6 +864,7 @@ async def process_event(identifier, config, force=False):
         researcher = Research(event={"id": identifier, "revision": revision})
         output = None
         used = None
+        output_audit = {}
         preparations = []
         try:
             attempts = {a.package_id: a for a in await session.scalars(
@@ -930,9 +936,11 @@ async def process_event(identifier, config, force=False):
             sources = {**{a["id"]: a for a in payload["articles"]}, **researcher.sources}
             raw_output = output.model_dump(mode="json")
             changes = align_quotes(raw_output, sources)
+            output_audit = {"output_adjustments": changes}
             if changes:
+                output_audit["raw_output"] = output.model_dump(mode="json")
                 output = ResearchResult.model_validate(raw_output)
-            version.rules = {**version.rules, "output_adjustments": changes}
+            version.rules = {**version.rules, **output_audit}
             validate_event(output, sources)
             if output.id != identifier:
                 raise ValueError("返回事件ID不匹配")
@@ -985,6 +993,7 @@ async def process_event(identifier, config, force=False):
         except Exception as error:
             await session.rollback()
             version = await session.get(Version, version_id)
+            version.rules = {**version.rules, **output_audit}
             version.state = "failed"
             version.error = str(error)[:2000]
             version.evidence = researcher.records

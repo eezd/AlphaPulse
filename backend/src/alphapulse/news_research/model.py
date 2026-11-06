@@ -5,6 +5,9 @@ from alphapulse.ai import llm
 from alphapulse.models import AiProvider
 
 
+MAX_CONTEXT_WINDOW = 250_000
+
+
 class OutputTruncated(ValueError):
     """A read-only model call may be repeated with a smaller input batch."""
 
@@ -87,7 +90,7 @@ async def complete(provider: AiProvider, system: str, payload: dict, schema: typ
 def fits_context(provider, system, payload, schema):
     # UTF-8 bytes bound source tokens conservatively, including the tool schema.
     text = system + json.dumps(payload, ensure_ascii=False) + json.dumps(schema.model_json_schema(), ensure_ascii=False)
-    return len(text.encode('utf-8')) + provider.max_tokens <= provider.context_window
+    return len(text.encode('utf-8')) + provider.max_tokens <= min(provider.context_window, MAX_CONTEXT_WINDOW)
 
 async def provider_for(session, settings):
     provider = await session.get(AiProvider, settings.provider_id) if settings.provider_id else None

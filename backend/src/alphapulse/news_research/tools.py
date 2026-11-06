@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 from alphapulse.ai import llm
 from alphapulse.core.db import SessionLocal
 from alphapulse.models import NewsItem
-from alphapulse.news_research.model import fits_context, validate_submission, model_stream
+from alphapulse.news_research.model import MAX_CONTEXT_WINDOW, fits_context, validate_submission, model_stream
 
 
 class Search(BaseModel):
@@ -54,7 +54,8 @@ class Research:
 
     def fits(self, provider, system, payload, schema):
         reserved = copy.copy(provider)
-        reserved.context_window -= min(32768, max(0, (provider.context_window-provider.max_tokens)//5))
+        reserved.context_window = min(provider.context_window, MAX_CONTEXT_WINDOW)
+        reserved.context_window -= min(32768, max(0, (reserved.context_window-provider.max_tokens)//5))
         return self.fits_messages(reserved, system, [{'role': 'user', 'text': json.dumps(payload, ensure_ascii=False)}], schema)
 
     def restore(self, records):
@@ -125,11 +126,13 @@ class Research:
         usages = self.usages = []
         from alphapulse.news_research.progress import step, current
         final_only = False
+        limited = {'status':'context_limit', 'instruction':'资料未完整交付，不得引用；依据已有证据提交并说明缺口。'}
+        limited_result = json.dumps(limited, ensure_ascii=False)
         for round_no in range(9):
             if current.get() is not None: step('模型研判', round=round_no+1, model=provider.model, reasoning_effort=provider.reasoning_effort)
             final_only |= round_no == 8
             if not self.fits_messages(provider, system, messages, schema, final=final_only):
-                raise ValueError('研究上下文不足，请增大上下文配置；证据未截断')
+                raise ValueError('研究上下文不足；证据未截断或继续发送')
             completion = None
             async for item in model_stream(provider, system, messages, [submit] if final_only else [*specs, submit], provider.reasoning_effort):
                 if isinstance(item, llm.Completion): completion = item
@@ -148,20 +151,22 @@ class Research:
                 snapshot = {name: copy.deepcopy(getattr(self, name)) for name in (
                     'sources', 'provided_news', 'provided_packages', 'read_event_versions', 'read_event_ids')}
                 records_before = len(self.records)
-                try: result = await self.tool(call['name'], call['arguments']) if not final_only else {'status':'context_limit', 'instruction':'停止查询，依据已有证据提交并说明缺口。'}
+                try: result = await self.tool(call['name'], call['arguments']) if not final_only else limited
                 except Exception as error:
                     result = {'error': str(error)}
                     self.records.append({'tool': call['name'], 'arguments': call['arguments'], 'result': result})
                 response = {'role':'tool', 'tool_call_id':call['id'], 'result':json.dumps(result, ensure_ascii=False, default=str)}
-                remaining = [{'role':'tool', 'tool_call_id':c['id'], 'result':json.dumps({'status':'context_limit'})} for c in calls[index+1:]]
+                remaining = [{'role':'tool', 'tool_call_id':c['id'], 'result':limited_result} for c in calls[index+1:]]
                 if not self.fits_messages(provider, system, [*messages, response, *remaining], schema, final=True):
                     for name, value in snapshot.items(): setattr(self, name, value)
-                    result = {'status':'context_limit', 'instruction':'资料未完整交付，不得引用；依据已有证据提交并说明缺口。'}
+                    result = limited
                     for record in self.records[records_before:]:
                         record['undelivered_result'] = record['result']
                         record['result'] = result
-                    response['result'] = json.dumps(result, ensure_ascii=False)
+                    response['result'] = limited_result
                     final_only = True
+                    if not self.fits_messages(provider, system, [*messages, response, *remaining], schema, final=True):
+                        raise ValueError('研究上下文不足；证据未截断或继续发送')
                 messages.append(response)
                 if not self.fits_messages(provider, system, messages, schema): final_only = True
         raise ValueError('研究轮次已用尽')

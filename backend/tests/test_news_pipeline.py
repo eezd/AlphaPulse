@@ -246,3 +246,48 @@ def test_undelivered_source_is_not_restored_as_read(trading):
     reader.restore([{'tool':'read_news','arguments':{'id':99},
         'result':{'status':'context_limit'},'undelivered_result':{'article_id':-1,'content':'原文'}}])
     assert not reader.sources and not reader.cache and not reader.provided_news
+
+
+@pytest.mark.parametrize('context_window,body_length', [(8000, 7310), (250000, 249310)])
+def test_parallel_tool_responses_leave_room_for_final_submission(trading, monkeypatch, context_window, body_length):
+    from alphapulse.news_research.tools import Research
+    from alphapulse.news_research import model
+    from alphapulse.ai.llm import Completion
+    from pydantic import BaseModel
+
+    class Result(BaseModel):
+        facts: str
+
+    reader = Research()
+    requests = []
+    tool_calls = [{'id': str(i), 'name': 'read_news', 'arguments': {'id': i}} for i in (1, 2)]
+
+    async def stream(provider, system, messages, tools, effort):
+        requests.append(messages.copy())
+        if len(requests) == 1:
+            yield Completion(tool_calls=tool_calls, usage={'input_tokens': 10})
+        else:
+            assert [t.name for t in tools] == ['submit']
+            assert reader.fits_messages(provider, system, messages, Result, final=True)
+            responses = [m for m in messages if m['role'] == 'tool']
+            assert [r['tool_call_id'] for r in responses] == ['1', '2']
+            assert all('context_limit' in r['result'] for r in responses)
+            yield Completion(tool_calls=[{'id': '3', 'name': 'submit', 'arguments': {'facts': '依据已有资料提交，补证不足。'}}],
+                             usage={'input_tokens': 20})
+
+    async def tool(name, args):
+        assert args['id'] == 1
+        result = {'content': 'x' * body_length}
+        reader.sources[-1] = result
+        reader.provided_news[1] = -1
+        reader.records.append({'tool': name, 'arguments': args, 'result': result})
+        return result
+
+    monkeypatch.setattr(reader, 'tool', tool)
+    monkeypatch.setattr(model.llm, 'stream', stream)
+    provider = SimpleNamespace(model='test', reasoning_effort='medium', max_tokens=100, context_window=context_window)
+    output, usage = asyncio.run(reader.run(provider, '规则', {}, Result))
+    assert output.facts and len(requests) == len(usage['rounds']) == 2
+    assert not reader.sources and not reader.provided_news
+    assert len(reader.records) == 1
+    assert reader.records[0]['undelivered_result']['content'] == 'x' * body_length

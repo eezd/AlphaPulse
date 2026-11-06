@@ -685,6 +685,132 @@ def test_long_event_compaction_uses_final_research_context(trading, monkeypatch,
     assert reader.fits(provider, skill, compressed, ResearchResult) != needs_compaction
 
 
+@pytest.mark.parametrize("failure_at", [None, "evidence", "timeline", "publication"])
+def test_quote_adjustment_audit_survives_validation_and_publication_failures(trading, monkeypatch, failure_at):
+    import asyncio
+    import copy
+    from unittest.mock import AsyncMock
+    from alphapulse.news_research import service
+    from alphapulse.news_research.contracts import ResearchResult
+    from alphapulse.news_research.models import Version
+
+    quote, original_quote = "官员“感到担忧”。", "官员“感到担忧” 。"
+    event = N(id=1, revision=1, title="官员回应", state="pending", result=None,
+              due_at=datetime.now(UTC) - timedelta(seconds=1))
+    news = N(id=101, title="官员回应", summary="", content_text=quote, content_hash="hash",
+             url="https://example.invalid/news", published_at=datetime.now(UTC))
+    package = N(id=7, news_id=101, state="done", content_hash="hash")
+    member = N(event_id=1, package_id=7, evidence=quote, reason="同一回应")
+    assignment = N(package_id=7, content_hash="hash", input={"keywords": [
+        {"canonical": "官员", "aliases": ["官员"], "quote": quote}]},
+        rules={"membership_targets": {"1": {"keyword_canonicals": ["官员"]}}})
+    output = ResearchResult(
+        id=1, title="官员回应", summary="官员表达担忧。", category="政策", entities=[],
+        risk_stars=1, importance_stars=2, direction="unknown", verification="reported", confidence="low",
+        reasoning="依据报道。", uncertainty="缺少独立佐证。", facts="官员表达担忧。", timeline="官员回应。",
+        asset_impacts="未知。", opinions="持续观察。", counter_evidence="未发现。", watchpoints="后续回应。",
+        claims=[{"statement": "官员表达担忧。", "verdict": "supported", "evidence_refs": [
+            {"article_id": 101, "quote": "不存在的引文" if failure_at == "evidence" else quote}]}],
+        evidence_refs=[{"article_id": 101, "quote": original_quote}],
+        timeline_points=[{"occurred_at": None, "time_precision": "unknown", "time_text": "",
+            "reported_at": None, "description": "官员表达担忧。", "verification": "supported",
+            "package_ids": [999 if failure_at == "timeline" else 7],
+            "evidence_refs": [{"article_id": 101, "quote": quote}]}], references=[])
+    original = output.model_dump(mode="json")
+    versions, saved_rules = [], {}
+
+    class Session:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        def add(self, row):
+            row.id = 1
+            versions.append(row)
+        async def commit(self):
+            nonlocal saved_rules
+            if versions[0].state == "done" and failure_at == "publication":
+                raise RuntimeError("发布写入失败")
+            saved_rules = copy.deepcopy(versions[0].rules)
+        async def rollback(self):
+            # Rollback discards uncommitted JSON changes, as the real ORM does.
+            versions[0].rules = copy.deepcopy(saved_rules)
+
+    session = Session()
+    session.get = AsyncMock(side_effect=lambda model, *args, **kwargs: versions[0] if model is Version else event)
+    session.execute = AsyncMock(side_effect=[[(package, member, news)], N(all=lambda: [(101, "hash")])])
+    session.scalars = AsyncMock(return_value=[assignment])
+    session.scalar = AsyncMock(return_value=None)
+    monkeypatch.setattr(service, "SessionLocal", lambda: session)
+    monkeypatch.setattr(service, "model_config", AsyncMock(return_value=(
+        N(max_tokens=32000, context_window=250000), "研究规则", {"system_prompt": "研究规则"})))
+    monkeypatch.setattr(service.vocab, "snapshot", AsyncMock(return_value={}))
+    monkeypatch.setattr(service.Research, "run", AsyncMock(return_value=(output, {"input_tokens": 10})))
+
+    asyncio.run(service.process_event(1, {}))
+    version = versions[0]
+    assert version.state == ("failed" if failure_at else "done"), version.error
+    if failure_at:
+        assert {"evidence": "原文引用", "timeline": "未知新闻包", "publication": "发布写入失败"}[failure_at] in version.error
+    assert version.output["evidence_refs"][0]["quote"] == quote
+    assert version.rules["raw_output"] == original
+    assert version.rules["output_adjustments"] == [{
+        "path": ".evidence_refs.0.quote", "original": original_quote, "replacement": quote,
+        "reason": "unique_punctuation_whitespace_alignment"}]
+    assert version.rules["system_prompt"] == "研究规则"
+    assert news.content_text == quote and output.model_dump(mode="json") == original
+
+
+@pytest.mark.parametrize("failure_at", [None, "validation", "publication"])
+def test_alias_adjustment_audit_survives_index_failures(trading, monkeypatch, failure_at):
+    import asyncio
+    import copy
+    from unittest.mock import AsyncMock
+    from alphapulse.news_research import service
+    from alphapulse.news_research.contracts import IndexResult
+    from alphapulse.news_research.models import Attempt, Package
+
+    news = N(id=101, title="", summary="", content_text="插件调用单独计费", content_hash="hash",
+             url="https://example.invalid/news", published_at=datetime.now(UTC))
+    package = N(id=7, news_id=101, state="index_pending", content_hash="hash")
+    output = IndexResult(keywords=[{"canonical": "插件计费", "aliases": ["插件调用", "插件调用收费"],
+                                   "quote": "不存在的引文" if failure_at == "validation" else "插件调用单独计费"}])
+    original = output.model_dump(mode="json")
+    attempts, saved_rules = [], {}
+
+    class Session:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        def add(self, row):
+            row.id = 1
+            attempts.append(row)
+        async def commit(self):
+            nonlocal saved_rules
+            if attempts[0].state == "done" and failure_at == "publication":
+                raise RuntimeError("发布写入失败")
+            saved_rules = copy.deepcopy(attempts[0].rules)
+        async def rollback(self):
+            attempts[0].rules = copy.deepcopy(saved_rules)
+
+    session = Session()
+    session.get = AsyncMock(side_effect=lambda model, *args, **kwargs:
+                            attempts[0] if model is Attempt else package if model is Package else news)
+    session.execute = AsyncMock()
+    monkeypatch.setattr(service, "SessionLocal", lambda: session)
+    monkeypatch.setattr(service.vocab, "snapshot", AsyncMock(return_value={"entries": []}))
+    monkeypatch.setattr(service, "model_config", AsyncMock(return_value=(None, "索引规则", {})))
+    monkeypatch.setattr(service, "complete", AsyncMock(return_value=(output, {"input_tokens": 10})))
+
+    asyncio.run(service._process_package(7, {}, "index"))
+    attempt = attempts[0]
+    assert attempt.state == ("failed" if failure_at else "done"), attempt.error
+    if failure_at:
+        assert {"validation": "原文引用", "publication": "发布写入失败"}[failure_at] in attempt.error
+    assert attempt.rules["raw_output"] == original
+    assert attempt.rules["output_adjustments"] == [{
+        "path": "keywords.0.aliases", "original": ["插件调用", "插件调用收费"],
+        "replacement": ["插件调用"], "reason": "aliases_absent_from_source"}]
+    assert news.content_text == "插件调用单独计费" and output.model_dump(mode="json") == original
+
+
 @pytest.mark.parametrize("task", ["index", "assign", "research"])
 def test_model_config_sends_only_selected_task_and_records_exact_prompt(trading, monkeypatch, task):
     import asyncio
