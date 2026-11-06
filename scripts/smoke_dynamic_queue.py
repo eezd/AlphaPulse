@@ -160,7 +160,7 @@ async def main():
         status=await scheduling.queue_status(s,config)
         assert status['events']['backfill']=={'waiting_previous':1}
         assert await scheduling.actions(s,config,set(),8)==[]
-        await s.execute(text('TRUNCATE news_research_packages, news_research_events, news_items CASCADE'))
+        await s.execute(text('TRUNCATE news_research_settings, news_research_packages, news_research_events, news_items CASCADE'))
         await s.commit()
     # Large history scans remain bounded by free capacity, without huge IN lists.
     async with SessionLocal() as s:
