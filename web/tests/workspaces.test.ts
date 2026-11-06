@@ -485,7 +485,7 @@ test("新闻列表只更新可见条目的匹配版本评级，保留滚动与�
 
 function researchPage(api: Record<string, unknown> = {}, user = vue.reactive({ sessionVersion: 1 }), extra: Record<string, unknown> = {}, dependencies: Record<string, unknown> = {}) {
   const load = moduleLoader({
-    "@@/apis/news-research": { getSettingsApi: async () => ({ config: {}, enabled: false }), listEventsApi: async () => ({ items: [], total: 0 }), listPackagesApi: async () => ({ items: [], total: 0 }), ...api },
+    "@@/apis/news-research": { getSettingsApi: async () => ({ config: {}, enabled: false, start_at: "2026-10-31T16:00:00Z" }), getCoverageApi: async (start_at: string) => ({ start_at, total: 0 }), listEventsApi: async () => ({ items: [], total: 0 }), listPackagesApi: async () => ({ items: [], total: 0 }), ...api },
     "@@/apis/skills": { listSkillTreeApi: async () => [] },
     "@@/apis/settings": { listProvidersApi: async () => [], listProviderModelsApi: async () => [] },
     "@/pinia/stores/user": { useUserStore: () => user },
@@ -493,6 +493,136 @@ function researchPage(api: Record<string, unknown> = {}, user = vue.reactive({ s
   }, { ...globals, clearInterval, ...extra })
   return load("@/pages/home/index.vue").default.setup({}, { expose() {} })
 }
+
+test("回补时间按时区提交，刷新保留未提交的起点，核查不启用 AI", async () => {
+  const checked: string[] = []
+  const enabled: string[] = []
+  const page = researchPage({
+    getCoverageApi: async (start_at: string) => {
+      checked.push(start_at)
+      return { start_at, total: 10, missing: 4 }
+    },
+    enableApi: async (start_at: string) => {
+      enabled.push(start_at)
+      return { start_at, total: 10 }
+    }
+  })
+  await page.load()
+  assert.equal(page.startAt.value.toISOString(), "2026-10-31T16:00:00.000Z")
+  page.startAt.value = new Date("2026-10-01T00:00:00+08:00")
+  await page.load()
+  assert.equal(page.startAt.value.toISOString(), "2026-09-30T16:00:00.000Z")
+  assert.equal(checked.at(-1), "2026-09-30T16:00:00.000Z")
+  assert.equal(enabled.length, 0)
+  assert.equal(page.coverage.value.missing, 4)
+  await page.enable()
+  assert.deepEqual(enabled, ["2026-09-30T16:00:00.000Z"])
+})
+
+test("其他标签页启用后按实际起点核查，暂停后恢复草稿并丢弃旧范围响应", async () => {
+  let server = { config: {}, enabled: false, start_at: "2026-10-31T16:00:00Z" }
+  const pending = Promise.withResolvers()
+  const checked: string[] = []
+  let delayDraft = true
+  const draft = "2026-10-01T00:00:00.000Z"
+  const actual = "2026-11-05T00:00:00.000Z"
+  const page = researchPage({
+    getSettingsApi: async () => ({ ...server }),
+    getCoverageApi: async (start_at: string) => {
+      checked.push(start_at)
+      if (start_at === draft && delayDraft) {
+        delayDraft = false
+        return pending.promise
+      }
+      return { start_at, total: 5 }
+    }
+  })
+  await page.load()
+  page.selectedStartAt.value = new Date(draft)
+  const old = page.checkCoverage()
+  server = { ...server, enabled: true, start_at: actual }
+  await page.load()
+  assert.equal(page.enabled.value, true)
+  assert.equal(page.selectedStartAt.value.toISOString(), actual)
+  assert.equal(page.coverage.value.start_at, actual)
+  assert.equal(page.startAt.value.toISOString(), draft)
+  pending.resolve({ start_at: draft, total: 999 })
+  await old
+  assert.equal(page.coverage.value.start_at, actual)
+  assert.equal(page.coverage.value.total, 5)
+  server.enabled = false
+  await page.load()
+  assert.equal(page.selectedStartAt.value.toISOString(), draft)
+  assert.equal(page.coverage.value.start_at, draft)
+  assert.equal(page.savedStartAt.value.toISOString(), actual)
+  assert.deepEqual(checked, ["2026-10-31T16:00:00.000Z", draft, actual, draft])
+})
+
+test("回补核查丢弃旧时间、旧会话及卸载后的结果，失败可重试", async () => {
+  const pending: ReturnType<typeof Promise.withResolvers>[] = []
+  const user = vue.reactive({ sessionVersion: 1 })
+  let unmount = () => {}
+  const page = researchPage({ getCoverageApi: () => {
+    const p = Promise.withResolvers()
+    pending.push(p)
+    return p.promise
+  } }, user, { onBeforeUnmount: (fn: () => void) => unmount = fn })
+  page.startAt.value = new Date("2026-10-01T00:00:00Z")
+  const old = page.checkCoverage()
+  page.startAt.value = new Date("2026-10-02T00:00:00Z")
+  const current = page.checkCoverage()
+  pending[1].resolve({ total: 2 })
+  await current
+  pending[0].resolve({ total: 1 })
+  await old
+  assert.equal(page.coverage.value.total, 2)
+  const failed = page.checkCoverage()
+  pending[2].reject(new Error("核查失败"))
+  await failed
+  assert.equal(page.coverageError.value, true)
+  const retry = page.checkCoverage()
+  pending[3].resolve({ total: 3 })
+  await retry
+  assert.equal(page.coverage.value.total, 3)
+  assert.equal(page.coverageError.value, false)
+  const inactive = page.checkCoverage()
+  unmount()
+  pending[4].resolve({ total: 4 })
+  await inactive
+  assert.equal(page.coverage.value, null)
+  await page.checkCoverage()
+  assert.equal(pending.length, 5)
+  user.sessionVersion++
+  await vue.nextTick()
+  assert.equal(page.coverage.value, null)
+  assert.equal(page.startAt.value, null)
+})
+
+test("切换会话后，旧回补核查不能恢复统计结果", async () => {
+  const pending = Promise.withResolvers()
+  const user = vue.reactive({ sessionVersion: 1 })
+  const page = researchPage({ getCoverageApi: () => pending.promise }, user)
+  page.startAt.value = new Date("2026-10-01T00:00:00Z")
+  const old = page.checkCoverage()
+  user.sessionVersion++
+  await vue.nextTick()
+  pending.resolve({ total: 999 })
+  await old
+  assert.equal(page.coverage.value, null)
+  assert.equal(page.startAt.value, null)
+})
+
+test("回补时间无效或晚于当前时间时禁止启用", async () => {
+  let calls = 0
+  const errors: string[] = []
+  const page = researchPage({ enableApi: async () => calls++ }, undefined, { ElMessage: { error: (message: string) => errors.push(message) } })
+  for (const value of [null, new Date("invalid"), new Date(Date.now() + 86400000)]) {
+    page.startAt.value = value
+    await page.enable()
+  }
+  assert.equal(calls, 0)
+  assert.equal(errors.length, 3)
+})
 
 test("两阶段首页保留新查询结果，旧会话与卸载后的响应不写回", async () => {
   const pending: ReturnType<typeof Promise.withResolvers>[] = []

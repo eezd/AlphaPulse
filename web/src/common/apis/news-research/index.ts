@@ -3,7 +3,8 @@ import { request } from "@/http/axios"
 
 export const getSettingsApi = () => request<Research.Settings>({ url: "/risk/settings", method: "get" })
 export const saveSettingsApi = (data: Research.Config) => request<null>({ url: "/risk/settings", method: "put", data })
-export const enableApi = () => request<null>({ url: "/risk/enable", method: "post" })
+export const enableApi = (start_at: string) => request<Research.Coverage>({ url: "/risk/enable", method: "post", data: { start_at } })
+export const getCoverageApi = (start_at: string) => request<Research.Coverage>({ url: "/risk/coverage", method: "get", params: { start_at } })
 export const pauseApi = () => request<null>({ url: "/risk/pause", method: "post" })
 export const createSkillsApi = () => request<{ index: number, research: number }>({ url: "/risk/skill-templates", method: "post" })
 export const listEventsApi = (q: string, page: number) => request<{ items: Research.Event[], total: number }>({ url: "/risk/events", method: "get", params: { q, page } })

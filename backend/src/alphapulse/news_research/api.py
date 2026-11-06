@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import Field
+from pydantic import AwareDatetime, Field
 from sqlalchemy import select, update, func, or_, text
 from sqlalchemy.dialects.postgresql import insert
 from alphapulse.core.db import get_session
@@ -119,6 +119,15 @@ async def settings(session: DB):
     )
 
 
+@router.get("/coverage")
+async def coverage(session: DB, start_at: AwareDatetime | None = None):
+    row = await settings_row(session)
+    start = (start_at if start_at is not None else row.start_at).astimezone(UTC)
+    if start > datetime.now(UTC):
+        raise HTTPException(422, "回补起始时间不能晚于当前时间")
+    return success(await batches.coverage(session, start))
+
+
 @router.put("/settings")
 async def save(body: SettingsInput, session: DB):
     await settings_row(session)
@@ -147,9 +156,16 @@ async def pause(session: DB):
     return success(None)
 
 
+class EnableInput(Strict):
+    start_at: AwareDatetime
+
+
 @router.post("/enable")
-async def enable(session: DB):
+async def enable(session: DB, body: EnableInput | None = None):
     row = await settings_row(session)
+    start_at = (body.start_at if body is not None else row.start_at).astimezone(UTC)
+    if start_at > datetime.now(UTC):
+        raise HTTPException(422, "回补起始时间不能晚于当前时间")
     if not await session.scalar(text("SELECT pg_try_advisory_xact_lock(20261103, 2)")):
         raise HTTPException(409, "模型验证已在进行中")
     if row.enabled:
@@ -242,10 +258,12 @@ async def enable(session: DB):
     )
     if row.control_revision != control_revision or row.config != original_config:
         raise HTTPException(409, "验证期间已暂停或设置变化，请重新验证")
+    report = await batches.coverage(session, start_at)
+    row.start_at = start_at
     row.enabled = True
     row.control_revision += 1
     await session.commit()
-    return success(None)
+    return success(report)
 
 
 @router.post("/skill-templates")

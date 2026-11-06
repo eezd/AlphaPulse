@@ -260,6 +260,54 @@ def test_settings_contract_rejects_third_stage_and_unknown_efforts(trading):
         )
 
 
+def test_backfill_start_requires_an_explicit_timezone(trading):
+    from alphapulse.news_research.api import EnableInput
+
+    selected = EnableInput(start_at="2026-10-01T00:00:00+08:00")
+    assert selected.start_at == datetime(2026, 9, 30, 16, tzinfo=UTC)
+    with pytest.raises(ValueError, match="timezone_aware"):
+        EnableInput(start_at="2026-10-01T00:00:00")
+
+
+@pytest.mark.parametrize("endpoint", ["coverage", "enable"])
+def test_future_backfill_is_rejected_before_model_calls(trading, monkeypatch, endpoint):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from fastapi import HTTPException
+    from alphapulse.news_research import api, service
+
+    future = datetime.now(UTC) + timedelta(days=1)
+    row = N(start_at=datetime.now(UTC), enabled=False)
+    session = N(get=AsyncMock(return_value=row), commit=AsyncMock())
+    config = AsyncMock(side_effect=AssertionError("不应调用模型"))
+    monkeypatch.setattr(service, "model_config", config)
+    call = (api.enable(session, api.EnableInput(start_at=future)) if endpoint == "enable"
+            else api.coverage(session, start_at=future))
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(call)
+    assert error.value.status_code == 422
+    assert not row.enabled
+    config.assert_not_called()
+    session.commit.assert_not_called()
+
+
+def test_failed_enable_does_not_save_the_selected_backfill_start(trading, monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from fastapi import HTTPException
+    from alphapulse.news_research import api, service
+
+    previous = datetime(2026, 10, 1, tzinfo=UTC)
+    row = N(start_at=previous, enabled=False, config={}, control_revision=7)
+    session = N(get=AsyncMock(return_value=row), scalar=AsyncMock(side_effect=[True, 0, 0]), commit=AsyncMock())
+    monkeypatch.setattr(service, "model_config", AsyncMock(side_effect=ValueError("Skill 不可用")))
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(api.enable(session, api.EnableInput(start_at=previous - timedelta(days=30))))
+    assert error.value.status_code == 502
+    assert row.start_at == previous and not row.enabled and row.control_revision == 7
+    session.commit.assert_not_called()
+
+
 @pytest.mark.parametrize("tool", ["read_news", "read_package"])
 def test_compressed_members_read_frozen_positive_sources_and_reject_old_cache(
     trading, tool

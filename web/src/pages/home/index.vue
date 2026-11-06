@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { BatchProgress, Config, Event, EventDetail, Package, PackageDetail, VersionDetail, Vocabulary } from "@@/apis/news-research/type"
+import type { BatchProgress, Config, Coverage, Event, EventDetail, Package, PackageDetail, VersionDetail, Vocabulary } from "@@/apis/news-research/type"
 import type { Provider } from "@@/apis/settings/type"
 import type { SkillNode } from "@@/apis/skills/type"
 import * as api from "@@/apis/news-research"
@@ -88,6 +88,18 @@ const opened = ref(false)
 const packageOpened = ref(false)
 const settingsOpened = ref(false)
 const enabled = ref(false)
+const startAt = ref<Date | null>(null)
+const savedStartAt = ref<Date | null>(null)
+const selectedStartAt = computed({
+  get: () => enabled.value ? savedStartAt.value : startAt.value,
+  set: (value: Date | null) => {
+    startAt.value = value
+  }
+})
+const coverage = ref<Coverage | null>(null)
+const coverageLoading = ref(false)
+const coverageError = ref(false)
+let coverageSequence = 0
 const batch = ref<BatchProgress | null>(null)
 const batchPhases: Record<string, string> = { assigning: "索引与归属中", researching: "集中研究中", done: "已完成", partial: "部分失败或延期" }
 const loading = ref(false)
@@ -122,16 +134,45 @@ async function load() {
     const [settings, rows] = await Promise.all([api.getSettingsApi(), tab.value === "events" ? api.listEventsApi(q.value, page.value) : api.listPackagesApi(q.value, page.value)])
     if (!valid() || seq !== sequence) return
     enabled.value = settings.enabled
+    if (!startAt.value || startAt.value.getTime() === savedStartAt.value?.getTime()) startAt.value = new Date(settings.start_at)
+    savedStartAt.value = new Date(settings.start_at)
     batch.value = settings.batch ?? null
     if (tab.value === "events") events.value = rows.items as Event[]
     else packages.value = rows.items as Package[]
     total.value = rows.total
     error.value = false
+    await checkCoverage()
   } catch {
     if (valid() && seq === sequence) error.value = true
   } finally {
     if (valid() && seq === sequence) loading.value = false
   }
+}
+async function checkCoverage() {
+  if (!valid() || !selectedStartAt.value || !Number.isFinite(selectedStartAt.value.getTime())) return
+  const start = selectedStartAt.value.toISOString()
+  const seq = ++coverageSequence
+  coverageLoading.value = true
+  coverageError.value = false
+  coverage.value = null
+  try {
+    const result = await api.getCoverageApi(start)
+    if (valid() && seq === coverageSequence && selectedStartAt.value?.toISOString() === start) coverage.value = result
+  } catch {
+    if (valid() && seq === coverageSequence) coverageError.value = true
+  } finally {
+    if (valid() && seq === coverageSequence) coverageLoading.value = false
+  }
+}
+async function enable() {
+  if (!valid()) return
+  if (!startAt.value || !Number.isFinite(startAt.value.getTime()) || startAt.value.getTime() > Date.now()) {
+    ElMessage.error("请选择不晚于当前时间的回补起始时间")
+    return
+  }
+  const start = startAt.value.toISOString()
+  const result = await api.enableApi(start)
+  if (valid() && selectedStartAt.value?.toISOString() === start) coverage.value = result
 }
 async function openEvent(id: number) {
   eventId = id
@@ -264,6 +305,12 @@ watch(opened, (value) => {
 watch(packageOpened, (value) => {
   if (!value) packageSequence++
 })
+watch(selectedStartAt, () => {
+  coverageSequence++
+  coverage.value = null
+  coverageLoading.value = false
+  coverageError.value = false
+}, { flush: "sync" })
 watch(() => user.sessionVersion, () => {
   sequence++
   versionSequence++
@@ -279,6 +326,8 @@ watch(() => user.sessionVersion, () => {
   opened.value = false
   packageOpened.value = false
   settingsOpened.value = false
+  startAt.value = null
+  savedStartAt.value = null
 })
 watch([tab, q], () => {
   page.value = 1
@@ -298,6 +347,7 @@ onBeforeUnmount(() => {
   sequence++
   detailSequence++
   packageSequence++
+  coverageSequence++
   clearInterval(timer)
 })
 </script>
@@ -314,7 +364,7 @@ onBeforeUnmount(() => {
       <el-button @click="settings">
         模型与 Skills
       </el-button>
-      <el-button :loading="busy" @click="action(enabled ? api.pauseApi : api.enableApi)">
+      <el-button :loading="busy" :disabled="!enabled && (loading || error || !startAt)" @click="action(enabled ? api.pauseApi : enable)">
         {{ enabled ? '暂停新任务' : '启用两阶段处理' }}
       </el-button>
       <el-button @click="openVocabulary">
@@ -327,6 +377,40 @@ onBeforeUnmount(() => {
     <p class="mb-4 text-sm text-slate-500">
       新闻包保存原文和关键词；事件汇集相关报道，持续更新判断与时间线。
     </p>
+    <div class="mb-4 rounded border border-slate-200 p-3">
+      <div class="flex flex-wrap items-center gap-3">
+        <label for="research-start-at">回补起始时间</label>
+        <el-date-picker
+          id="research-start-at"
+          v-model="selectedStartAt"
+          type="datetime"
+          :clearable="false"
+          :disabled="enabled || busy"
+          :disabled-date="(date: Date) => date.getTime() > Date.now()"
+          placeholder="选择回补起始时间"
+        />
+        <span class="text-sm text-slate-500">按浏览器本地时区</span>
+        <el-button :loading="coverageLoading" :disabled="!startAt || busy" @click="checkCoverage">
+          核查遗漏
+        </el-button>
+      </div>
+      <p class="mt-2 text-sm text-slate-500">
+        启用时保存起点，自动核查并补齐该时间以来已采集的新闻；先完成关键词与归属，再集中研究事件。调整起点不会取消已有队列。
+      </p>
+      <p v-if="coverage" class="mt-2 text-sm">
+        范围内 {{ coverage.total }} 条，全部阶段已完成 {{ coverage.completed }} 条，未完成 {{ coverage.unprocessed }} 条：
+        未入队 {{ coverage.missing }}，原文更新需重判 {{ coverage.stale }}，待处理 {{ coverage.pending }}，处理中 {{ coverage.processing }}，失败 {{ coverage.failed }}。
+        失败项需手动重试，当前批次以外的遗漏排入下一批。
+      </p>
+      <p v-if="coverage && coverage.outside.unprocessed" class="mt-2 text-sm text-amber-700">
+        范围外另有已入队但未完成的新闻 {{ coverage.outside.unprocessed }} 条：
+        原文更新需重判 {{ coverage.outside.stale }}，待处理 {{ coverage.outside.pending }}，处理中 {{ coverage.outside.processing }}，失败 {{ coverage.outside.failed }}。
+        已有任务继续按批次处理，失败项需手动重试。
+      </p>
+      <p v-if="coverageError" class="mt-2 text-sm text-red-600">
+        核查失败，请重试。
+      </p>
+    </div>
     <p v-if="batch" class="mb-4 text-sm text-slate-500">
       批次 #{{ batch.id }} · {{ batchPhases[batch.phase] ?? batch.phase }} ·
       新闻归属 {{ batch.packages_done }}/{{ batch.packages_total }}，失败 {{ batch.packages_failed }}，延期 {{ batch.packages_deferred }} ·

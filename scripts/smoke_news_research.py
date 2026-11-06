@@ -382,12 +382,25 @@ async def main():
             published_skill = await s.get(SkillVersion, node.published_version_id)
             published_skill.content = valid_content
             await s.commit()
+        previous_start = (await client.get("/api/risk/settings")).json()["data"]["start_at"]
+        selected_start = "2026-10-01T00:00:00+08:00"
+        with patch.object(model_service, "complete", side_effect=AssertionError("核查和无效时间不应调用模型")):
+            for invalid in ["2026-10-01T00:00:00", "2999-01-01T00:00:00Z"]:
+                assert (await client.post("/api/risk/enable", json={"start_at": invalid})).status_code == 422
+                assert (await client.get("/api/risk/coverage", params={"start_at": invalid})).status_code == 422
+            report = await client.get("/api/risk/coverage", params={"start_at": selected_start})
+            assert report.status_code == 200, report.text
+            assert report.json()["data"]["start_at"] == "2026-09-30T16:00:00Z"
+            assert set(report.json()["data"]["outside"]) == {"unprocessed", "stale", "pending", "processing", "failed"}
+        assert (await client.get("/api/risk/settings")).json()["data"]["start_at"] == previous_start
         with patch.object(model_service, "complete", validation):
-            response = await client.post("/api/risk/enable")
+            response = await client.post("/api/risk/enable", json={"start_at": selected_start})
             assert response.status_code == 200, response.text
+            assert response.json()["data"]["start_at"] == "2026-09-30T16:00:00Z"
         assert (await client.get("/api/risk/settings")).json()["data"][
             "enabled"
         ] is True
+        assert (await client.get("/api/risk/settings")).json()["data"]["start_at"] == "2026-09-30T16:00:00Z"
         assert (await client.post("/api/risk/enable")).status_code == 409
         assert (await client.post("/api/risk/pause")).status_code == 200
         for action in ("pause", "save"):
@@ -408,11 +421,12 @@ async def main():
                 return await validation(provider, skill, payload, schema)
 
             with patch.object(model_service, "complete", interrupted_validation):
-                response = await client.post("/api/risk/enable")
+                response = await client.post("/api/risk/enable", json={"start_at": "2026-09-01T00:00:00Z"})
                 assert response.status_code == 409, response.text
             assert (await client.get("/api/risk/settings")).json()["data"][
                 "enabled"
             ] is False
+            assert (await client.get("/api/risk/settings")).json()["data"]["start_at"] == "2026-09-30T16:00:00Z"
         package_id = (await client.get(f"/api/risk/news/{news_id}/packages")).json()[
             "data"
         ][0]["id"]

@@ -87,9 +87,115 @@ async def main():
         for model in (BatchEvent, BatchPackage, Batch, Membership, Attempt, Package, Event, NewsItem):
             await s.execute(delete(model))
         await s.commit()
+    await backfill_regressions(now)
+    await carryover_regressions(now)
     await regressions(now, settings)
     await engine.dispose()
     print('Frozen batches passed: assignment barrier, single research, failures, new arrivals, restart and source revisions.')
+
+
+async def backfill_regressions(now):
+    start = now - timedelta(days=2)
+    async with SessionLocal() as s:
+        def original(key, published_at):
+            return NewsItem(source_code='wscn_news', external_id='coverage-'+key,
+                title=key, summary='', content_text=key, content_hash='a'*64,
+                url='https://example.invalid/'+key, published_at=published_at)
+        keys = ['boundary', 'done', 'research-pending', 'research-failed',
+                'index-failed', 'processing', 'assign-pending', 'stale']
+        news = {key: original(key, start if key == 'boundary' else now) for key in keys}
+        older = original('older', start-timedelta(microseconds=1))
+        future = original('future', now+timedelta(days=1))
+        s.add_all([*news.values(), older, future])
+        await s.flush()
+        states = {'index-failed': 'index_failed', 'processing': 'index_processing',
+                  'assign-pending': 'assign_pending'}
+        packages = {key: Package(news_id=row.id, content_hash='b'*64 if key == 'stale' else row.content_hash,
+                                state=states.get(key, 'done'), keywords=[])
+                    for key, row in news.items() if key != 'boundary'}
+        events = {state: Event(title='coverage-'+state, state=state, tags=[], revision=1,
+                              result={} if state == 'done' else None, due_at=now)
+                  for state in ['done', 'pending', 'failed']}
+        s.add_all([*packages.values(), *events.values()])
+        await s.flush()
+        for key, state in [('done', 'done'), ('research-pending', 'pending'),
+                           ('research-failed', 'failed'), ('research-failed', 'done'), ('stale', 'done')]:
+            s.add(Membership(package_id=packages[key].id, event_id=events[state].id,
+                             evidence=key, reason='coverage fixture', change_kind='new_fact'))
+        await s.commit()
+        before = await s.scalar(select(func.count()).select_from(Package))
+        report = await batches.coverage(s, start, now)
+        assert {k: report[k] for k in ['total', 'completed', 'missing', 'stale', 'pending', 'processing', 'failed', 'unprocessed']} == {
+            'total': 8, 'completed': 1, 'missing': 1, 'stale': 1, 'pending': 2,
+            'processing': 1, 'failed': 2, 'unprocessed': 7}, report
+        assert await s.scalar(select(func.count()).select_from(Package)) == before
+        # Historical news arriving after a scan must still enter the next frozen batch.
+        late = original('late-arrival', start+timedelta(hours=1))
+        s.add(late)
+        packages['processing'].state = 'index_pending'
+        await s.commit()
+        report = await batches.coverage(s, start, now)
+        assert report['total'] == 9 and report['missing'] == 2
+        batch = await batches.freeze(s, SimpleNamespace(start_at=start))
+        admitted = set(await s.scalars(select(Package.news_id).join(BatchPackage).where(BatchPackage.batch_id == batch.id)))
+        assert {news['boundary'].id, late.id} <= admitted
+        assert not {news['done'].id, older.id, future.id} & admitted
+        assert packages['stale'].state == 'index_pending'
+        assert packages['stale'].content_hash == news['stale'].content_hash
+        # Moving the start backwards discovers originals missed by the former boundary.
+        expanded = await batches.freeze(s, SimpleNamespace(start_at=older.published_at))
+        admitted = set(await s.scalars(select(Package.news_id).join(BatchPackage).where(BatchPackage.batch_id == expanded.id)))
+        assert older.id in admitted and future.id not in admitted
+        assert all(row.content_hash == 'a'*64 for row in [*news.values(), older, future, late])
+        for model in (BatchEvent, BatchPackage, Batch, Membership, Attempt, Package, Event, NewsItem):
+            await s.execute(delete(model))
+        await s.commit()
+    print('Backfill coverage passed: inclusive boundary, pending research, distinct news counts, late arrivals, source revisions and expanded history without model calls.')
+
+
+async def carryover_regressions(now):
+    start = now - timedelta(days=2)
+    async with SessionLocal() as s:
+        keys = ['inside', 'pending', 'processing', 'failed', 'stale', 'research', 'done', 'unselected', 'future']
+        news = {key: NewsItem(source_code='wscn_news', external_id='carryover-'+key,
+                             title=key, summary='', content_text=key, content_hash='a'*64,
+                             url='https://example.invalid/'+key,
+                             published_at=now if key == 'inside' else
+                             now+timedelta(days=1) if key == 'future' else start-timedelta(days=1))
+                for key in keys}
+        s.add_all(news.values())
+        await s.flush()
+        states = {'pending': 'index_pending', 'processing': 'assign_processing',
+                  'failed': 'index_failed', 'future': 'assign_pending'}
+        packages = {key: Package(news_id=row.id, content_hash='b'*64 if key == 'stale' else row.content_hash,
+                                state=states.get(key, 'done'), keywords=[])
+                    for key, row in news.items() if key != 'unselected'}
+        done = Event(title='carryover-done', tags=[], state='done', result={}, revision=1, due_at=now)
+        pending = Event(title='carryover-pending', tags=[], state='pending', revision=1, due_at=now)
+        batch = Batch(phase='assigning', cutoff_at=now)
+        s.add_all([*packages.values(), done, pending, batch])
+        await s.flush()
+        for key, event in [('inside', done), ('done', done), ('research', done), ('research', pending)]:
+            s.add(Membership(package_id=packages[key].id, event_id=event.id,
+                             evidence=key, reason='carryover fixture', change_kind='new_fact'))
+        for key in ['pending', 'processing', 'stale']:
+            s.add(BatchPackage(batch_id=batch.id, package_id=packages[key].id,
+                               content_hash=packages[key].content_hash, state='pending'))
+        s.add(BatchEvent(batch_id=batch.id, event_id=pending.id, revision=1, state='pending'))
+        await s.commit()
+        wide = await batches.coverage(s, start-timedelta(days=2), now)
+        assert wide['outside']['unprocessed'] == 1  # Explicitly enrolled future original.
+        narrow = await batches.coverage(s, start, now)
+        assert narrow['total'] == 1 and narrow['completed'] == 1 and narrow['unprocessed'] == 0
+        assert narrow['outside'] == {'unprocessed': 6, 'pending': 3, 'processing': 1, 'failed': 1, 'stale': 1}, narrow
+        assert await s.scalar(select(func.count()).select_from(BatchPackage)) == 3
+        assert await s.scalar(select(func.count()).select_from(BatchEvent)) == 1
+        assert await s.scalar(select(func.count()).select_from(Package)) == 8
+        assert batch.phase == 'assigning' and packages['pending'].state == 'index_pending'
+        for model in (BatchEvent, BatchPackage, Batch, Membership, Attempt, Package, Event, NewsItem):
+            await s.execute(delete(model))
+        await s.commit()
+    print('Carryover coverage passed: narrowing preserves and reports outside queued news, active work, changed originals, pending research and explicit future enrollment without counting completed or unselected originals.')
 
 
 async def regressions(now, settings):
