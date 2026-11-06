@@ -38,6 +38,7 @@ from alphapulse.news_research.contracts import (
 )
 
 from alphapulse.news_research import vocabulary as vocab
+from alphapulse.news_research.scheduling import manual_review, active_research
 
 publication_lock = asyncio.Lock()
 assignment_lock = asyncio.Lock()
@@ -826,7 +827,9 @@ async def process_event(identifier, config, force=False):
             or (not force and event.due_at > datetime.now(UTC))
         ):
             return
-        if await session.scalar(select(Version.id).where(Version.event_id == identifier, Version.state == 'processing').limit(1)):
+        if await session.scalar(select(Event.id).where(Event.id == identifier, active_research())):
+            return
+        if await session.scalar(select(Event.id).where(Event.id == identifier, manual_review())):
             return
         members = list(
             await session.execute(

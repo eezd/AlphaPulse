@@ -10,7 +10,7 @@ from unittest.mock import patch
 from alphapulse.core.db import SessionLocal, engine
 from alphapulse.models import NewsItem
 from alphapulse.news_research.models import Package, Event, Membership, Attempt, Version, ResearchSettings
-from alphapulse.news_research import scheduling, batches, service
+from alphapulse.news_research import scheduling, service
 from alphapulse.news_research.worker import recover_interrupted
 
 
@@ -29,7 +29,7 @@ async def main():
         live = original('live', now-timedelta(minutes=30))
         late = original('late', now-timedelta(days=3))
         s.add_all([old, live, late]); await s.commit()
-        batch = await batches.freeze(s, config)
+        await scheduling.lane_actions(s, config, set(), 8, False)
         packages = list(await s.scalars(select(Package)))
         assert len(packages) == 2 and all(p.news_id != live.id for p in packages)
         actions = await scheduling.realtime_actions(s, config, {('index', packages[0].id)}, 1)
@@ -40,10 +40,9 @@ async def main():
         config.start_at = now-timedelta(minutes=5)
         actions = await scheduling.realtime_actions(s, config, set(), 1)
         assert actions == [('index', live_package.id)]
-        await batches.actions(s, batch, set(), 8, config)
-        assert not await batches.freeze(s, config)
+        assert not await scheduling.lane_actions(s, config, set(), 8, False)
         config.start_at = now-timedelta(days=5)
-        assert await batches.freeze(s, config)
+        assert await scheduling.lane_actions(s, config, set(), 8, False)
         assert packages[0].keywords == []
         # A realtime event's historical dependencies inherit priority.
         event = Event(title='shared', tags=[], state='pending', revision=1, realtime_pending=True, due_at=now)

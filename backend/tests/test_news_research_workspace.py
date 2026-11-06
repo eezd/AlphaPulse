@@ -948,3 +948,78 @@ def test_enable_cannot_apply_an_unsaved_backfill_time(trading):
     assert error.value.status_code == 422
     session.scalar.assert_not_awaited()
     session.commit.assert_not_awaited()
+
+
+def test_worker_refills_on_completion_without_waiting_for_other_tasks(trading, monkeypatch):
+    """A slow peer must not turn the shared pool back into a batch barrier."""
+    import asyncio
+    from unittest.mock import AsyncMock
+    from alphapulse.news_research import worker
+
+    async def scenario():
+        settings = N(enabled=True, config={'concurrency': 8}, control_revision=1)
+
+        class Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+            async def get(self, *args):
+                return settings
+
+            async def commit(self):
+                pass
+
+        class Lock(Session):
+            async def scalar(self, *args):
+                return True
+
+        release = asyncio.Event()
+        first_done = asyncio.Event()
+        initial_full = asyncio.Event()
+        refilled = asyncio.Event()
+        entered = []
+        live = 0
+        peak = 0
+        next_id = 0
+
+        async def actions(session, settings, active, slots):
+            nonlocal next_id
+            result = [('index', i) for i in range(next_id, next_id + slots)]
+            next_id += slots
+            return result
+
+        async def process(identifier, config):
+            nonlocal live, peak
+            live += 1
+            peak = max(peak, live)
+            entered.append(identifier)
+            if len(entered) == 8:
+                initial_full.set()
+            if len(entered) > 8:
+                refilled.set()
+            try:
+                await (first_done.wait() if identifier == 0 else release.wait())
+            finally:
+                live -= 1
+
+        monkeypatch.setattr(worker, 'engine', N(connect=Lock))
+        monkeypatch.setattr(worker, 'SessionLocal', Session)
+        monkeypatch.setattr(worker, 'recover_interrupted', AsyncMock())
+        monkeypatch.setattr(worker.scheduling, 'actions', actions)
+        monkeypatch.setattr(worker, 'process_package', process)
+        task = asyncio.create_task(worker.run())
+        try:
+            await asyncio.wait_for(initial_full.wait(), 2)
+            first_done.set()
+            await asyncio.wait_for(refilled.wait(), 2)
+            assert peak == 8 and live == 8 and not release.is_set()
+            assert len(entered) == 9
+        finally:
+            task.cancel()
+            release.set()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())

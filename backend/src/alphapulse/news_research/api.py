@@ -19,10 +19,8 @@ from alphapulse.news_research.models import (
     Membership,
     Version,
     Reference,
-    BatchEvent,
-    Batch,
 )
-from alphapulse.news_research import service, batches, scheduling, vocabulary as vocab
+from alphapulse.news_research import service, scheduling, vocabulary as vocab, coverage as reports
 from alphapulse.news_research.models import VocabularyVersion
 from alphapulse.news_research.contracts import (
     INDEX_ASSIGN_SKILL,
@@ -120,7 +118,7 @@ async def settings(session: DB):
         {"config": row.config, "enabled": row.enabled, "start_at": row.start_at,
          "control_revision": row.control_revision, "realtime_from": row.realtime_from,
          "timezone": "Asia/Shanghai", "queue": await scheduling.queue_status(session, row),
-         "batch": await batches.progress(session)}
+         "batch": None}
     )
 
 
@@ -131,7 +129,7 @@ async def coverage(session: DB, start_at: AwareDatetime | None = None):
     if start > datetime.now(UTC):
         raise HTTPException(422, "回补起始时间不能晚于当前时间")
     effective = min(start, row.realtime_from) if row.realtime_from else start
-    report = await batches.coverage(session, effective)
+    report = await reports.coverage(session, effective)
     return success({**report, 'backfill_start_at': start, 'realtime_from': row.realtime_from})
 
 
@@ -268,11 +266,9 @@ async def enable(session: DB, body: EnableInput | None = None):
     )
     if row.control_revision != control_revision or row.config != original_config:
         raise HTTPException(409, "验证期间已暂停或设置变化，请重新验证")
-    report = await batches.coverage(session, start_at)
+    report = await reports.coverage(session, start_at)
     if row.realtime_from is None:
         row.realtime_from = datetime.now(UTC)
-    await session.execute(update(Batch).where(Batch.phase.in_(["assigning", "researching"]))
-                          .values(phase="rescheduled", finished_at=datetime.now(UTC)))
     row.enabled = True
     row.control_revision += 1
     await session.commit()
@@ -497,12 +493,16 @@ async def event(identifier: int, session: DB):
     if row.state == 'pending':
         settings = await settings_row(session)
         unfinished = [(p, n) for p, n in members if p.state != 'done' or p.content_hash != n.content_hash]
-        if any(n.published_at < scheduling.boundary(settings) for p, n in unfinished):
+        if any(v.state == 'processing' for v in versions):
+            wait_reason = '等待上一轮研究完成后处理事件新变化'
+        elif any(n.published_at < scheduling.boundary(settings) for p, n in unfinished):
             wait_reason = '范围外成员尚未完成，扩大回补范围后可继续研究'
         elif any(p.state.endswith('_failed') for p, n in unfinished):
             wait_reason = '成员包处理失败，需手动重试后才能研究'
         elif unfinished:
             wait_reason = '等待成员包完成关键词与事件归属'
+        elif await session.scalar(select(Event.id).where(Event.id == row.id, scheduling.manual_review())):
+            wait_reason = '当前事件版本需手动重试，不会自动重复调用'
         elif row.due_at > datetime.now(UTC):
             wait_reason = '正在汇集事件变化，聚合窗口结束后研究'
     latest = next((v for v in versions if v.state == "done"), None)
@@ -544,9 +544,8 @@ async def retry_event(identifier: int, session: DB):
         raise HTTPException(409, "事件正在处理")
     deferred = None
     if row.state == "pending":
-        deferred = await session.scalar(select(BatchEvent.batch_id).where(
-            BatchEvent.event_id == row.id, BatchEvent.revision == row.revision,
-            BatchEvent.state == "deferred").limit(1))
+        deferred = await session.scalar(select(Event.id).where(
+            Event.id == row.id, scheduling.manual_review()))
     if row.state == "done" or deferred is not None:
         # Escape a deferred revision only on explicit retry; ordinary retries reuse evidence.
         service.dirty(row, True)

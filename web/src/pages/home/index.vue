@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { BatchProgress, Config, Coverage, Event, EventDetail, Package, PackageDetail, VersionDetail, Vocabulary } from "@@/apis/news-research/type"
+import type { Config, Coverage, Event, EventDetail, Package, PackageDetail, QueueStatus, VersionDetail, Vocabulary } from "@@/apis/news-research/type"
 import type { Provider } from "@@/apis/settings/type"
 import type { SkillNode } from "@@/apis/skills/type"
 import * as api from "@@/apis/news-research"
@@ -98,7 +98,8 @@ const enabled = ref(false)
 const startAt = ref<Date | null>(null)
 const savedStartAt = ref<Date | null>(null)
 const settingsRevision = ref(0)
-const queue = ref<{ running: number, draining: boolean, realtime?: Record<string, number>, backfill?: Record<string, number> } | null>(null)
+const queue = ref<QueueStatus | null>(null)
+const idleReasonLabels: Record<string, string> = { paused: "已暂停", draining: "等待已接收任务收尾", assignment_serial: "事件归属串行处理中", preceding_index: "等待前序新闻完成索引", waiting_previous: "等待上一轮研究完成", aggregation: "等待事件聚合窗口", dependencies: "等待事件成员处理完成", manual_retry: "部分任务需人工重试", no_work: "暂无可执行任务", dispatching: "正在补入任务" }
 function disabledBackfillDate(date: Date) {
   return dayjs.tz(dayjs(date).format("YYYY-MM-DD"), "Asia/Shanghai").valueOf() > Date.now()
 }
@@ -118,8 +119,6 @@ const coverage = ref<Coverage | null>(null)
 const coverageLoading = ref(false)
 const coverageError = ref(false)
 let coverageSequence = 0
-const batch = ref<BatchProgress | null>(null)
-const batchPhases: Record<string, string> = { assigning: "索引与归属中", researching: "集中研究中", done: "已完成", partial: "部分失败或延期" }
 const loading = ref(false)
 const error = ref(false)
 const busy = ref(false)
@@ -155,7 +154,6 @@ async function load() {
     queue.value = settings.queue ?? null
     if (!startAt.value || startAt.value.getTime() === savedStartAt.value?.getTime()) startAt.value = new Date(settings.start_at)
     savedStartAt.value = new Date(settings.start_at)
-    batch.value = settings.batch ?? null
     if (tab.value === "events") events.value = rows.items as Event[]
     else packages.value = rows.items as Package[]
     total.value = rows.total
@@ -402,15 +400,11 @@ onBeforeUnmount(() => {
       <span v-if="queue?.draining">正在完成 {{ queue.running }} 个已接收调用，收尾后可重新启用。</span>
     </p>
     <p v-if="queue" class="mb-4 text-sm text-slate-500">
-      实时队列：等待索引 {{ queue.realtime?.index_pending ?? 0 }}，等待归属 {{ queue.realtime?.assign_pending ?? 0 }}；
-      回补队列：等待索引 {{ queue.backfill?.index_pending ?? 0 }}，等待归属 {{ queue.backfill?.assign_pending ?? 0 }}。
-      正在调用 {{ queue.running }}；范围外暂停、失败和中断结果不明的任务不会自动重试。
-    </p>
-    <p v-if="batch" class="mb-4 text-sm text-slate-500">
-      批次 #{{ batch.id }} · {{ batchPhases[batch.phase] ?? batch.phase }} ·
-      新闻归属 {{ batch.packages_done }}/{{ batch.packages_total }}，失败 {{ batch.packages_failed }}，延期 {{ batch.packages_deferred }} ·
-      事件研究 {{ batch.events_done }}/{{ batch.events_total }}，失败 {{ batch.events_failed }}，延期 {{ batch.events_deferred }}。
-      实时任务可中途插队；回补任务分批归属后集中研究，研究仅使用站内资料。
+      正在处理 {{ queue.running }} / {{ queue.capacity }} 个任务：关键词提取 {{ queue.running_by_stage.index }}，事件归属 {{ queue.running_by_stage.assign }}，事件研究 {{ queue.running_by_stage.research }}。
+      实时队列：待索引 {{ (queue.realtime.missing ?? 0) + (queue.realtime.stale ?? 0) + (queue.realtime.index_pending ?? 0) }}，待归属 {{ queue.realtime.assign_pending ?? 0 }}，就绪研究 {{ queue.events.realtime.ready ?? 0 }}；
+      回补队列：待索引 {{ (queue.backfill.missing ?? 0) + (queue.backfill.stale ?? 0) + (queue.backfill.index_pending ?? 0) }}，待归属 {{ queue.backfill.assign_pending ?? 0 }}，就绪研究 {{ queue.events.backfill.ready ?? 0 }}。
+      <span v-if="queue.idle_reasons.length">{{ queue.idle_reasons.map(reason => idleReasonLabels[reason] ?? reason).join('；') }}。</span>
+      任务完成后持续补位；事件归属串行，其他任务共享剩余并发。失败和中断结果不明的任务需手动重试。
     </p>
     <el-alert v-if="error" title="读取失败，保留上次结果，可刷新重试" type="error" :closable="false" />
     <div class="mb-4 flex flex-wrap gap-3">
@@ -644,12 +638,12 @@ onBeforeUnmount(() => {
             </el-button>
           </div>
           <p class="mt-2 text-sm text-slate-500">
-            点击“保存并暂停”后生效；重新启用时重排未完成任务。实时新闻优先插队，历史新闻分批补齐。
+            点击“保存并暂停”后生效；重新启用时重排未完成任务。实时新闻优先插队，历史新闻持续补位。
           </p>
           <p v-if="coverage" class="mt-2 text-sm">
             范围内 {{ coverage.total }} 条，全部阶段已完成 {{ coverage.completed }} 条，未完成 {{ coverage.unprocessed }} 条：
             未入队 {{ coverage.missing }}，原文更新需重判 {{ coverage.stale }}，待处理 {{ coverage.pending }}，处理中 {{ coverage.processing }}，失败 {{ coverage.failed }}。
-            失败项需手动重试，当前批次以外的遗漏排入下一批。
+            失败项需手动重试，范围内的遗漏会自动发现并持续加入处理。
           </p>
           <p v-if="coverage && coverage.outside.unprocessed" class="mt-2 text-sm text-amber-700">
             范围外已暂停自动处理的新闻 {{ coverage.outside.unprocessed }} 条：

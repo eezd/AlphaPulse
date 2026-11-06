@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from sqlalchemy import select, text, update
+from sqlalchemy import text, update
 from alphapulse.core.db import SessionLocal, engine
 from alphapulse.news_research.models import (
     ResearchSettings,
@@ -10,10 +10,9 @@ from alphapulse.news_research.models import (
     Event,
     Attempt,
     Version,
-    Batch, BatchEvent,
 )
 from alphapulse.news_research.service import process_package, process_event
-from alphapulse.news_research import batches, scheduling
+from alphapulse.news_research import scheduling
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +38,6 @@ async def recover_interrupted():
             .where(Version.state == "processing")
             .values(state="failed", error="进程中断，调用结果不明，请手动重试")
         )
-        await session.execute(update(BatchEvent).where(BatchEvent.state == 'processing').values(state='pending'))
         await session.commit()
 
 
@@ -64,20 +62,17 @@ async def run():
                     if settings and settings.enabled:
                         active = set(tasks.values())
                         slots = max(0, settings.config.get('concurrency', 3) - len(tasks))
-                        actions = await scheduling.realtime_actions(session, settings, active, slots)
-                        batch = await session.scalar(select(Batch).where(
-                            Batch.phase.in_(['assigning', 'researching'])).order_by(Batch.id).limit(1))
-                        if batch is None:
-                            batch = await batches.freeze(session, settings)
-                        if batch is not None:
-                            actions += await batches.actions(session, batch, active | set(actions), slots - len(actions), settings)
+                        actions = await scheduling.actions(session, settings, active, slots)
                         await session.commit()
                         config = {**settings.config, '_control_revision': settings.control_revision}
                         for stage, identifier in actions:
                             call = (process_event(identifier, config)
                                     if stage == 'event' else process_package(identifier, config))
                             tasks[asyncio.create_task(call)] = (stage, identifier)
-                await asyncio.sleep(1)
+                if tasks:
+                    await asyncio.wait(tasks, timeout=1, return_when=asyncio.FIRST_COMPLETED)
+                else:
+                    await asyncio.sleep(1)
         finally:
             await asyncio.gather(*tasks, return_exceptions=True)
 

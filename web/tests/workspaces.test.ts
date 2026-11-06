@@ -992,3 +992,14 @@ test("侧栏时间统一使用北京时间，保存时间与配置版本但启�
   await page.enable()
   assert.deepEqual(enableArgs, [])
 })
+
+test("动态队列显示共享容量、阶段执行数并保留低并发原因", async () => {
+  const queue = { running: 1, capacity: 8, running_by_stage: { index: 0, assign: 1, research: 0 }, draining: false, realtime: { missing: 2 }, backfill: { assign_pending: 12 }, events: { realtime: {}, backfill: { aggregating: 5 } }, idle_reasons: ["assignment_serial", "aggregation"] }
+  const page = researchPage({ getSettingsApi: async () => ({ config: {}, control_revision: 1, enabled: true, start_at: "2026-11-04T16:00:00Z", queue, batch: null }) })
+  await page.load()
+  assert.deepEqual(page.queue.value, queue)
+  assert.equal(page.idleReasonLabels.assignment_serial, "事件归属串行处理中")
+  assert.equal(page.idleReasonLabels.aggregation, "等待事件聚合窗口")
+  assert.equal(page.idleReasonLabels.waiting_previous, "等待上一轮研究完成")
+  assert.equal("batch" in page, false)
+})

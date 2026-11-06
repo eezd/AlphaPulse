@@ -181,7 +181,7 @@ def smoke(build, label):
         wait_command('docker', 'exec', names['api'], 'python', '-c',
                      'import urllib.request; urllib.request.urlopen("http://localhost:8000/api/health", timeout=3)')
         print(run('docker', 'exec', '-i', names['api'], 'python', '-',
-                  input=(ROOT / 'scripts/smoke_news_batches.py').read_text()), flush=True)
+                  input=(ROOT / 'scripts/smoke_dynamic_queue.py').read_text()), flush=True)
         print(run('docker', 'exec', '-i', names['api'], 'python', '-',
                   input=(ROOT / 'scripts/smoke_priority_queue.py').read_text()), flush=True)
         print(run('docker', 'exec', '-i', names['api'], 'python', '-',

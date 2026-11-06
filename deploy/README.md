@@ -100,9 +100,9 @@ New event timeline day/month values are UTC-midnight calendar markers (first day
 
 Long-input compaction stops when the final research Skill, payload, tools and result schema fit the configured context budget. Extraction and consolidation keep their event-boundary instructions and check their own call budgets; the final fit check does not count member metadata a second time in those instructions.
 
-Ordinary facts, independent evidence, corrections and urgent developments wait for their frozen batch to finish assignment; urgent events sort first within research. Pure reposts retain their own packages and citations without requesting a new successful event review. Indexing, assignment and research share the configured concurrency pool (1–16, default 3). Pausing stops new admissions; in-flight work drains. Interrupted tasks recover from PostgreSQL. Third-stage reading/trends, the legacy queue/backfill jobs, old three-model configuration, API, ORM models and unused frontend components have been removed. Reused model submission, evidence, time and retrieval helpers now belong to `news_research`; the public HTTP reader belongs to `core.public_http`. Historical Alembic migrations and inactive legacy tables are retained; autogeneration excludes those archived tables. The three retired news Skills and their old bindings are removed. There is no legacy reset command.
+Facts, independent evidence and corrections aggregate per event; urgent developments become ready immediately. Completed assignments do not wait for an unrelated batch before research. Pure reposts retain their own packages and citations without requesting a new successful event review. Indexing, assignment and research share the configured concurrency pool (1–16, default 3). Pausing stops new admissions; in-flight work drains. Interrupted tasks recover from PostgreSQL. Third-stage reading/trends, the legacy queue/backfill jobs, old three-model configuration, API, ORM models and unused frontend components have been removed. Reused model submission, evidence, time and retrieval helpers now belong to `news_research`; the public HTTP reader belongs to `core.public_http`. Historical Alembic migrations and inactive legacy tables are retained; autogeneration excludes those archived tables. The three retired news Skills and their old bindings are removed. There is no legacy reset command.
 
-The homepage provides event and package searches, pagination, membership details, timelines, evidence and version history. `GET /api/risk/settings` and `PUT /api/risk/settings` manage independent `index` and `research` model/effort/Skill bindings and concurrency; saving pauses admission. Clearing effort inherits provider settings. `POST /api/risk/enable` validates the two models with synthetic material, including separate index/assignment contracts. `POST /api/risk/packages` enrolls up to 500 explicit news IDs; while enabled the worker additionally admits news published since November 1, 2026, 00:00 Asia/Shanghai. Failed assignment retries reuse indexing; event retries never repeat indexing. Earlier source revisions are not shown with current revision annotations.
+The homepage provides event and package searches, pagination, membership details, timelines, evidence and version history. `GET /api/risk/settings` and `PUT /api/risk/settings` manage independent `index` and `research` model/effort/Skill bindings and concurrency; saving pauses admission. Clearing effort inherits provider settings. `POST /api/risk/enable` validates the two models with synthetic material, including separate index/assignment contracts. `POST /api/risk/packages` enrolls up to 500 explicit news IDs; while enabled the worker admits eligible news using the saved historical start and persistent realtime boundary. Failed assignment retries reuse indexing; event retries never repeat indexing. Earlier source revisions are not shown with current revision annotations.
 
 Create the two default Skill drafts in homepage settings, review and publish them in Skills, then bind them before enabling. Template generation never publishes or changes existing Chat/trading Skills. The additive `a71234567890` migration follows `f60123456789` and creates seven `news_research_*` tables; `b81234567890` adds the eighth table for immutable vocabulary snapshots. There is no conversion, truncation or deletion of original/legacy tables. Production schema execution, code deployment, commits and pushes require the corresponding task authorization; preparing a migration alone does not grant it.
 
@@ -164,7 +164,12 @@ Resume requires the disposable database as well as report files. If that databas
 
 News research uses only stored news, packages, event versions and economic releases. External search and webpage-reading tools, their settings and the SearXNG service are removed. Collector HTTP access is unchanged. Historical external evidence remains readable but cannot be restored as evidence read by a new research attempt.
 
-The worker freezes a durable batch of eligible originals and queued work. It completes indexing and serial assignment before researching any batch event; newly arriving work waits for the next batch. Failed items are isolated, source revisions are deferred, and successful stages are reused across pauses and restarts. Each event is scheduled once per batch. `/api/risk/settings` includes the latest `batch` progress. Batch tables are additive and retain original news and research history. Deployment keeps research paused; enabling remains an explicit action.
+The worker continuously fills the shared pool from durable news, package and event
+states. Indexing and ready research run alongside serial assignment; no batch
+barrier delays new arrivals. Successful stages survive pauses and restarts, and
+failed or uncertain calls require explicit retry. Settings return queue counts
+and a null `batch` field for compatibility. Historical batch records are retained.
+Deployment keeps research paused; enabling remains an explicit action.
 
 The crawler console accepts administrator-managed public RSS/Atom subscriptions, names, intervals and enable/disable controls. New subscriptions are paused, no default feeds are added, and the manager discovers new subscriptions without a restart. Only feed-provided content is stored; a summary is labeled as a summary. Arbitrary private-network feed URLs are rejected.
 
@@ -475,13 +480,26 @@ a differing legacy enable body returns 422. The first successful enable fixes
 
 Publication time, not ingestion time, determines realtime membership. Realtime
 work takes the next available slot without cancelling accepted calls. Historical
-work uses batches of at most 30 originals, ordered chronologically. Saving a new
-start pauses dispatch; enabling after drain retires unfinished batch schedules
-and rebuilds from durable stage states without repeating successes. Shrinking
-history does not exclude realtime backlog. Known in-range dependencies inherit
-a waiting realtime event's priority. Out-of-range or failed members block event
-research without silently dropping evidence or retrying paid failures.
+work continuously fills free slots from durable news/package/event states, with
+no thirty-news admission barrier or batch phase. Assignment remains globally
+serial and chronological within a priority lane; a preceding indexing task must
+finish before later news is assigned. Failed revisions do not block the lane.
+Within each lane, assignment is selected first, then ready event research, then
+indexing; realtime work and its in-range known dependencies precede historical
+work. Completion wakes dispatch immediately; new arrivals and timers are polled
+at most once per second. Existing calls finish normally when concurrency shrinks.
 
+Saving a new start pauses dispatch; the next enable uses the saved scope without
+repeating successful stages. Shrinking history does not exclude realtime backlog.
+Out-of-range or failed members block event research without dropping evidence.
+Legacy batch tables remain historical records, with no new batches created.
+Current-revision deferred records and superseded research require explicit retry;
+a new event revision can proceed. Settings retain a null `batch` compatibility
+field, while `queue` exposes capacity, running_by_stage, per-lane event states and
+idle_reasons. A pending event with an active older research version is counted
+as waiting_previous, with an explicit wait reason, rather than as ready work.
+Missing and stale originals are included in queue counts. Coverage
+remains a read-only report.
 Ordinary event research uses the existing five-minute quiet window with a
 15-minute maximum; urgent events become ready immediately. A running research
 call is not duplicated when newer members arrive. New changes start another
@@ -490,7 +508,7 @@ After a worker interruption, started calls become failed with an unknown-result
 message and need manual retry; unclaimed work resumes normally. Strict realtime
 priority can starve historical work under sustained overload.
 
-CI additionally runs `scripts/smoke_priority_queue.py` in its disposable internal
+CI runs `scripts/smoke_dynamic_queue.py` and `scripts/smoke_priority_queue.py` in its disposable internal
 network with synthetic credentials and no model calls. It covers preemption,
 late historical ingestion, stable realtime eligibility, range changes,
 dependencies, aggregation, control revisions and interrupted-call recovery.
