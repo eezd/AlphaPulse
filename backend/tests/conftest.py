@@ -11,4 +11,13 @@ def trading(monkeypatch):
     }.items():
         monkeypatch.setenv(key, value)
     from alphapulse.trading import executor
+    from unittest.mock import AsyncMock
+    from alphapulse.ai import llm, recovery
+    class HealthyGate:
+        async def call(self, operation, request_id='', epoch=-1):
+            return {'epoch': 0, 'level': 0, 'retry_at': 0, 'probe': False, 'admitted': True, 'now': 0}
+    monkeypatch.setattr(llm, 'recovery_gate', lambda _: HealthyGate())
+    monkeypatch.setattr(recovery, 'mark_waiting', AsyncMock())
+    monkeypatch.setattr(recovery, 'clear_waiting', AsyncMock())
+    monkeypatch.setattr(recovery, 'waiting_count', AsyncMock(return_value=0))
     return executor

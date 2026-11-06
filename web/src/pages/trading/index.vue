@@ -3,6 +3,7 @@ import type { Provider } from "@@/apis/settings/type"
 import type { SnapshotPosition, TradingStatus, TradingSymbol } from "@@/apis/trading/type"
 import { listProvidersApi } from "@@/apis/settings"
 import { deleteSymbolApi, getStatusApi, manualActionApi, patchSymbolApi, requestAnalysisApi, startTradingApi, stopTradingApi } from "@@/apis/trading"
+import AiAvailability from "@@/components/AiAvailability/index.vue"
 import { useSessionScope } from "@@/composables/useSessionScope"
 import { formatTime } from "@@/utils/text"
 import { Clock, Plus, Reading } from "@element-plus/icons-vue"
@@ -244,6 +245,7 @@ onMounted(() => listProvidersApi().then(list => providers.value = list))
 </script>
 
 <template>
+  <AiAvailability />
   <div v-if="!status" v-loading="loading" class="min-h-40">
     <el-result v-if="failed" icon="error" title="无法读取模拟盘状态">
       <template #extra>

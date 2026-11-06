@@ -91,15 +91,21 @@ const onEvent: ChatStreamHandler = (event) => {
     estimatedTokens.value = data.estimated_tokens
     // OpenAI 格式推理期间没有任何推送，先显示等待状态直到出字
     currentAssistant().thinking = true
+  } else if (name === "retry") {
+    const item = currentAssistant()
+    item.thinking = false
+    item.retryNotice = `${data.reason}；下次尝试 ${new Date(data.retry_at).toLocaleString()}`
   } else if (name === "thinking") {
     currentAssistant().thinking = true
   } else if (name === "delta") {
     const item = currentAssistant()
     item.thinking = false
+    item.retryNotice = undefined
     item.text += data.text
   } else if (name === "usage") {
     // 一次模型调用结束；之后的工具调用挂在这条回复上，新的文字另起一条
     const item = currentAssistant()
+    item.retryNotice = undefined
     item.closed = true
     item.thinking = false
   } else if (name === "tool_call") {
@@ -124,6 +130,7 @@ const onEvent: ChatStreamHandler = (event) => {
   } else if (name === "error") {
     const item = currentAssistant()
     item.thinking = false
+    item.retryNotice = undefined
     item.error = data.message
   }
   scrollToBottom()

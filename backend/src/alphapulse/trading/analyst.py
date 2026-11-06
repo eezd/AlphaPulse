@@ -96,6 +96,7 @@ class AnalysisError(Exception):
 @dataclass
 class Prepared:
     exchange: str
+    symbol: str
     provider: AiProvider
     effort: str | None
     dry_run: bool
@@ -248,13 +249,24 @@ async def prepare(symbol: str, reasons: list[str], analysis_id: int) -> Prepared
         "## 预取的行情（实盘数据，已取，不要用相同参数重复调用）",
         await prefetch(symbol),
     ]
-    return Prepared(exchange=exchange, provider=provider, effort=effort, dry_run=dry_run, system=system, user_text="\n".join(lines), context=context)
+    return Prepared(exchange=exchange, symbol=symbol, provider=provider, effort=effort, dry_run=dry_run, system=system, user_text="\n".join(lines), context=context)
 
 
 async def complete(prepared: Prepared, messages: list[dict], tools: list[llm.ToolSpec]) -> llm.Completion:
-    async for item in llm.stream(prepared.provider, prepared.system, messages, tools, prepared.effort):
+    async def refresh():
+        # 只更新当前请求的行情，不重新执行此前的工具或交易操作。
+        latest = "重试前最新行情（此前行情仅为历史快照）：\n" + await prefetch(prepared.symbol)
+        if messages[-1].get('retry_snapshot'):
+            messages.pop()
+        messages.append({'role': 'user', 'text': latest, 'retry_snapshot': True})
+        if estimate_tokens(prepared.system) + estimate_tokens(dump(messages)) + prepared.provider.max_tokens > prepared.provider.context_window:
+            raise AnalysisError('刷新行情后超过上下文上限，未重发')
+    completion = None
+    async for item in llm.stream(prepared.provider, prepared.system, messages, tools, prepared.effort, before_retry=refresh):
         if isinstance(item, llm.Completion):
-            return item
+            completion = item
+    if completion is not None:
+        return completion
     raise AssertionError("llm.stream 没有产出 Completion")
 
 

@@ -23,12 +23,9 @@ class SubmissionFailure(ValueError):
 
 async def model_stream(*args):
     """Scope transport retry changes to news requests only."""
-    token = llm.news_retry.set({"output": False})
-    try:
-        async for item in llm.stream(*args):
-            yield item
-    finally:
-        llm.news_retry.reset(token)
+    async for item in llm.stream(*args):
+        yield item
+
 
 async def validate_submission(provider, system, messages, schema, completion, usages, allow_repair=True):
     """Repair structural or time-contract errors once using the same evidence."""

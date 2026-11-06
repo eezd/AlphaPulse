@@ -58,7 +58,7 @@ def test_model_requires_protocol_end_marker(trading, monkeypatch, protocol, comp
     asyncio.run(check())
 
 
-def test_connection_failure_uses_only_sdk_retry_budget(trading, monkeypatch):
+def test_connection_failure_has_one_retry_owner(trading, monkeypatch):
     from alphapulse.ai import llm
     attempts = 0
     def handle(request):
@@ -66,12 +66,14 @@ def test_connection_failure_uses_only_sdk_retry_budget(trading, monkeypatch):
         attempts += 1
         raise httpx.ConnectError("测试连接失败", request=request)
     provider = install_model_transport(llm, monkeypatch, "openai", handle)
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(llm, "_wait_local", AsyncMock())
     async def check():
         with pytest.raises(llm.LlmError, match="无法连接"):
             async for _ in llm.stream(provider, "system", [], []):
                 pass
     asyncio.run(check())
-    assert attempts == llm.MAX_RETRIES + 1
+    assert attempts == 3
 
 
 def test_pipeline_error_keeps_history_checkpoint_and_marks_run_failed(trading, monkeypatch):

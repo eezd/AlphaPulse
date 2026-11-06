@@ -17,7 +17,7 @@ def test_news_transport_retry_budget_and_output_guard(trading, monkeypatch, mode
         calls.append(args)
         if mode == 'partial': yield llm.TextDelta('started')
         if mode == 'tool_fragment': llm._news_output()
-        if mode == 'success' and len(calls) == 3:
+        if mode in ('success', 'long_wait') and len(calls) == 3:
             yield llm.Completion(usage={'input_tokens': 1})
             return
         request = httpx.Request('POST', 'https://example.invalid/v1/chat/completions')
@@ -27,30 +27,21 @@ def test_news_transport_retry_budget_and_output_guard(trading, monkeypatch, mode
         raise openai.APIError('Concurrency limit exceeded for account', request, body={'error': {'message': 'Concurrency limit exceeded for account'}})
     monkeypatch.setattr(llm, '_stream_openai', adapter)
     sleep = AsyncMock()
-    monkeypatch.setattr(llm.asyncio, 'sleep', sleep)
+    monkeypatch.setattr(llm, '_wait_local', sleep)
     record = {}
     async def run():
         token = current.set(record)
         try: return [item async for item in model_stream(N(protocol='openai'), '', [], [], 'max')]
         finally: current.reset(token)
-    if mode == 'success': assert asyncio.run(run())[-1].usage == {'input_tokens': 1}
+    if mode in ('success', 'long_wait'): assert asyncio.run(run())[-1].usage == {'input_tokens': 1}
     else:
         with pytest.raises(llm.LlmError): asyncio.run(run())
-    retries = mode in ('success', 'exhausted')
+    retries = mode in ('success', 'exhausted', 'long_wait')
     assert len(calls) == (3 if retries else 1)
-    assert [call.args[0] for call in sleep.await_args_list] == ([30, 60] if retries else [])
+    assert [call.args[0] for call in sleep.await_args_list] == ([60, 180] if retries else [])
     assert llm.news_retry.get() is None
-    if retries: assert '2/2' in record['phase']
+    if retries: assert record['retry_attempt'] == 2
 
-
-def test_retry_after_seconds_and_dates(trading):
-    from alphapulse.ai import llm
-    from datetime import UTC, datetime, timedelta
-    from email.utils import format_datetime
-    request = httpx.Request('POST', 'https://example.invalid')
-    for value in ('90', format_datetime(datetime.now(UTC) + timedelta(seconds=95))):
-        error = openai.RateLimitError('wait', response=httpx.Response(429, headers={'retry-after': value}, request=request), body={})
-        assert 89 <= llm._news_retry_delay(error, 0) <= 96
 
 
 def test_cancelling_backoff_releases_context_and_progress(trading, monkeypatch):
@@ -61,11 +52,11 @@ def test_cancelling_backoff_releases_context_and_progress(trading, monkeypatch):
     async def adapter(*args):
         raise openai.APIError('Concurrency limit exceeded', httpx.Request('POST', 'https://example.invalid'), body={})
         yield
-    async def sleep(delay):
+    async def sleep(delay, coordinate):
         entered.set()
         await asyncio.Event().wait()
     monkeypatch.setattr(llm, '_stream_openai', adapter)
-    monkeypatch.setattr(llm.asyncio, 'sleep', sleep)
+    monkeypatch.setattr(llm, '_wait_local', sleep)
     async def run():
         async def consume():
             try:
@@ -82,7 +73,7 @@ def test_cancelling_backoff_releases_context_and_progress(trading, monkeypatch):
 
 @pytest.mark.parametrize('protocol', ['openai', 'anthropic'])
 @pytest.mark.parametrize('news', [True, False])
-def test_sdk_retry_is_disabled_only_for_news(trading, monkeypatch, protocol, news):
+def test_sdk_retry_is_disabled_for_every_request(trading, monkeypatch, protocol, news):
     from alphapulse.ai import llm
     options=[]
     class Client:
@@ -107,4 +98,4 @@ def test_sdk_retry_is_disabled_only_for_news(trading, monkeypatch, protocol, new
         try: return [item async for item in llm.stream(provider,'rules',[],[],None)]
         finally: llm.news_retry.reset(token)
     assert asyncio.run(run())[-1] == llm.Completion()
-    assert options[0]['max_retries'] == (0 if news else llm.MAX_RETRIES)
+    assert options[0]['max_retries'] == 0

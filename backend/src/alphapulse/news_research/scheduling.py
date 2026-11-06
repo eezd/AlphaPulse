@@ -166,5 +166,6 @@ async def queue_status(session, settings):
                 reasons.append('no_work' if not any(
                     q.get(s, 0) for q in queues.values() for s in ('missing', 'stale', 'index_pending', 'assign_pending')
                 ) and not any(q.get('ready', 0) for q in events.values()) else 'dispatching')
-    return {'running': running, 'capacity': capacity, 'running_by_stage': stages,
+    from alphapulse.ai.recovery import waiting_count
+    return {'waiting_retry': await waiting_count(), 'running': running, 'capacity': capacity, 'running_by_stage': stages,
             'draining': not settings.enabled and running > 0, 'events': events, 'idle_reasons': reasons, **queues}

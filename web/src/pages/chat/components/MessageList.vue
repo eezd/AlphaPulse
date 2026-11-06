@@ -51,6 +51,9 @@ function prettyResult(result: string) {
             <span class="text-sm text-[var(--el-color-primary)] font-semibold">AlphaPulse AI</span>
             <span class="num text-slate-400">{{ item.time ? formatTime(item.time) : "" }}</span>
           </div>
+          <div v-if="item.retryNotice" class="text-xs text-amber-600">
+            {{ item.retryNotice }}
+          </div>
           <div v-if="item.thinking" class="flex items-center gap-2 text-xs text-slate-500">
             <span class="h-2 w-2 animate-pulse rounded-full bg-amber-500" />
             思考中…

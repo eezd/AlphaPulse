@@ -170,7 +170,9 @@ async def _message_events(body: SendIn) -> AsyncIterator[ServerSentEvent]:
                         yield event("delta", {"text": item.text})
                     elif isinstance(item, llm.ThinkingStarted):
                         yield event("thinking", {})
-                    else:
+                    elif isinstance(item, llm.RetryStatus):
+                        yield event("retry", {"scope": item.scope, "attempt": item.attempt, "retry_at": item.retry_at, "reason": item.reason})
+                    elif isinstance(item, llm.Completion):
                         completion = item
             except llm.LlmError as e:
                 if text:

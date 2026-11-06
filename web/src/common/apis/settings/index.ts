@@ -45,13 +45,13 @@ export function deleteProviderApi(id: number) {
   })
 }
 
-/** 测试模型连接；按后端 SDK 重试上限等待 */
+/** 测试模型连接；按单请求重试上限等待 */
 export function testProviderApi(id: number) {
   return request<Settings.TestProviderResponseData>({
     url: `/settings/providers/${id}/test`,
     method: "post",
     data: null,
-    timeout: 1900000
+    timeout: 2100000
   })
 }
 
@@ -89,3 +89,6 @@ export function testExchangeApi() {
     timeout: 30000
   })
 }
+
+export interface ProviderAvailability { provider_id: number, name: string, state: string, retry_at: string | null, level: number }
+export const listProviderAvailabilityApi = () => request<ProviderAvailability[]>({ url: "/settings/provider-availability", method: "get", notify: false })

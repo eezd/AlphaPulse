@@ -5,6 +5,7 @@ import type { SkillNode } from "@@/apis/skills/type"
 import * as api from "@@/apis/news-research"
 import { listProviderModelsApi, listProvidersApi } from "@@/apis/settings"
 import { listSkillTreeApi } from "@@/apis/skills"
+import AiAvailability from "@@/components/AiAvailability/index.vue"
 import { EFFORTS } from "@@/constants/ai"
 import dayjs from "dayjs"
 
@@ -372,6 +373,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="p-4">
+    <AiAvailability />
     <div class="mb-4 flex flex-wrap items-center gap-3">
       <h1 class="text-xl font-semibold">
         新闻与事件研究
@@ -401,6 +403,7 @@ onBeforeUnmount(() => {
     </p>
     <p v-if="queue" class="mb-4 text-sm text-slate-500">
       正在处理 {{ queue.running }} / {{ queue.capacity }} 个任务：关键词提取 {{ queue.running_by_stage.index }}，事件归属 {{ queue.running_by_stage.assign }}，事件研究 {{ queue.running_by_stage.research }}。
+      其中等待重试 {{ queue.waiting_retry ?? 0 }} 个，等待不代表正在调用模型。
       实时队列：待索引 {{ (queue.realtime.missing ?? 0) + (queue.realtime.stale ?? 0) + (queue.realtime.index_pending ?? 0) }}，待归属 {{ queue.realtime.assign_pending ?? 0 }}，就绪研究 {{ queue.events.realtime.ready ?? 0 }}；
       回补队列：待索引 {{ (queue.backfill.missing ?? 0) + (queue.backfill.stale ?? 0) + (queue.backfill.index_pending ?? 0) }}，待归属 {{ queue.backfill.assign_pending ?? 0 }}，就绪研究 {{ queue.events.backfill.ready ?? 0 }}。
       <span v-if="queue.idle_reasons.length">{{ queue.idle_reasons.map(reason => idleReasonLabels[reason] ?? reason).join('；') }}。</span>

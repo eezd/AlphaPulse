@@ -51,7 +51,8 @@ export interface SendChatRequestData {
 }
 
 export type ChatStreamEvent
-  = | { name: "prompt", data: { estimated_tokens: number, context_window: number, provider: string } }
+  = | { name: "retry", data: { scope: string, attempt: number, retry_at: string, reason: string } }
+    | { name: "prompt", data: { estimated_tokens: number, context_window: number, provider: string } }
     | { name: "thinking", data: Record<string, never> }
     | { name: "done", data: Record<string, never> }
     | { name: "context_updated", data: { id: number } }

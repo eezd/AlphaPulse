@@ -197,6 +197,8 @@ async def enable(session: DB, body: EnableInput | None = None):
         "summary": "",
         "content": "本条为虚构测试。示例公司宣布计划维护，具体时间未知。",
     }
+    from alphapulse.ai import llm
+    token = llm.fail_fast.set(True)
     original_config = row.config
     control_revision = row.control_revision
     try:
@@ -261,6 +263,8 @@ async def enable(session: DB, body: EnableInput | None = None):
         raise HTTPException(422, str(error)) from error
     except Exception as error:
         raise HTTPException(502, f"两阶段验证失败：{error}") from error
+    finally:
+        llm.fail_fast.reset(token)
     row = await session.get(
         ResearchSettings, 1, populate_existing=True, with_for_update=True
     )

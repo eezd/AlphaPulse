@@ -17,6 +17,7 @@ export interface DisplayItem {
   closed?: boolean
   /** 生成中：模型正在思考，还没有输出文字 */
   thinking?: boolean
+  retryNotice?: string
   /** 已落库的消息时间；生成中的没有 */
   time?: string
 }

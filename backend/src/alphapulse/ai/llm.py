@@ -7,12 +7,13 @@
 """
 
 import asyncio
+import hashlib
 import json
 import logging
+import uuid
 from collections.abc import AsyncIterator
 from contextvars import ContextVar
 from datetime import UTC, datetime
-from email.utils import parsedate_to_datetime
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -21,6 +22,7 @@ import httpx
 import httpx2  # anthropic SDK 使用的 HTTP 客户端，异常类与 httpx 不通用
 import openai
 
+from alphapulse.ai.recovery import Gate
 from alphapulse.core.crypto import decrypt
 from alphapulse.models import AiProvider
 
@@ -28,11 +30,8 @@ from alphapulse.models import AiProvider
 TIMEOUT_SECONDS = 600
 # 思考强度：两种协议共有的取值。OpenAI 另有 none/minimal，但实测经 Sub2API 会卡住后 502，不提供
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
-# SDK 自带重试只针对连接错误、429 和 5xx
-MAX_RETRIES = 2
-# 只重试 SDK 不处理的流内错误和读取中断，且只在还没有输出内容时重试。
-STREAM_RETRIES = 3
-STREAM_RETRY_DELAY_SECONDS = 2
+# SDK 重试关闭，所有生成请求仅由公共流负责重试。
+MAX_RETRIES = 0
 # 输出被截断时回给模型的工具结果：参数不完整，不能执行
 TRUNCATED_RESULT = json.dumps({"error": "输出达到最大输出上限被截断，工具参数不完整，未执行。请精简内容后重新调用"}, ensure_ascii=False)
 
@@ -40,6 +39,7 @@ logger = logging.getLogger("alphapulse.ai.llm")
 
 
 news_retry = ContextVar("news_model_retry", default=None)
+fail_fast = ContextVar("ai_fail_fast", default=False)
 
 
 class LlmError(Exception):
@@ -106,70 +106,178 @@ async def list_models(provider: AiProvider) -> list[str]:
         raise LlmError('无法读取模型列表；请检查接入配置，或手动填写模型名称') from error
 
 
+@dataclass
+class RetryStatus:
+    scope: str
+    attempt: int
+    retry_at: str
+    reason: str
+
+
+def recovery_gate(provider):
+    identity = json.dumps([provider.protocol, api_root(provider.base_url), decrypt(provider.api_key_encrypted)])
+    return Gate(hashlib.sha256(identity.encode()).hexdigest())
+
+
+async def availability(provider):
+    try:
+        state = await recovery_gate(provider).call('read')
+    except Exception as error:
+        raise LlmError('无法读取模型故障协调状态，请检查 Redis') from error
+    return {'state': 'probing' if state['probe'] else 'waiting' if state['level'] else 'normal',
+            'retry_at': datetime.fromtimestamp(state['retry_at'], UTC).isoformat() if state['level'] else None,
+            'level': state['level']}
+
+
 async def stream(
     provider: AiProvider, system: str, messages: list[dict], tools: list[ToolSpec], effort: Effort | None = None,
-) -> AsyncIterator[TextDelta | ThinkingStarted | Completion]:
-    """先逐段产出 TextDelta / ThinkingStarted，最后产出一个 Completion。effort 为空表示不传，由模型决定"""
-    policy = news_retry.get()
-    retries = 2 if policy is not None else STREAM_RETRIES
-    for attempt in range(retries + 1):
-        output = False
-        if policy is not None: policy["output"] = False
+    *, before_retry=None,
+) -> AsyncIterator[TextDelta | ThinkingStarted | Completion | RetryStatus]:
+    """仅重发未开始生成的当前请求；共享故障等待优先于局部重试。"""
+    gate = recovery_gate(provider)
+    identifier = uuid.uuid4().hex
+    retries = 0
+    waited = False
+    policy = {'output': False}
+
+    async def coordinate(operation, epoch=-1):
         try:
-            if provider.protocol == "openai":
-                events = _stream_openai(provider, system, messages, tools, effort)
-            else:
-                events = _stream_anthropic(provider, system, messages, tools, effort)
-            async for event in events:
-                output = True
-                yield event
-            return
-        # 流式读取过程中的网络错误 SDK 不包装，以原始的 httpx / httpx2 异常抛出
-        except (openai.APIError, anthropic.APIError, httpx.TransportError, httpx2.TransportError) as e:
-            # 已经推送过内容再重试会重复输出
-            delay = _news_retry_delay(e, attempt) if policy is not None else STREAM_RETRY_DELAY_SECONDS
-            retryable = delay is not None if policy is not None else _retryable(e)
-            if output or (policy is not None and policy.get("output")) or attempt == retries or not retryable:
-                raise _llm_error(e) from e
-            if policy is not None:
+            return await gate.call(operation, identifier, epoch)
+        except Exception as error:
+            raise LlmError('模型故障协调不可用，请检查 Redis；未绕过保护发送请求') from error
+
+    async def record_outcome(operation, epoch):
+        # 已完成响应及取消语义不能被协调状态写入或租约清理失败覆盖。
+        # 新请求仍必须通过严格的 enter 门禁，失败时不会绕过 Redis。
+        try:
+            await coordinate(operation, epoch)
+        except LlmError:
+            logger.warning('模型响应状态登记失败：%s；保留原始结果', operation)
+
+    async def notice(scope, count, timestamp, reason):
+        from alphapulse.news_research.progress import step, current
+        if current.get() is not None:
+            from alphapulse.ai.recovery import mark_waiting
+            await mark_waiting(identifier)
+        at = datetime.fromtimestamp(timestamp, UTC).isoformat()
+        step('等待模型重试', retry_scope=scope, retry_attempt=count, retry_at=at)
+        return RetryStatus(scope, count, at, reason)
+
+    async def heartbeat(epoch):
+        while True:
+            await asyncio.sleep(30)
+            await coordinate('heartbeat', epoch)
+
+    try:
+        while True:
+            admission = await coordinate('enter')
+            if not admission['admitted']:
+                status = await notice('upstream', admission['level'],
+                                max(admission['retry_at'], admission['now']+1), '同一接入暂时不可用，等待单请求试探恢复')
+                if fail_fast.get():
+                    raise LlmError(f'{status.reason}；下次尝试：{status.retry_at}')
+                yield status
+                waited = True
+                await asyncio.sleep(1)
+                continue
+            epoch = admission['epoch']
+            pulse = asyncio.create_task(heartbeat(epoch)) if admission['probe'] else None
+            output = False
+            try:
+                if waited and before_retry:
+                    await before_retry()
                 from alphapulse.news_research.progress import step
-                step(f"上游暂时拒绝：{_llm_error(e)}；{delay:g}秒后重试（{attempt + 1}/2）")
-            logger.warning("模型调用失败，%ss 后第 %s 次重试：%s", delay, attempt + 1, _llm_error(e))
-            await asyncio.sleep(delay)
-            if policy is not None:
-                from alphapulse.news_research.progress import step
-                step(f"等待模型响应（重试 {attempt + 1}/2）")
+                from alphapulse.ai.recovery import clear_waiting
+                await clear_waiting(identifier)
+                step('等待模型响应', retry_at=None, retry_scope=None)
+                policy['output'] = False
+                output = False
+                adapter = _stream_openai if provider.protocol == 'openai' else _stream_anthropic
+                completed = False
+                async for event in _guarded_events(adapter(provider, system, messages, tools, effort), policy):
+                    output |= not isinstance(event, Completion)
+                    if isinstance(event, Completion):
+                        completed = True
+                        # 调用方可能取得 Completion 后直接关闭流；先尝试登记恢复，失败仍保留完整响应。
+                        await record_outcome('success', epoch)
+                    yield event
+                if not completed:
+                    raise LlmError('模型连接提前结束，未收到完整响应的结束标志')
+                return
+            except (openai.APIError, anthropic.APIError, httpx.TransportError, httpx2.TransportError, LlmError) as error:
+                temporary = _temporary(error)
+                state = await coordinate('failure', epoch) if temporary else await coordinate('read')
+                if output or policy['output'] or _timeout(error) or not temporary:
+                    raise _llm_error(error) from error
+                if state['level']:
+                    waited = True
+                    continue
+                if retries >= 2:
+                    raise _llm_error(error) from error
+                delay = (60, 180)[retries]
+                retries += 1
+                yield await notice('request', retries, datetime.now(UTC).timestamp()+delay, '单请求临时故障，等待重试')
+                await _wait_local(delay, coordinate)
+                waited = True
+            finally:
+                if pulse:
+                    pulse.cancel()
+                    try:
+                        await pulse
+                    except asyncio.CancelledError:
+                        pass
+                    except LlmError:
+                        logger.warning('模型试探租约续期失败；保留原始结果')
+                await record_outcome('release', epoch)
+    finally:
+        from alphapulse.ai.recovery import clear_waiting
+        await clear_waiting(identifier)
 
 
-def _news_retry_delay(error, attempt):
-    """One bounded retry owner for news; never repeat a timed out request."""
-    if isinstance(error, (openai.APITimeoutError, anthropic.APITimeoutError, httpx.TimeoutException, httpx2.TimeoutException)):
-        return None
+async def _guarded_events(events, policy):
+    # ContextVar 仅覆盖模型读取，不跨 yield 泄漏到调用方或异步生成器清理任务。
+    try:
+        while True:
+            token = news_retry.set(policy)
+            try:
+                event = await anext(events)
+            except StopAsyncIteration:
+                return
+            finally:
+                news_retry.reset(token)
+            yield event
+    finally:
+        await events.aclose()
+
+
+async def _wait_local(delay, coordinate):
+    deadline = asyncio.get_running_loop().time()+delay
+    while asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(max(0, min(1, deadline-asyncio.get_running_loop().time())))
+        if (await coordinate('read'))['level']:
+            break
+
+
+def _timeout(error):
+    return isinstance(error, (openai.APITimeoutError, anthropic.APITimeoutError,
+                             httpx.TimeoutException, httpx2.TimeoutException))
+
+
+def _temporary(error):
     status = getattr(error, 'status_code', None)
-    body = getattr(error, 'body', None)
-    detail = body.get('error', body) if isinstance(body, dict) else {}
-    message = str((detail.get('message') if isinstance(detail, dict) else detail) or getattr(error, 'message', '')).lower()
-    concurrency = _in_stream_error(error) and 'concurrency limit exceeded' in message
-    connection = isinstance(error, (openai.APIConnectionError, anthropic.APIConnectionError, httpx.TransportError, httpx2.TransportError))
-    if not (status == 429 or status is not None and 500 <= status <= 599 or concurrency or connection):
-        return None
-    delay = 30 * (attempt + 1)
-    response = getattr(error, 'response', None)
-    header = response.headers.get('retry-after') if response is not None else None
-    if header:
-        try:
-            try: seconds = float(header)
-            except ValueError: seconds = (parsedate_to_datetime(header) - datetime.now(UTC)).total_seconds()
-            if seconds > 120: return None
-            if seconds > 0: delay = max(delay, seconds)
-        except (ValueError, TypeError, OverflowError):
-            pass
-    return delay
+    message = str(error).lower()
+    return (_timeout(error) or status == 429 or status is not None and 500 <= status <= 599
+            or isinstance(error, (openai.APIConnectionError, anthropic.APIConnectionError,
+                                  httpx.TransportError, httpx2.TransportError))
+            or _in_stream_error(error) and any(term in message for term in
+                ('concurrency limit', 'overloaded', 'rate limit', 'temporarily unavailable'))
+            or isinstance(error, LlmError) and '未收到完整响应的结束标志' in message)
 
 
 def _news_output():
     policy = news_retry.get()
-    if policy is not None: policy['output'] = True
+    if policy is not None:
+        policy['output'] = True
 
 
 def _in_stream_error(e: Exception) -> bool:
@@ -180,16 +288,9 @@ def _in_stream_error(e: Exception) -> bool:
     return isinstance(e, anthropic.APIStatusError) and e.status_code == 200
 
 
-def _retryable(e: Exception) -> bool:
-    """建连重试归 SDK；这里只处理流内错误与读取中断，超时不重试。"""
-    if isinstance(e, (openai.APITimeoutError, anthropic.APITimeoutError, httpx.TimeoutException, httpx2.TimeoutException)):
-        return False
-    return _in_stream_error(e) or isinstance(
-        e, (httpx.TransportError, httpx2.TransportError),
-    )
-
-
 def _llm_error(e: Exception) -> LlmError:
+    if isinstance(e, LlmError):
+        return e
     if _in_stream_error(e):
         error = e.body.get("error") if isinstance(e.body, dict) else None
         message = error.get("message") if isinstance(error, dict) else None
@@ -231,7 +332,7 @@ def _openai_messages(system: str, messages: list[dict]) -> list[dict]:
 async def _stream_openai(provider: AiProvider, system: str, messages: list[dict], tools: list[ToolSpec], effort: Effort | None) -> AsyncIterator[TextDelta | Completion]:
     client = openai.AsyncOpenAI(
         api_key=decrypt(provider.api_key_encrypted), base_url=f"{api_root(provider.base_url)}/v1",
-        timeout=TIMEOUT_SECONDS, max_retries=0 if news_retry.get() is not None else MAX_RETRIES,
+        timeout=TIMEOUT_SECONDS, max_retries=0,
     )
     kwargs: dict[str, Any] = {}
     if tools:
@@ -310,7 +411,7 @@ def _anthropic_messages(messages: list[dict]) -> list[dict]:
 async def _stream_anthropic(provider: AiProvider, system: str, messages: list[dict], tools: list[ToolSpec], effort: Effort | None) -> AsyncIterator[TextDelta | ThinkingStarted | Completion]:
     client = anthropic.AsyncAnthropic(
         api_key=decrypt(provider.api_key_encrypted), base_url=api_root(provider.base_url),
-        timeout=TIMEOUT_SECONDS, max_retries=0 if news_retry.get() is not None else MAX_RETRIES,
+        timeout=TIMEOUT_SECONDS, max_retries=0,
     )
     kwargs: dict[str, Any] = {}
     if tools:

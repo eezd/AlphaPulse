@@ -2,6 +2,7 @@
 import type { Provider, ProviderForm } from "@@/apis/settings/type"
 import type { FormInstance, FormRules } from "element-plus"
 import { createProviderApi, deleteProviderApi, listProvidersApi, patchProviderApi, testProviderApi } from "@@/apis/settings"
+import AiAvailability from "@@/components/AiAvailability/index.vue"
 import { useSessionScope } from "@@/composables/useSessionScope"
 import { EFFORTS } from "@@/constants/ai"
 import { formatTime } from "@@/utils/text"
@@ -134,6 +135,7 @@ onMounted(load)
 
 <template>
   <section class="min-w-0">
+    <AiAvailability />
     <el-card shadow="never" body-class="p-0">
       <template #header>
         <div class="flex items-center justify-between">

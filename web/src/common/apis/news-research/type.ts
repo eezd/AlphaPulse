@@ -1,7 +1,7 @@
 export interface Keyword { canonical: string, aliases: string[], quote: string }
 export interface ModelConfig { provider_id: number | null, model: string, reasoning_effort: string | null, skill_id: number | null }
 export interface Config { index: ModelConfig, research: ModelConfig, concurrency: number }
-export interface QueueStatus { running: number, capacity: number, running_by_stage: { index: number, assign: number, research: number }, draining: boolean, realtime: Record<string, number>, backfill: Record<string, number>, events: { realtime: Record<string, number>, backfill: Record<string, number> }, idle_reasons: string[] }
+export interface QueueStatus { waiting_retry?: number, running: number, capacity: number, running_by_stage: { index: number, assign: number, research: number }, draining: boolean, realtime: Record<string, number>, backfill: Record<string, number>, events: { realtime: Record<string, number>, backfill: Record<string, number> }, idle_reasons: string[] }
 export interface Settings { control_revision: number, realtime_from: string | null, queue: QueueStatus, batch?: null, config: Partial<Config>, enabled: boolean, start_at: string }
 export interface Coverage { start_at: string, checked_at: string, total: number, unprocessed: number, missing: number, stale: number, pending: number, processing: number, failed: number, completed: number, outside: { unprocessed: number, stale: number, pending: number, processing: number, failed: number } }
 export interface Package { id: number, news_id: number, title: string, url: string, state: string, error: string | null, keywords: Keyword[], events: { id: number, title: string, reason: string, quote: string }[] }

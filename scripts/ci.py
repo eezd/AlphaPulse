@@ -180,6 +180,8 @@ def smoke(build, label):
         run('docker', 'run', '-d', '--name', names['web'], '--network-alias', 'web', *common, build['images']['web']['local'])
         wait_command('docker', 'exec', names['api'], 'python', '-c',
                      'import urllib.request; urllib.request.urlopen("http://localhost:8000/api/health", timeout=3)')
+        print(run('docker', 'exec', '-i', '-e', 'AI_RECOVERY_TEST_REDIS_URL=' + env['REDIS_URL'],
+                  names['api'], 'python', '-', input=(ROOT / 'scripts/smoke_ai_recovery.py').read_text()), flush=True)
         print(run('docker', 'exec', '-i', names['api'], 'python', '-',
                   input=(ROOT / 'scripts/smoke_dynamic_queue.py').read_text()), flush=True)
         print(run('docker', 'exec', '-i', names['api'], 'python', '-',

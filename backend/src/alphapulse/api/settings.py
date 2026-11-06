@@ -170,10 +170,20 @@ async def delete_provider(provider_id: int, session: Annotated[AsyncSession, Dep
     return success(None)
 
 
+@router.get("/provider-availability")
+async def provider_availability(session: Annotated[AsyncSession, Depends(get_session)]):
+    providers = list(await session.scalars(select(AiProvider).order_by(AiProvider.id)))
+    try:
+        return success([{'provider_id': p.id, 'name': p.name, **await llm.availability(p)} for p in providers])
+    except llm.LlmError as error:
+        raise HTTPException(503, str(error)) from error
+
+
 @router.post("/providers/{provider_id}/test")
 async def test_provider(provider_id: int, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[TestResult]:
     provider = await get_provider(session, provider_id)
     started = time.monotonic()
+    token = llm.fail_fast.set(True)
     try:
         completion = None
         async for event in llm.stream(provider, "只回复 OK。", [{"role": "user", "text": "ping"}], [], provider.reasoning_effort):
@@ -181,6 +191,8 @@ async def test_provider(provider_id: int, session: Annotated[AsyncSession, Depen
                 completion = event
     except llm.LlmError as e:
         return success(TestResult(ok=False, elapsed_ms=round((time.monotonic() - started) * 1000), error=str(e)))
+    finally:
+        llm.fail_fast.reset(token)
     return success(TestResult(ok=True, elapsed_ms=round((time.monotonic() - started) * 1000), reply=completion.text[:200]))
 
 
