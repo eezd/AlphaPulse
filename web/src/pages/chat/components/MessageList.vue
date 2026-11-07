@@ -20,6 +20,11 @@ const TOOL_LABELS: Record<string, string> = {
   update_context: "更新 CONTEXT.md"
 }
 
+async function copyText(text: string) {
+  await navigator.clipboard.writeText(text)
+  ElMessage.success("已复制回答")
+}
+
 function prettyResult(result: string) {
   try {
     return JSON.stringify(JSON.parse(result), null, 2)
@@ -60,6 +65,9 @@ function prettyResult(result: string) {
           </div>
           <!-- markdown-it 已关闭 html，模型输出中的标签按文本显示 -->
           <div v-if="item.text" class="markdown-body" v-html="renderMarkdown(item.text)" />
+          <el-button v-if="item.text && !item.thinking" link class="self-start" @click="copyText(item.text)">
+            复制回答
+          </el-button>
           <el-collapse v-if="item.toolCalls.length" class="tool-cards">
             <el-collapse-item v-for="call in item.toolCalls" :key="call.id" :name="call.id">
               <template #title>

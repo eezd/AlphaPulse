@@ -33,6 +33,7 @@ export function useMarketChart() {
     return progress && !progress.done && dataInterval.value !== "1s" ? progress.percent : null
   })
 
+  const tickerReady = ref(false)
   const ticker = reactive({ last: 0, open: 0, high: 0, low: 0, volume: 0, quoteVolume: 0, changePercent: 0 })
   const priceColor = computed(() => ticker.changePercent >= 0 ? UP : DOWN)
 
@@ -75,6 +76,7 @@ export function useMarketChart() {
   const { connected, subscribe } = useMarketSocket(
     (k: KlineMessage) => barCallback?.({ timestamp: k.t, open: +k.o, high: +k.h, low: +k.l, close: +k.c, volume: +k.v, turnover: +k.q }),
     (t: TickerMessage) => {
+      tickerReady.value = true
       Object.assign(ticker, { last: +t.c, open: +t.o, high: +t.h, low: +t.l, volume: +t.v, quoteVolume: +t.q })
       ticker.changePercent = ticker.open ? (ticker.last - ticker.open) / ticker.open * 100 : 0
     }
@@ -86,6 +88,7 @@ export function useMarketChart() {
     const t = await getTickerApi(market, symbol)
     if (version !== tickerVersion)
       return
+    tickerReady.value = true
     Object.assign(ticker, {
       last: +t.lastPrice,
       high: +t.highPrice,
@@ -154,6 +157,7 @@ export function useMarketChart() {
   }
 
   watch([() => selection.value.market, () => selection.value.symbol], () => {
+    tickerReady.value = false
     applyChartState()
     loadTicker()
   })
@@ -171,15 +175,14 @@ export function useMarketChart() {
     const fallback = symbols.value.find(s => s.symbol === "BTCUSDT") ?? symbols.value[0]
     if (!current.value && fallback)
       selection.value = { market: fallback.market, symbol: fallback.symbol }
-    chart.value = init(chartEl.value!, { locale: "zh-CN", timezone: "Asia/Shanghai", styles: "dark" })
+    chart.value = init(chartEl.value!, { locale: "zh-CN", timezone: "Asia/Shanghai", styles: "light" })
     chart.value!.setStyles(BINANCE_STYLES)
     chart.value!.setDataLoader(dataLoader)
     applyChartState()
     applyIndicators()
-    await loadTicker()
-    if (disposed) return
     resizeObserver = new ResizeObserver(() => chart.value?.resize())
     resizeObserver.observe(chartEl.value!)
+    await loadTicker()
   })
 
   onBeforeUnmount(() => {
@@ -192,5 +195,5 @@ export function useMarketChart() {
       dispose(chartEl.value)
   })
 
-  return { symbols, selection, interval, favorites, mainIndicators, subIndicators, indicatorParams, candleType, chartEl, chart, current, dataInterval, intervals, backfillProgress, ticker, priceColor, connected, loadTicker, selectSymbol, toggleFavorite, refreshSymbols, onAdded, formatNumber, formatBig }
+  return { symbols, selection, interval, favorites, mainIndicators, subIndicators, indicatorParams, candleType, chartEl, chart, current, dataInterval, intervals, backfillProgress, ticker, tickerReady, priceColor, connected, loadTicker, selectSymbol, toggleFavorite, refreshSymbols, onAdded, formatNumber, formatBig }
 }

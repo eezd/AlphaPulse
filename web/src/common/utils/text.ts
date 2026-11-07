@@ -1,7 +1,12 @@
 import dayjs from "dayjs"
+import timezone from "dayjs/plugin/timezone"
+import utc from "dayjs/plugin/utc"
+
+dayjs.extend(utc)
+dayjs.extend(timezone)
 
 export function formatTime(value: string | null | undefined, pattern = "MM-DD HH:mm:ss") {
-  return value ? dayjs(value).format(pattern) : "-"
+  return value ? dayjs(value).tz("Asia/Shanghai").format(pattern) : "-"
 }
 
 /** HTML 转纯文本行；DOMParser 解析的文档不会执行脚本 */

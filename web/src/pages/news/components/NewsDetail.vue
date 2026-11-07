@@ -2,6 +2,7 @@
 import type { NewsDetail, Revision } from "@@/apis/news/type"
 import { getNewsApi, listRevisionsApi } from "@@/apis/news"
 import { useSourceNames } from "@@/composables/useSourceNames"
+import { downloadText } from "@@/utils/export"
 import { diffLines, formatTime, htmlToLines } from "@@/utils/text"
 import { Link } from "@element-plus/icons-vue"
 
@@ -69,12 +70,29 @@ const diffStats = computed(() => ({
   add: diff.value.filter(line => line.type === "add").length,
   del: diff.value.filter(line => line.type === "del").length
 }))
+async function shareNews() {
+  if (!detail.value) return
+  await navigator.clipboard.writeText(`${location.origin}/news?news=${detail.value.id}`)
+  ElMessage.success("新闻链接已复制")
+}
+function exportNews() {
+  if (!detail.value) return
+  const n = detail.value
+  downloadText(`news-${n.id}.md`, `# ${n.title}\n\n来源：${n.source_code}\n\n时间：${n.published_at}\n\n原文：${n.url}\n\n${htmlToLines(n.content_html).join("\n\n")}`)
+}
 </script>
 
 <template>
   <el-card shadow="never" class="flex flex-col" body-class="min-h-0 flex-1 flex flex-col gap-3">
     <el-empty v-if="newsId == null" description="点击左侧新闻查看详情" class="m-auto" />
     <template v-else-if="detail">
+      <div class="flex gap-2">
+        <el-button @click="shareNews">
+          分享链接
+        </el-button><el-button @click="exportNews">
+          导出 Markdown
+        </el-button>
+      </div>
       <NewsRisk :news-id="detail.id" :revision="detail.revision_no" />
       <div class="flex flex-wrap items-center gap-2">
         <el-tag size="small">

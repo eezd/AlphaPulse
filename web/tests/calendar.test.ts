@@ -30,9 +30,9 @@ function setup(api: () => Promise<any>) {
 
 const payload = {
   items: [
-    { release_id: 1, kind: "data", country_code: "US", calendar_date: "2026-11-04", scheduled_at: "2026-11-04T13:15:00Z", time_precision: "minute", status: "scheduled" },
-    { release_id: 2, kind: "event", country_code: "CN", calendar_date: "2026-11-04", scheduled_at: "2026-11-03T16:00:00Z", time_precision: "tentative", status: "recorded" },
-    { release_id: 3, kind: "holiday", country_code: "JP", calendar_date: "2026-11-03", scheduled_at: "2026-11-02T16:00:00Z", time_precision: "day", status: "recorded" }
+    { importance: 3, release_id: 1, kind: "data", country_code: "US", calendar_date: "2026-11-04", scheduled_at: "2026-11-04T13:15:00Z", time_precision: "minute", status: "scheduled" },
+    { importance: 2, release_id: 2, kind: "event", country_code: "CN", calendar_date: "2026-11-04", scheduled_at: "2026-11-03T16:00:00Z", time_precision: "tentative", status: "recorded" },
+    { importance: 1, release_id: 3, kind: "holiday", country_code: "JP", calendar_date: "2026-11-03", scheduled_at: "2026-11-02T16:00:00Z", time_precision: "day", status: "recorded" }
   ],
   countries: [],
   coverage: [],
@@ -50,7 +50,7 @@ test("calendar categories use local dates and do not count down unknown times", 
   assert.equal(page.upcoming.value, undefined)
   page.kind.value = "holiday"
   assert.equal(page.groups.value[0][0], "2026-11-03")
-  page.country.value = "US"
+  page.selectedCountries.value = ["US"]
   assert.equal(page.groups.value.length, 0)
 })
 
@@ -64,6 +64,24 @@ test("calendar session changes and unmount discard late data", async () => {
     await first
     assert.equal(env.page.data.value, null)
   }
+})
+
+test("calendar all categories, country selection and importance share the countdown filters", async () => {
+  const { page } = setup(async () => payload)
+  await page.load()
+  page.kind.value = "all"
+  page.now.value = Date.parse("2026-11-04T10:00:00Z")
+  assert.equal(page.groups.value.flatMap(([, rows]: any) => rows).length, 3)
+  assert.equal(page.upcoming.value.release_id, 1)
+  page.selectedCountries.value = ["CN", "JP"]
+  assert.equal(page.groups.value.flatMap(([, rows]: any) => rows).length, 2)
+  assert.equal(page.upcoming.value, undefined)
+  page.minimumImportance.value = 2
+  assert.equal(page.groups.value.flatMap(([, rows]: any) => rows).length, 1)
+  page.selectedCountries.value = ["US"]
+  page.minimumImportance.value = 4
+  assert.equal(page.groups.value.length, 0)
+  assert.equal(page.upcoming.value, undefined)
 })
 
 test("calendar request order wins over late responses", async () => {

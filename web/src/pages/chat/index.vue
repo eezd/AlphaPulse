@@ -292,6 +292,11 @@ onMounted(() => Promise.all([loadProviders(), loadSession(), loadSkills()]))
           <MessageList v-else :items="items" />
         </div>
 
+        <div class="flex flex-wrap gap-2">
+          <el-button v-for="prompt in ['分析近期宏观事件对 BTC 和 ETH 的影响', '检查当前持仓风险', '整理后续需要观察的事件']" :key="prompt" size="small" :disabled="streaming" @click="input = prompt">
+            {{ prompt }}
+          </el-button>
+        </div>
         <div class="chat-input border border-slate-300 rounded-lg border-solid bg-white">
           <el-input
             v-model="input" type="textarea" :autosize="{ minRows: 2, maxRows: 8 }" resize="none"

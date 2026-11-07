@@ -5,6 +5,7 @@ import { createProviderApi, deleteProviderApi, listProvidersApi, patchProviderAp
 import AiAvailability from "@@/components/AiAvailability/index.vue"
 import { useSessionScope } from "@@/composables/useSessionScope"
 import { EFFORTS } from "@@/constants/ai"
+import { downloadText } from "@@/utils/export"
 import { formatTime } from "@@/utils/text"
 import { Plus } from "@element-plus/icons-vue"
 
@@ -131,11 +132,39 @@ async function test(p: Provider) {
 }
 
 onMounted(load)
+const batchTesting = ref(false)
+const batchResults = ref<string[]>([])
+async function testAll() {
+  if (batchTesting.value || testing.value !== null) return
+  batchTesting.value = true
+  batchResults.value = []
+  try {
+    for (const provider of providers.value) {
+      if (!sessionScope.isCurrent()) break
+      const result = await testProviderApi(provider.id)
+      if (!sessionScope.isCurrent()) break
+      batchResults.value.push(`${provider.name}：${result.ok ? `${result.elapsed_ms}ms` : result.error}`)
+    }
+  } finally {
+    batchTesting.value = false
+  }
+}
+function exportConfig() {
+  downloadText("providers-redacted.json", JSON.stringify(providers.value.map(({ api_key_hint: _key, ...provider }) => provider), null, 2), "application/json")
+}
 </script>
 
 <template>
   <section class="min-w-0">
-    <AiAvailability />
+    <AiAvailability /><div class="flex flex-wrap gap-2 mb-3">
+      <el-button :loading="batchTesting" :disabled="testing !== null" @click="testAll">
+        批量测试（会调用模型）
+      </el-button><el-button @click="exportConfig">
+        导出脱敏配置
+      </el-button>
+    </div><p v-for="result in batchResults" :key="result" class="text-xs text-slate-500">
+      {{ result }}
+    </p>
     <el-card shadow="never" body-class="p-0">
       <template #header>
         <div class="flex items-center justify-between">
@@ -186,7 +215,7 @@ onMounted(load)
         </el-table-column>
         <el-table-column label="操作" width="250" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" :disabled="testing !== null || saving" :loading="testing === row.id" @click="test(row as Provider)">
+            <el-button link type="primary" :disabled="testing !== null || saving || batchTesting" :loading="testing === row.id" @click="test(row as Provider)">
               测试连接
             </el-button>
             <el-button link @click="openEdit(row as Provider)">

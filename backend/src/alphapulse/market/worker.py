@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from alphapulse.core.db import SessionLocal
-from alphapulse.core.redis import redis
+from alphapulse.core.redis import KEY_PREFIX, redis
 from alphapulse.market.binance import REST, WS, BinanceClient
 from alphapulse.market.channels import kline_channel, ticker_channel
 from alphapulse.models import Kline, KlineSyncState, MarketSymbol
@@ -180,8 +180,27 @@ async def active_symbols(market: str) -> list[str]:
 
 
 async def handle_message(market: str, raw: str | bytes) -> None:
-    data = json.loads(raw)["data"]
-    symbol = data["s"]
+    message = json.loads(raw)
+    data = message["data"]
+    stream = message.get("stream", "")
+    symbol = data.get("s") or stream.split("@")[0].upper()
+    kind = 'depth' if '@depth' in stream else 'trade' if '@aggTrade' in stream else 'mark_price' if '@markPrice' in stream else None
+    if kind:
+        key = f'{KEY_PREFIX}quote:{market}:{symbol}:{kind}'
+        if kind == 'depth':
+            # 合约保留交易所事件时间；现货快照没有时间戳，只能记录接收时间。
+            at = data['E'] if market == 'um' else int(time.time() * 1000)
+            payload = {'bids': data.get('bids', data.get('b', [])), 'asks': data.get('asks', data.get('a', [])), 'at': at}
+        elif kind == 'trade':
+            payload = {'id': data['a'], 'price': data['p'], 'quantity': data['q'], 'time': data['T'], 'buyer_maker': data['m']}
+            await redis.lpush(key + ':recent', json.dumps(payload))
+            await redis.ltrim(key + ':recent', 0, 99)
+            await redis.expire(key + ':recent', 300)
+        else:
+            payload = {'mark_price': data['p'], 'index_price': data['i'], 'funding_rate': data['r'], 'next_funding_at': data['T'], 'at': data['E']}
+        await redis.set(key, json.dumps(payload), ex=15 if kind != 'trade' else 300)
+        await redis.publish(f'{KEY_PREFIX}pub:{kind}:{market}:{symbol}', json.dumps(payload))
+        return
     if data["e"] == "kline":
         k = data["k"]
         payload = {"t": k["t"], "o": k["o"], "h": k["h"], "l": k["l"], "c": k["c"], "v": k["v"], "q": k["q"], "x": k["x"]}
@@ -198,7 +217,7 @@ async def handle_message(market: str, raw: str | bytes) -> None:
         await redis.publish(ticker_channel(market, symbol), json.dumps(payload))
 
 
-async def stream_loop(market: str) -> None:
+async def stream_loop(market: str, depth_only: bool = False) -> None:
     while True:
         try:
             symbols = await active_symbols(market)
@@ -207,9 +226,16 @@ async def stream_loop(market: str) -> None:
                 continue
             intervals = INTERVALS + (["1s"] if market == "spot" else [])
             streams = [f"{s.lower()}@kline_{i}" for s in symbols for i in intervals] + [f"{s.lower()}@miniTicker" for s in symbols]
-            async with websockets.connect(f"{WS[market]}?streams={'/'.join(streams)}", max_size=2**22) as ws:
+            if depth_only:
+                streams = [f"{s.lower()}@depth20@500ms" for s in symbols]
+            else:
+                streams += [f"{s.lower()}@aggTrade" for s in symbols]
+                streams += [f"{s.lower()}@markPrice@1s" for s in symbols] if market == 'um' else [f"{s.lower()}@depth20@100ms" for s in symbols]
+            endpoint = 'wss://fstream.binance.com/public/stream' if depth_only else WS[market]
+            async with websockets.connect(f"{endpoint}?streams={'/'.join(streams)}", max_size=2**22) as ws:
                 logger.info("%s WS 已连接：%d 个交易对，%d 个流", market, len(symbols), len(streams))
-                catchup_needed.set()
+                if not depth_only:
+                    catchup_needed.set()
                 next_check = time.monotonic() + SYMBOL_CHECK_SECONDS
                 last_message = time.monotonic()
                 while True:
@@ -240,6 +266,7 @@ async def main() -> None:
         for m in MARKETS:
             tg.create_task(backfill_loop(m))
             tg.create_task(stream_loop(m))
+        tg.create_task(stream_loop("um", depth_only=True))
         tg.create_task(catchup_loop())
 
 

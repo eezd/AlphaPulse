@@ -5,8 +5,10 @@ import { useSessionScope } from "@@/composables/useSessionScope"
 import dayjs from "dayjs"
 import timezone from "dayjs/plugin/timezone"
 import utc from "dayjs/plugin/utc"
+import { ElDrawer } from "element-plus"
 import { flagUrl, sources, timeLabel, value } from "../presentation"
 
+defineProps<{ embedded?: boolean }>()
 dayjs.extend(utc)
 dayjs.extend(timezone)
 const zone = "Asia/Shanghai"
@@ -17,6 +19,13 @@ const revisions = ref<CalendarRevision[]>([])
 const revisionsLoading = ref(false)
 const revisionError = ref(false)
 const history = ref<CalendarHistory[]>([])
+const chartValues = computed(() => [...history.value].reverse().filter(row => row.actual !== null && row.actual.trim() !== "" && Number.isFinite(Number(row.actual))).map(row => ({ ...row, numeric: Number(row.actual) })))
+const chartPoints = computed(() => {
+  const values = chartValues.value
+  const low = Math.min(...values.map(r => r.numeric))
+  const span = Math.max(...values.map(r => r.numeric)) - low || 1
+  return values.map((r, i) => `${20 + i / Math.max(1, values.length - 1) * 560},${130 - (r.numeric - low) / span * 110}`).join(" ")
+})
 const historyLoading = ref(false)
 const historyError = ref(false)
 const series = ref<CalendarSeriesValue[]>([])
@@ -76,7 +85,12 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <el-drawer :model-value="!!detail" title="事件详情" size="min(820px, 100vw)" @close="detail = null">
+  <component :is="embedded ? 'aside' : ElDrawer" v-if="!embedded || detail" class="calendar-detail" :model-value="!!detail" title="事件详情" size="min(820px, 100vw)" @close="detail = null">
+    <div v-if="embedded" class="mb-3 flex items-center justify-between">
+      <strong>事件详情与历史数据</strong><el-button link @click="detail = null">
+        关闭
+      </el-button>
+    </div>
     <template v-if="detail">
       <h2 class="detail-name">
         <img v-if="flagUrl(detail)" class="country-flag" :src="flagUrl(detail)!" :alt="detail.country_name"> {{ detail.event_name }}
@@ -122,6 +136,15 @@ onBeforeUnmount(() => {
             同一指标、同一发布阶段的已采集记录（含本期）。金十补取值不保证是最初公布版本。首次记录值不保证是原始初值，缺失历史留空；当前官方修订序列在下方独立展示，不能用于还原历史公布时点。
           </p>
           <el-alert v-if="historyError" :closable="false" type="error" title="历史公布值获取失败" />
+          <figure v-if="chartValues.length > 1" class="m-0 my-4 border border-slate-200 rounded border-solid p-3">
+            <figcaption class="text-xs text-slate-500">
+              已采集的本次记录值趋势（{{ detail.unit || "来源未标单位" }}）
+            </figcaption>
+            <svg viewBox="0 0 600 155" role="img" aria-label="历史公布值趋势" class="w-full"><polyline :points="chartPoints" fill="none" stroke="#2563eb" stroke-width="2" /></svg>
+            <div class="flex justify-between text-xs text-slate-500">
+              <span>{{ chartValues[0]?.period ?? chartValues[0]?.period_label }}</span><span>{{ chartValues.at(-1)?.period ?? chartValues.at(-1)?.period_label }}</span>
+            </div>
+          </figure>
           <el-table v-loading="historyLoading" :data="history" stripe empty-text="尚无已采集的历史公布值">
             <el-table-column label="统计期" min-width="100">
               <template #default="{ row }">
@@ -204,7 +227,7 @@ onBeforeUnmount(() => {
         </el-tab-pane>
       </el-tabs>
     </template>
-  </el-drawer>
+  </component>
 </template>
 
 <style scoped>

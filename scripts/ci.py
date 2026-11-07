@@ -195,6 +195,13 @@ def smoke(build, label):
         output = run('docker', 'exec', '-i', '-e', 'SMOKE_WEB=' + names['web'], names['api'], 'python', '-',
                      input=(ROOT / 'scripts/smoke_app.py').read_text())
         print(output, flush=True)
+        try:
+            print(run('docker', 'exec', '-i', '-e', 'SMOKE_WEB=' + names['web'], names['api'], 'python', '-',
+                      input=(ROOT / 'scripts/smoke_workspace.py').read_text()), flush=True)
+        finally:
+            if destination := os.environ.get('CI_UI_SCREENSHOTS'):
+                Path(destination).mkdir(parents=True, exist_ok=True)
+                run('docker', 'cp', names['api'] + ':/tmp/alphapulse-ui/.', destination)
         # Force a different API address while retaining the synthetic database and Redis.
         old_address = json.loads(run('docker', 'inspect', names['api']))[0]['NetworkSettings']['Networks'][network]['IPAddress']
         run('docker', 'rm', '-f', names['api'])

@@ -5,14 +5,16 @@ import type { AllowDropType, NodeDropType } from "element-plus/es/components/tre
 import { createSkillNodeApi, deleteSkillNodeApi, moveSkillNodeApi, patchSkillNodeApi } from "@@/apis/skills"
 import { useSessionScope } from "@@/composables/useSessionScope"
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   nodes: SkillNode[]
   scope?: "shared" | "news"
   editable?: boolean
+  draggable?: boolean
+  expandAll?: boolean
   selectedId?: number | null
   /** 需要高亮的节点（如 Chat 刚生成草稿的 skill） */
   highlightIds?: number[]
-}>()
+}>(), { draggable: true })
 
 const emit = defineEmits<{
   select: [node: SkillNode]
@@ -46,6 +48,9 @@ const treeData = computed(() => {
 // 新出现的文件夹默认展开，保留用户手动折叠的状态
 const expanded = ref<number[]>([])
 const seenFolders = new Set<number>()
+watch(() => props.expandAll, (value) => {
+  expanded.value = value === false ? [] : props.nodes.filter(n => n.kind === "folder").map(n => n.id)
+})
 watch(() => props.nodes, (nodes) => {
   for (const n of nodes) {
     if (n.kind === "folder" && !seenFolders.has(n.id)) {
@@ -55,11 +60,13 @@ watch(() => props.nodes, (nodes) => {
   }
 }, { immediate: true })
 
+const canDrag = computed(() => props.editable && props.draggable !== false)
 function allowDrop(_dragging: Node, drop: Node, type: AllowDropType) {
-  return type !== "inner" || (drop.data as TreeItem).data.kind === "folder"
+  return !!canDrag.value && (type !== "inner" || (drop.data as TreeItem).data.kind === "folder")
 }
 
 async function onDrop(dragging: Node, drop: Node, type: NodeDropType) {
+  if (!canDrag.value) return
   const dragged = (dragging.data as TreeItem).data
   const target = (drop.data as TreeItem).data
   const parentId = type === "inner" ? target.id : target.parent_id
@@ -125,10 +132,11 @@ function onCollapse(item: TreeItem) {
     <el-scrollbar class="min-h-0 flex-1">
       <el-empty v-if="nodes.length === 0" description="还没有 skill" :image-size="60" />
       <el-tree
+        :key="String(expandAll)"
         v-else
         :data="treeData" node-key="id" :props="{ label: 'label', children: 'children' }"
         :default-expanded-keys="expanded" :current-node-key="selectedId ?? undefined" highlight-current
-        :draggable="editable" :allow-drop="allowDrop" :expand-on-click-node="false"
+        :draggable="canDrag" :allow-drop="allowDrop" :expand-on-click-node="false"
         @node-drop="onDrop" @node-click="(item: TreeItem) => emit('select', item.data)"
         @node-expand="onExpand" @node-collapse="onCollapse"
       >
@@ -138,7 +146,7 @@ function onCollapse(item: TreeItem) {
             :class="{ 'opacity-50': !data.data.enabled, 'bg-amber-100': highlightIds?.includes(data.id) }"
           >
             <span>{{ data.data.kind === "folder" ? "📁" : "📄" }}</span>
-            <span class="truncate">{{ data.data.name }}{{ data.data.scope === "news" ? " · 新闻" : "" }}</span>
+            <span class="min-w-0 flex-1 truncate" :title="data.data.path">{{ data.data.name }}{{ data.data.scope === "news" ? " · 新闻" : "" }}</span>
             <template v-if="data.data.kind === 'skill'">
               <el-tag size="small" effect="plain" class="shrink-0">
                 P{{ data.data.priority }}
@@ -150,21 +158,28 @@ function onCollapse(item: TreeItem) {
                 草稿
               </el-tag>
             </template>
-            <div v-if="editable" class="ml-auto hidden shrink-0 gap-1 group-hover:flex" @click.stop>
-              <template v-if="data.data.kind === 'folder'">
-                <el-button link size="small" @click="create(data.id, 'skill')">
-                  +skill
+            <div v-if="editable" class="ml-auto shrink-0" @click.stop>
+              <el-dropdown trigger="click">
+                <el-button link size="small" :aria-label="`管理 ${data.data.name}`">
+                  ⋯
                 </el-button>
-                <el-button link size="small" @click="create(data.id, 'folder')">
-                  +目录
-                </el-button>
-              </template>
-              <el-button link size="small" @click="rename(data.data)">
-                改名
-              </el-button>
-              <el-button link size="small" type="danger" @click="remove(data.data)">
-                删除
-              </el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item v-if="data.data.kind === 'folder'" @click="create(data.id, 'skill')">
+                      新建 Skill
+                    </el-dropdown-item>
+                    <el-dropdown-item v-if="data.data.kind === 'folder'" @click="create(data.id, 'folder')">
+                      新建文件夹
+                    </el-dropdown-item>
+                    <el-dropdown-item @click="rename(data.data)">
+                      重命名
+                    </el-dropdown-item>
+                    <el-dropdown-item @click="remove(data.data)">
+                      删除
+                    </el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
             </div>
           </div>
         </template>

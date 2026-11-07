@@ -35,3 +35,7 @@ export function subscribeNewsApi(signal: AbortSignal, version: number, onOpen: (
     if (name === "news") onMessage(data)
   })
 }
+
+export function bookmarkNewsApi(id: number, saved: boolean) {
+  return request({ url: `/news/${id}/bookmark`, method: saved ? "put" : "delete" })
+}

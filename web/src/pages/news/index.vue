@@ -4,7 +4,20 @@ import { Refresh, Search } from "@element-plus/icons-vue"
 import NewsDetail from "./components/NewsDetail.vue"
 import { useNewsFeed } from "./composables/useNewsFeed"
 
-const { sourceNames, filters, items, total, page, pageSize, loading, failed, riskFailed, pendingCount, openedId, listBox, connected, load, search } = useNewsFeed()
+const { sourceNames, filters, items, total, page, pageSize, loading, failed, riskFailed, pendingCount, openedId, listBox, connected, load, search, savingBookmarks, toggleBookmark } = useNewsFeed()
+const route = useRoute()
+const compact = ref(false)
+watch(() => route.query.news, (value) => {
+  if (typeof value === "string" && /^\d+$/.test(value)) openedId.value = Number(value)
+}, { immediate: true })
+function resetFilters() {
+  Object.assign(filters, { source: [], q: "", range: null, processing_state: "", bookmarked: false, sort: "desc" })
+  void search()
+}
+function recent(hours: number) {
+  filters.range = [new Date(Date.now() - hours * 3600000), new Date()]
+  void search()
+}
 const mobile = ref(false)
 let media: MediaQueryList
 const updateMobile = () => mobile.value = media.matches
@@ -49,6 +62,26 @@ onBeforeUnmount(() => media?.removeEventListener("change", updateMobile))
       </el-button>
     </el-card>
 
+    <div class="flex flex-wrap items-center gap-2">
+      <el-select v-model="filters.processing_state" clearable placeholder="全部处理状态" class="w-40" @change="search">
+        <el-option v-for="(label, value) in { unprocessed: '未建立索引', index_pending: '等待关键词提取', index_processing: '关键词提取中', assign_pending: '待归属', assign_processing: '事件归属中', done: '已归属事件', failed: '处理失败' }" :key="value" :label="label" :value="value" />
+      </el-select>
+      <el-checkbox v-model="filters.bookmarked" @change="search">
+        只看收藏
+      </el-checkbox>
+      <el-select v-model="filters.sort" class="w-32" @change="search">
+        <el-option label="最新优先" value="desc" /><el-option label="最早优先" value="asc" />
+      </el-select>
+      <el-button @click="recent(24)">
+        过去 24 小时
+      </el-button><el-button @click="recent(168)">
+        过去 7 天
+      </el-button><el-button @click="resetFilters">
+        重置
+      </el-button><el-checkbox v-model="compact">
+        紧凑模式
+      </el-checkbox>
+    </div>
     <div class="news-workspace min-h-0 flex flex-1 gap-3">
       <el-card shadow="never" class="news-list min-w-0 flex flex-col" body-class="min-h-0 flex-1 flex flex-col p-0">
         <template #header>
@@ -80,9 +113,19 @@ onBeforeUnmount(() => media?.removeEventListener("change", updateMobile))
             <div v-if="item.title" class="mb-1 text-slate-900 font-semibold">
               {{ item.title }}
             </div>
-            <div class="line-clamp-2 text-sm text-slate-600 leading-relaxed">
+            <div v-if="!compact" class="line-clamp-2 text-sm text-slate-600 leading-relaxed">
               {{ item.summary || item.excerpt }}
             </div>
+            <div class="flex flex-wrap gap-1 my-2">
+              <el-tag v-for="word in item.keywords" :key="word.canonical" size="small">
+                {{ word.canonical }}
+              </el-tag><el-button link :loading="savingBookmarks.has(item.id)" @click.stop="toggleBookmark(item)">
+                {{ item.bookmarked ? '★ 已收藏' : '☆ 收藏' }}
+              </el-button>
+            </div>
+            <RouterLink v-for="event in item.events" :key="event.id" :to="{ path: '/home', query: { event: event.id } }" class="mr-2 text-xs text-blue-600" @click.stop>
+              {{ event.title }}
+            </RouterLink>
             <div class="mt-1 line-clamp-2 text-xs text-slate-500">
               {{ item.risk?.state === 'done' ? '关键词与事件归属已完成，研判请查看关联事件' : item.risk?.state?.endsWith('_failed') ? '关键词索引或事件分类失败' : item.risk ? '关键词索引与事件分类处理中' : '尚未建立关键词索引' }}
             </div>
@@ -97,7 +140,7 @@ onBeforeUnmount(() => media?.removeEventListener("change", updateMobile))
         <div class="border-t border-t-slate-200 border-t-solid px-3 py-2">
           <el-pagination
             v-model:current-page="page" v-model:page-size="pageSize" :total="total" :page-sizes="[20, 30, 50, 100]" :pager-count="5"
-            layout="sizes, prev, pager, next, jumper" size="small" background
+            :layout="mobile ? 'prev, pager, next, total' : 'sizes, prev, pager, next, jumper'" size="small" background
           />
         </div>
       </el-card>
@@ -112,7 +155,7 @@ onBeforeUnmount(() => media?.removeEventListener("change", updateMobile))
 
 <style scoped>
 .news-list {
-  flex: 0 0 40%;
+  flex: 0 0 62%;
 }
 @media (max-width: 760px) {
   .news-list {

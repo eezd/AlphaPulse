@@ -1,11 +1,12 @@
 from collections.abc import AsyncIterator
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.sse import EventSourceResponse, ServerSentEvent
-from pydantic import BaseModel
-from sqlalchemy import func, or_, select
+from pydantic import BaseModel, Field
+from sqlalchemy import delete, func, or_, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from alphapulse.api.response import ApiResponse, success
@@ -14,8 +15,8 @@ from alphapulse.core.streams import session_events
 from alphapulse.core.db import get_session
 from alphapulse.core.redis import redis
 from alphapulse.crawler.events import NEWS_CHANNEL
-from alphapulse.models import NewsItem, NewsRevision
-from alphapulse.news_research.models import Package
+from alphapulse.models import NewsBookmark, NewsItem, NewsRevision
+from alphapulse.news_research.models import Event, Membership, Package
 
 router = APIRouter(prefix="/api/news", tags=["news"], dependencies=[Depends(require_admin)])
 
@@ -55,6 +56,9 @@ class NewsBrief(BaseModel):
     first_seen_at: datetime
     revision_no: int
     risk: NewsRiskBrief | None = None
+    bookmarked: bool = False
+    keywords: list = Field(default_factory=list)
+    events: list = Field(default_factory=list)
     published_at_precision: str | None = None
     published_date: str | None = None
 
@@ -110,6 +114,7 @@ def news_filters(source: list[str] | None, q: str | None, start: datetime | None
 @router.get("")
 async def list_news(
     session: Annotated[AsyncSession, Depends(get_session)],
+    principal: Annotated[AuthSession, Depends(require_admin)],
     source: Annotated[list[str] | None, Query()] = None,
     q: str | None = None,
     start: datetime | None = None,
@@ -117,24 +122,45 @@ async def list_news(
     page: Annotated[int, Query(ge=1)] = 1,
     limit: Annotated[int, Query(ge=1, le=100)] = 30,
     ids: Annotated[list[int] | None, Query(min_length=1, max_length=100)] = None,
+    processing_state: str | None = None,
+    bookmarked: bool = False,
+    sort: Literal['asc', 'desc'] = 'desc',
 ) -> ApiResponse[NewsPage]:
     conditions = news_filters(source, q, start, end)
     if ids is not None:
         conditions.append(NewsItem.id.in_(ids))
+    mine = select(NewsBookmark.news_id).where(NewsBookmark.username == principal.username)
+    if bookmarked:
+        conditions.append(NewsItem.id.in_(mine))
+    if processing_state:
+        current = (Package.news_id == NewsItem.id) & (Package.content_hash == NewsItem.content_hash)
+        if processing_state == 'unprocessed':
+            conditions.append(~select(Package.id).where(current).correlate(NewsItem).exists())
+        elif processing_state == 'failed':
+            conditions.append(select(Package.id).where(current, Package.state.in_(['index_failed', 'assign_failed'])).correlate(NewsItem).exists())
+        elif processing_state in ['index_pending', 'index_processing', 'assign_pending', 'assign_processing', 'done']:
+            conditions.append(select(Package.id).where(current, Package.state == processing_state).correlate(NewsItem).exists())
+        else:
+            raise HTTPException(422, '未知处理状态')
     total = await session.scalar(select(func.count()).select_from(NewsItem).where(*conditions))
     rows = (await session.execute(
         select(NewsItem, func.left(NewsItem.content_text, EXCERPT_LENGTH).label("excerpt"), Package)
         .outerjoin(Package, (Package.news_id == NewsItem.id) & (Package.content_hash == NewsItem.content_hash))
         .where(*conditions)
-        .order_by(NewsItem.published_at.desc(), NewsItem.id.desc())
+        .order_by(NewsItem.published_at.asc() if sort == "asc" else NewsItem.published_at.desc(), NewsItem.id.asc() if sort == "asc" else NewsItem.id.desc())
         .offset((page - 1) * limit)
         .limit(limit)
     )).all()
 
+    saved = set(await session.scalars(mine.where(NewsBookmark.news_id.in_([n.id for n, _, _ in rows]))))
+    package_ids = [p.id for _, _, p in rows if p]
+    links = {}
+    for pid, eid, title in await session.execute(select(Membership.package_id, Event.id, Event.title).join(Event, Event.id == Membership.event_id).where(Membership.package_id.in_(package_ids))):
+        links.setdefault(pid, []).append({'id': eid, 'title': title})
     items = []
     for news, excerpt, package in rows:
         risk = {'state': package.state} if package else None
-        items.append(NewsBrief.model_validate({**news.__dict__, 'excerpt': excerpt, 'risk': risk, 'published_at_precision': news.extra.get('published_at_precision'), 'published_date': news.extra.get('published_date')}))
+        items.append(NewsBrief.model_validate({**news.__dict__, 'excerpt': excerpt, 'risk': risk, 'bookmarked': news.id in saved, 'keywords': package.keywords if package else [], 'events': links.get(package.id, []) if package else [], 'published_at_precision': news.extra.get('published_at_precision'), 'published_date': news.extra.get('published_date')}))
     return success(NewsPage(items=items, total=total))
 
 
@@ -166,3 +192,19 @@ async def list_revisions(news_id: int, session: Annotated[AsyncSession, Depends(
         select(NewsRevision).where(NewsRevision.news_id == news_id).order_by(NewsRevision.revision_no.desc())
     )
     return success([Revision.model_validate(r, from_attributes=True) for r in rows])
+
+
+@router.put("/{news_id}/bookmark")
+async def bookmark(news_id: int, session: Annotated[AsyncSession, Depends(get_session)], principal: Annotated[AuthSession, Depends(require_admin)]):
+    if await session.get(NewsItem, news_id) is None:
+        raise HTTPException(404, "新闻不存在")
+    await session.execute(insert(NewsBookmark).values(username=principal.username, news_id=news_id).on_conflict_do_nothing())
+    await session.commit()
+    return success(None)
+
+
+@router.delete("/{news_id}/bookmark")
+async def remove_bookmark(news_id: int, session: Annotated[AsyncSession, Depends(get_session)], principal: Annotated[AuthSession, Depends(require_admin)]):
+    await session.execute(delete(NewsBookmark).where(NewsBookmark.username == principal.username, NewsBookmark.news_id == news_id))
+    await session.commit()
+    return success(None)

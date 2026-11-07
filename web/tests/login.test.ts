@@ -27,6 +27,7 @@ test("验证码刷新保留最新响应；登录锁覆盖导航，失败刷新�
     }
   }, {
     ...vue,
+    localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
     useRoute: () => ({ query: { redirect: "/calendar" } }),
     useRouter: () => ({ replace: () => navigated.promise }),
     onMounted() {},
@@ -84,6 +85,7 @@ test("验证码关闭时只提交账号密码，失败无需刷新挑战", async
     }
   }, {
     ...vue,
+    localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
     useRoute: () => ({ query: {} }),
     useRouter: () => ({ replace: async () => {} }),
     onMounted() {},
@@ -121,7 +123,7 @@ test("验证配置读取失败阻止登录，重试成功后解除；表单失�
         logins++
       }
     }
-  }, { ...vue, useRoute: () => ({ query: {} }), useRouter: () => ({}), onMounted() {}, onBeforeUnmount() {} })
+  }, { ...vue, localStorage: { getItem: () => null, setItem() {}, removeItem() {} }, useRoute: () => ({ query: {} }), useRouter: () => ({}), onMounted() {}, onBeforeUnmount() {} })
   const page = load("@/pages/login/index.vue").default.setup({}, { expose() {} })
   await assert.rejects(page.refreshCaptcha(), /配置读取失败/)
   await page.submit()

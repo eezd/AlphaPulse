@@ -2,6 +2,7 @@
 import type { CalendarData, CalendarItem } from "@@/apis/calendar/type"
 import { listCalendarApi } from "@@/apis/calendar"
 import { useSessionScope } from "@@/composables/useSessionScope"
+import { downloadCsv } from "@@/utils/export"
 import { ArrowLeft, ArrowRight, Refresh } from "@element-plus/icons-vue"
 import dayjs from "dayjs"
 import timezone from "dayjs/plugin/timezone"
@@ -13,7 +14,16 @@ dayjs.extend(utc)
 dayjs.extend(timezone)
 const zone = "Asia/Shanghai"
 const scope = useSessionScope()
-const kind = ref<CalendarItem["kind"]>("data")
+const wide = ref(false)
+let viewport: MediaQueryList
+const updateViewport = () => wide.value = viewport.matches
+onMounted(() => {
+  viewport = window.matchMedia("(min-width: 1380px)")
+  updateViewport()
+  viewport.addEventListener("change", updateViewport)
+})
+onBeforeUnmount(() => viewport?.removeEventListener("change", updateViewport))
+const kind = ref<CalendarItem["kind"] | "all">("data")
 const today = () => dayjs().tz(zone).format("YYYY-MM-DD")
 const selected = ref(today())
 const days = ref(7)
@@ -23,7 +33,8 @@ const loading = ref(false)
 const failed = ref(false)
 const now = ref(Date.now())
 const detail = ref<CalendarItem | null>(null)
-const country = ref("")
+const selectedCountries = ref<string[]>([])
+const minimumImportance = ref(0)
 const impactLabels = { pending: "待公布", bullish: "利多", bearish: "利空", neutral: "影响较小", uncertain: "待判断" }
 const countries = computed(() => data.value?.countries ?? [])
 const labels = { retired: "已停止采集", scheduled: "待公布", waiting: "获取中", delayed: "取数延迟", released: "已公布", withdrawn: "已撤回", error: "采集异常", historical: "仅有日程", unavailable: "官方未公布", recorded: "已收录" }
@@ -31,7 +42,7 @@ const formatted = (time: string) => dayjs(time).tz(zone).format("MM-DD HH:mm:ss"
 const groups = computed(() => {
   const result = new Map<string, CalendarItem[]>()
   for (const item of data.value?.items ?? []) {
-    if (item.kind !== kind.value || (country.value && item.country_code !== country.value)) continue
+    if ((kind.value !== "all" && item.kind !== kind.value) || (selectedCountries.value.length && !selectedCountries.value.includes(item.country_code)) || item.importance < minimumImportance.value) continue
     const key = item.calendar_date
     const rows = result.get(key) ?? []
     rows.push(item)
@@ -44,7 +55,7 @@ const scheduleErrors = computed(() => Object.values(data.value?.worker?.sources 
 const hasSchedule = computed(() => Object.keys(data.value?.worker?.sources ?? {}).length > 0)
 const jin10Online = computed(() => !!data.value?.jin10 && now.value - Date.parse(data.value.jin10.at) < 30000 && ["ready", "syncing"].includes(data.value.jin10.state))
 const coveredDays = computed(() => data.value?.coverage.length ?? 0)
-const upcoming = computed(() => data.value?.items.find(i => i.kind === kind.value && i.time_precision === "minute" && (!country.value || i.country_code === country.value) && i.status === "scheduled" && Date.parse(i.scheduled_at) > now.value))
+const upcoming = computed(() => data.value?.items.find(i => (kind.value === "all" || i.kind === kind.value) && (!selectedCountries.value.length || selectedCountries.value.includes(i.country_code)) && i.importance >= minimumImportance.value && i.time_precision === "minute" && i.status === "scheduled" && Date.parse(i.scheduled_at) > now.value))
 const countdown = computed(() => {
   if (!upcoming.value) return ""
   const seconds = Math.max(0, Math.floor((Date.parse(upcoming.value.scheduled_at) - now.value) / 1000))
@@ -126,126 +137,164 @@ onUnmounted(() => {
       <span>下个事件</span><strong><img v-if="flagUrl(upcoming)" class="country-flag" :src="flagUrl(upcoming)!" :alt="upcoming.country_name"> {{ upcoming.event_name }}</strong>
       <span>{{ formatted(upcoming.scheduled_at) }}</span><b>{{ countdown }}</b>
     </div>
-    <el-card shadow="never" class="calendar-card">
-      <div class="calendar-toolbar">
-        <el-button :icon="ArrowLeft" circle aria-label="上一段日期" @click="move(-1)" />
-        <el-date-picker v-model="selected" type="date" value-format="YYYY-MM-DD" :clearable="false" aria-label="查询起始日期" />
-        <el-button :icon="ArrowRight" circle aria-label="下一段日期" @click="move(1)" />
-        <el-button @click="selected = today()">
-          今天
-        </el-button>
-        <el-select v-model="country" class="country-select" placeholder="全部国家" aria-label="国家筛选">
-          <el-option label="全部国家" value="" />
-          <el-option v-for="option in countries" :key="option.code" :label="option.name" :value="option.code" />
-        </el-select>
-        <el-radio-group v-model="days">
-          <el-radio-button :value="1">
-            日历
+    <div class="flex gap-2 mb-3">
+      <el-select v-model="minimumImportance" class="w-40">
+        <el-option label="全部重要性" :value="0" /><el-option v-for="stars in [1, 2, 3, 4, 5]" :key="stars" :label="`${stars} 星及以上`" :value="stars" />
+      </el-select><el-button @click="downloadCsv('calendar.csv', [['时间（UTC）', '国家', '事件', '前值', '预期', '公布', '单位'], ...groups.flatMap(([, rows]) => rows.map(r => [r.scheduled_at, r.country_name, r.event_name, r.previous, r.forecast, r.actual, r.unit]))])">
+        导出筛选结果 CSV
+      </el-button>
+    </div>
+    <div class="calendar-workspace" :class="{ 'with-detail': wide }">
+      <el-card shadow="never" class="calendar-card">
+        <div class="calendar-toolbar">
+          <el-button :icon="ArrowLeft" circle aria-label="上一段日期" @click="move(-1)" />
+          <el-date-picker v-model="selected" type="date" value-format="YYYY-MM-DD" :clearable="false" aria-label="查询起始日期" />
+          <el-button :icon="ArrowRight" circle aria-label="下一段日期" @click="move(1)" />
+          <el-button @click="selected = today()">
+            今天
+          </el-button>
+          <el-select v-model="selectedCountries" multiple collapse-tags clearable class="country-select" placeholder="全部国家" aria-label="国家筛选">
+            <el-option v-for="option in countries" :key="option.code" :label="option.name" :value="option.code" />
+          </el-select>
+          <el-radio-group v-model="days">
+            <el-radio-button :value="1">
+              日历
+            </el-radio-button>
+            <el-radio-button :value="7">
+              周历
+            </el-radio-button>
+          </el-radio-group>
+          <el-button :icon="Refresh" :loading="loading" @click="load">
+            刷新
+          </el-button>
+        </div>
+        <el-radio-group v-model="kind" aria-label="日历类别">
+          <el-radio-button value="all">
+            全部
           </el-radio-button>
-          <el-radio-button :value="7">
-            周历
+          <el-radio-button value="data">
+            经济数据
+          </el-radio-button>
+          <el-radio-button value="event">
+            重要事件
+          </el-radio-button>
+          <el-radio-button value="holiday">
+            假期休市
           </el-radio-button>
         </el-radio-group>
-        <el-button :icon="Refresh" :loading="loading" @click="load">
-          刷新
-        </el-button>
-      </div>
-      <el-radio-group v-model="kind" aria-label="日历类别">
-        <el-radio-button value="data">
-          经济数据
-        </el-radio-button>
-        <el-radio-button value="event">
-          重要事件
-        </el-radio-button>
-        <el-radio-button value="holiday">
-          假期休市
-        </el-radio-button>
-      </el-radio-group>
-      <p class="calendar-range" aria-live="polite">
-        查询范围：{{ selected }} 至 {{ rangeEnd }}（北京时间，含首尾日期）
-      </p>
-      <el-alert
-        v-if="!jin10Online || coveredDays < days" :closable="false" type="warning" show-icon
-        :title="`金十${jin10Online ? '在线' : '同步未就绪'} · 所选 ${days} 天中 ${coveredDays} 天已完整收录三类日历；缺失日期不表示没有事件。`"
-      />
-      <p v-if="data?.jin10?.error" class="calendar-note">
-        {{ data.jin10.error }}
-      </p>
-      <p class="calendar-note">
-        三星标红，四星及以上为主要事件。影响针对 BTC/ETH：优先比较预期，无预期时按前值及利率通道给参考倾向，依据不足显示待判断。金十星级与项目评级分别标注；历史补取预期不视为当时已知。
-      </p>
-      <div v-loading="loading" class="calendar-results">
-        <section v-for="[date, items] in groups" :key="date">
-          <h2>{{ date }} <small>{{ items.length }} 项记录</small></h2>
-          <el-table :key="kind" :data="items" stripe @row-click="openDetail">
-            <el-table-column label="时间" width="90">
-              <template #default="{ row }">
-                {{ timeLabel(row as CalendarItem) }}
-              </template>
-            </el-table-column>
-            <el-table-column :label="kind === 'data' ? '数据' : kind === 'event' ? '事件' : '假期与休市说明'" min-width="230">
-              <template #default="{ row }">
-                <div class="event-name" :class="{ 'event-important': row.importance === 3, 'event-major': row.importance >= 4 }">
-                  <img v-if="flagUrl(row as CalendarItem)" class="country-flag" :src="flagUrl(row as CalendarItem)!" :alt="row.country_name">
-                  <span>{{ row.event_name }}</span>
-                  <span v-if="row.importance >= 4" class="major-label">主要</span>
-                </div><div class="row-subtitle">
-                  {{ sources[row.source] }} · {{ row.title }}
-                </div>
-              </template>
-            </el-table-column>
-            <el-table-column label="重要性" width="125">
-              <template #default="{ row }">
-                <span class="stars" :class="{ 'stars-important': row.importance >= 3 }">{{ "★".repeat(row.importance) || "—" }}</span>
-                <small class="row-subtitle">{{ row.importance_source === "jin10" ? "金十" : "项目评级" }}</small>
-              </template>
-            </el-table-column>
-            <el-table-column v-if="kind === 'data'" label="前值" width="100">
-              <template #default="{ row }">
-                {{ value(row.previous, row.unit) }}
-              </template>
-            </el-table-column>
-            <el-table-column v-if="kind === 'data'" label="预期值" width="90">
-              <template #default="{ row }">
-                {{ value(row.forecast, row.unit) }}
-                <small v-if="row.forecast !== null && !row.forecast_before_release" class="row-subtitle">{{ forecastNote(row as CalendarItem) }}</small>
-              </template>
-            </el-table-column>
-            <el-table-column v-if="kind === 'data'" label="公布值" width="110">
-              <template #default="{ row }">
-                <strong class="actual-value">{{ value(row.actual, row.unit) }}</strong>
-              </template>
-            </el-table-column>
-            <el-table-column label="状态" width="105">
-              <template #default="{ row }">
-                <el-tag :type="row.status === 'released' ? 'success' : row.status === 'error' ? 'danger' : 'info'">
-                  {{ labels[row.status as CalendarItem['status']] }}
-                </el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column v-if="kind === 'data'" label="影响 · BTC/ETH" min-width="155">
-              <template #default="{ row }">
-                <el-tooltip :content="row.explanation" placement="top">
-                  <span class="impact-badge" :class="`impact-${row.impact}`">{{ impactLabels[row.impact as CalendarItem['impact']] }}</span>
-                </el-tooltip>
-                <div v-if="row.actual !== null" class="row-subtitle">
-                  {{ row.impact_basis === "forecast" ? "比较预期" : row.impact_basis === "previous" ? "比较前值 · 参考" : "资料不足" }} · 查看依据
-                </div>
-              </template>
-            </el-table-column>
-          </el-table>
-        </section>
-        <el-empty v-if="!loading && groups.length === 0" :description="online && hasSchedule && !scheduleErrors.length && !failed ? '所选日期和国家没有已收录的事件' : '尚无可确认的日历数据'" />
-      </div>
-      <p class="calendar-note">
-        官方站点可能延迟；页面显示实际获取时间，不保证秒级到达。历史日程不等于当时已获取结果，简评不构成交易指令。
-      </p>
-    </el-card>
-    <CalendarDetail v-model="detail" />
+        <p class="calendar-range" aria-live="polite">
+          查询范围：{{ selected }} 至 {{ rangeEnd }}（北京时间，含首尾日期）
+        </p>
+        <el-alert
+          v-if="!jin10Online || coveredDays < days" :closable="false" type="warning" show-icon
+          :title="`金十${jin10Online ? '在线' : '同步未就绪'} · 所选 ${days} 天中 ${coveredDays} 天已完整收录三类日历；缺失日期不表示没有事件。`"
+        />
+        <p v-if="data?.jin10?.error" class="calendar-note">
+          {{ data.jin10.error }}
+        </p>
+        <p class="calendar-note">
+          三星标红，四星及以上为主要事件。影响针对 BTC/ETH：优先比较预期，无预期时按前值及利率通道给参考倾向，依据不足显示待判断。金十星级与项目评级分别标注；历史补取预期不视为当时已知。
+        </p>
+        <div v-loading="loading" class="calendar-results">
+          <section v-for="[date, items] in groups" :key="date">
+            <h2>{{ date }} <small>{{ items.length }} 项记录</small></h2>
+            <el-table :key="kind" :data="items" stripe @row-click="openDetail">
+              <el-table-column label="时间" width="90">
+                <template #default="{ row }">
+                  {{ timeLabel(row as CalendarItem) }}
+                </template>
+              </el-table-column>
+              <el-table-column :label="kind === 'all' ? '事件与数据' : kind === 'data' ? '数据' : kind === 'event' ? '事件' : '假期与休市说明'" min-width="230">
+                <template #default="{ row }">
+                  <div class="event-name" :class="{ 'event-important': row.importance === 3, 'event-major': row.importance >= 4 }">
+                    <img v-if="flagUrl(row as CalendarItem)" class="country-flag" :src="flagUrl(row as CalendarItem)!" :alt="row.country_name">
+                    <span>{{ row.event_name }}</span>
+                    <span v-if="row.importance >= 4" class="major-label">主要</span>
+                  </div><div class="row-subtitle">
+                    {{ sources[row.source] }} · {{ row.title }}
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column label="重要性" width="125">
+                <template #default="{ row }">
+                  <span class="stars" :class="{ 'stars-important': row.importance >= 3 }">{{ "★".repeat(row.importance) || "—" }}</span>
+                  <small class="row-subtitle">{{ row.importance_source === "jin10" ? "金十" : "项目评级" }}</small>
+                </template>
+              </el-table-column>
+              <el-table-column v-if="kind === 'data' || kind === 'all'" label="前值" width="100">
+                <template #default="{ row }">
+                  {{ value(row.previous, row.unit) }}
+                </template>
+              </el-table-column>
+              <el-table-column v-if="kind === 'data' || kind === 'all'" label="预期值" width="90">
+                <template #default="{ row }">
+                  {{ value(row.forecast, row.unit) }}
+                  <small v-if="row.forecast !== null && !row.forecast_before_release" class="row-subtitle">{{ forecastNote(row as CalendarItem) }}</small>
+                </template>
+              </el-table-column>
+              <el-table-column v-if="kind === 'data' || kind === 'all'" label="公布值" width="110">
+                <template #default="{ row }">
+                  <strong class="actual-value">{{ value(row.actual, row.unit) }}</strong>
+                </template>
+              </el-table-column>
+              <el-table-column label="状态" width="105">
+                <template #default="{ row }">
+                  <el-tag :type="row.status === 'released' ? 'success' : row.status === 'error' ? 'danger' : 'info'">
+                    {{ labels[row.status as CalendarItem['status']] }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column v-if="kind === 'data' || kind === 'all'" label="影响 · BTC/ETH" min-width="155">
+                <template #default="{ row }">
+                  <el-tooltip :content="row.explanation" placement="top">
+                    <span class="impact-badge" :class="`impact-${row.impact}`">{{ impactLabels[row.impact as CalendarItem['impact']] }}</span>
+                  </el-tooltip>
+                  <div v-if="row.actual !== null" class="row-subtitle">
+                    {{ row.impact_basis === "forecast" ? "比较预期" : row.impact_basis === "previous" ? "比较前值 · 参考" : "资料不足" }} · 查看依据
+                  </div>
+                </template>
+              </el-table-column>
+            </el-table>
+          </section>
+          <el-empty v-if="!loading && groups.length === 0" :description="online && hasSchedule && !scheduleErrors.length && !failed ? '所选日期和国家没有已收录的事件' : '尚无可确认的日历数据'" />
+        </div>
+        <p class="calendar-note">
+          官方站点可能延迟；页面显示实际获取时间，不保证秒级到达。历史日程不等于当时已获取结果，简评不构成交易指令。
+        </p>
+      </el-card>
+      <CalendarDetail v-model="detail" :embedded="wide" />
+      <aside v-if="wide && !detail" class="calendar-detail">
+        <el-empty description="选择一项日程，查看详情、来源与历史数据" />
+      </aside>
+    </div>
   </div>
 </template>
 
 <style scoped>
+.calendar-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+.calendar-workspace.with-detail {
+  grid-template-columns: minmax(0, 1fr) 360px;
+}
+.calendar-card {
+  min-width: 0;
+}
+:deep(aside.calendar-detail) {
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid #e2e8f0;
+  border-radius: 5px;
+  background: white;
+  max-height: calc(100vh - 170px);
+  overflow: auto;
+  position: sticky;
+  top: 0;
+  font-size: 12px;
+}
 .calendar-page {
   max-width: 1600px;
   margin: 0 auto;

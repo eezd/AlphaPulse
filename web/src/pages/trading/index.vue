@@ -30,6 +30,8 @@ const drawerVisible = ref(false)
 const drawerAnalysisId = ref<number | null>(null)
 const historyVisible = ref(false)
 const signalsVisible = ref(false)
+const configVisible = ref(false)
+const orderFilter = ref("all")
 
 const exchangeName = computed(() => status.value?.exchange === "bybit" ? "Bybit" : "币安")
 const snapshot = computed(() => status.value?.snapshot ?? null)
@@ -58,6 +60,8 @@ const symbolOrders = computed(() => {
     }))
   ].sort((a, b) => b.time - a.time)
 })
+
+const filteredOrders = computed(() => symbolOrders.value.filter(o => orderFilter.value === "all" || (orderFilter.value === "own" ? isOwnOrder(o.client_id) : !isOwnOrder(o.client_id))))
 
 function num(value: string) {
   return String(Number(value))
@@ -330,7 +334,11 @@ onMounted(() => listProvidersApi().then(list => providers.value = list))
       <div class="flex-1" />
     </el-card>
 
-    <TradingConfig :status="status" :providers="providers" @saved="status = $event" />
+    <el-button class="self-start" @click="configVisible = true">
+      分析配置
+    </el-button><el-drawer v-model="configVisible" title="模拟盘分析配置" size="min(560px, 100vw)">
+      <TradingConfig :status="status" :providers="providers" @saved="status = $event" />
+    </el-drawer>
 
     <el-alert v-if="!status.configured" type="warning" :closable="false" show-icon>
       还没有填写 {{ exchangeName }} 模拟盘 key，请先到「环境变量」页填写。
@@ -339,190 +347,45 @@ onMounted(() => listProvidersApi().then(list => providers.value = list))
       同步模拟盘失败：{{ snapshot.error }}{{ snapshot.synced_at ? `（以下为 ${formatTime(snapshot.synced_at, "HH:mm:ss")} 的数据）` : "" }}
     </el-alert>
 
-    <!-- 持仓 -->
-    <el-card shadow="never" body-class="p-0">
-      <template #header>
-        <div class="flex items-center justify-between">
-          持仓（{{ positions.length }}）
-          <div>
-            <el-button link type="primary" :icon="Reading" @click="signalsVisible = true">
-              新闻信号
-            </el-button>
-            <el-button link type="primary" :icon="Clock" @click="historyVisible = true">
-              历史仓位
-            </el-button>
-          </div>
-        </div>
-      </template>
-      <el-table :data="positions" empty-text="没有持仓" cell-class-name="num">
-        <el-table-column label="币种" min-width="120">
-          <template #default="{ row }">
-            <div class="text-slate-900 font-semibold">
-              {{ row.symbol }}
-            </div>
-            <div class="text-xs text-slate-400 font-sans">
-              永续
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="方向" width="80">
-          <template #default="{ row }">
-            <el-tag :type="row.side === 'LONG' ? 'success' : 'danger'" size="small">
-              {{ row.side === "LONG" ? "↑ 多" : "↓ 空" }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="仓位价值（USDT）" min-width="120">
-          <template #default="{ row }">
-            <span :title="`数量 ${num(row.amount)}`">{{ Math.abs(Number(row.notional)).toFixed(2) }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="开仓价" min-width="100">
-          <template #default="{ row }">
-            {{ num(row.entry_price) }}
-          </template>
-        </el-table-column>
-        <el-table-column label="保本价" min-width="100">
-          <template #default="{ row }">
-            <span class="text-slate-500">{{ Number(row.break_even_price).toFixed(2) }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="标记价" min-width="100">
-          <template #default="{ row }">
-            <span class="text-[var(--el-color-primary)]">{{ Number(row.mark_price).toFixed(2) }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="未实现盈亏" min-width="100">
-          <template #default="{ row }">
-            <span :class="pnlClass(row.unrealized_pnl)">{{ money(row.unrealized_pnl) }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="强平价" min-width="100">
-          <template #default="{ row }">
-            <span class="text-amber-600">{{ Number(row.liquidation_price) ? Number(row.liquidation_price).toFixed(2) : "-" }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="杠杆" width="100">
-          <template #default="{ row }">
-            <el-tag type="info" size="small">
-              {{ row.leverage }}x {{ row.margin_type === "ISOLATED" ? "逐仓" : "全仓" }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="止损" min-width="100">
-          <template #default="{ row }">
-            <span class="text-rose-600">{{ exitPrices(row as SnapshotPosition).stop }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="止盈" min-width="100">
-          <template #default="{ row }">
-            <span class="text-emerald-600">{{ exitPrices(row as SnapshotPosition).target }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="平仓倒计时" width="110">
-          <template #default="{ row }">
-            <el-tag type="warning" size="small">
-              {{ closeCountdown(row.symbol) }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="操作" width="80">
-          <template #default="{ row }">
-            <el-button v-if="symbols.some(s => s.symbol === row.symbol)" link type="danger" @click="closePosition(row.symbol)">
-              平仓
-            </el-button>
-            <span v-else class="font-sans text-slate-400" title="不在交易列表中，程序不管理，请到当前交易所网页处理">-</span>
-          </template>
-        </el-table-column>
-      </el-table>
-    </el-card>
-
     <div class="trading-workspace grid items-start gap-3">
-      <!-- 左：交易币种 -->
-      <el-card shadow="never" body-class="flex flex-col gap-2">
-        <template #header>
-          <div class="flex items-center justify-between">
-            交易币种
-            <el-button link type="primary" :icon="Plus" @click="addVisible = true">
-              新增币种
-            </el-button>
-          </div>
-        </template>
-        <div
-          v-for="s in symbols" :key="s.symbol"
-          class="relative cursor-pointer overflow-hidden border rounded-lg border-solid py-2 pl-4 pr-3 transition-colors"
-          :class="s.symbol === selected ? 'border-[var(--el-color-primary)] bg-sky-50/60' : 'border-slate-200 hover:border-slate-300'"
-          @click="selected = s.symbol"
-        >
-          <span class="absolute inset-y-0 left-0 w-1" :style="{ background: `var(--el-color-${symbolState(s).type})` }" />
-          <div class="flex items-center justify-between">
-            <span class="flex items-center gap-2">
-              <span class="h-2 w-2 rounded-full" :class="s.running ? 'bg-emerald-500' : 'bg-slate-300'" :title="s.running ? '交易中' : '已停止'" />
-              <span class="num text-slate-900 font-semibold">{{ s.symbol }}</span>
-            </span>
-            <el-tag :type="symbolState(s).type" size="small">
-              {{ symbolState(s).label }}
-            </el-tag>
-          </div>
-          <div class="mt-1 flex items-center justify-between text-xs text-slate-500">
-            <span v-if="positionOf(s.symbol)" class="num">
-              {{ positionOf(s.symbol)!.leverage }}x {{ positionOf(s.symbol)!.side === "LONG" ? "多" : "空" }} · {{ Math.abs(Number(positionOf(s.symbol)!.notional)).toFixed(2) }} USDT
-            </span>
-            <span v-else />
-            <el-link type="danger" underline="never" class="text-xs!" @click.stop="remove(s)">
-              删除
-            </el-link>
-          </div>
-        </div>
-        <el-empty v-if="!symbols.length" description="还没有交易币种" :image-size="60" />
-      </el-card>
-
-      <!-- 中：当前计划 -->
-      <PlanCard
-        v-if="current" :symbol="current" :analysis="livePlan ?? latestAnalysis" :latest="latestAnalysis" :orders="planOrders"
-        :requesting="requesting" :toggling="toggling"
-        @analyze="analyze" @detail="openAnalysis" @toggle="toggleRunning(current)" @capital="editCapital(current)"
-      />
-      <el-card v-else shadow="never">
-        <el-empty description="先在左侧新增交易币种" :image-size="60" />
-      </el-card>
-
-      <!-- 右：挂单、时间线 -->
-      <div class="flex flex-col gap-4">
-        <el-card v-if="current" shadow="never" body-class="flex flex-col gap-2">
+      <!-- 左：交易币种与执行时间线 -->
+      <div class="trading-sidebar min-w-0 flex flex-col gap-3">
+        <el-card shadow="never" body-class="flex flex-col gap-2">
           <template #header>
             <div class="flex items-center justify-between">
-              当前挂单（{{ symbolOrders.length }}）
-              <el-button link type="danger" :disabled="!symbolOrders.length" @click="clearOrders">
-                清除挂单
+              交易币种
+              <el-button link type="primary" :icon="Plus" @click="addVisible = true">
+                新增币种
               </el-button>
             </div>
           </template>
           <div
-            v-for="o in symbolOrders" :key="`${o.client_id}-${o.time}`"
-            class="border border-slate-200 rounded-lg border-solid bg-slate-50/60 px-3 py-2 text-xs"
+            v-for="s in symbols" :key="s.symbol"
+            class="relative cursor-pointer overflow-hidden border rounded-lg border-solid py-2 pl-4 pr-3 transition-colors"
+            :class="s.symbol === selected ? 'border-[var(--el-color-primary)] bg-sky-50/60' : 'border-slate-200 hover:border-slate-300'"
+            @click="selected = s.symbol"
           >
+            <span class="absolute inset-y-0 left-0 w-1" :style="{ background: `var(--el-color-${symbolState(s).type})` }" />
             <div class="flex items-center justify-between">
-              <span class="text-sm font-semibold" :class="o.side === 'BUY' ? 'text-emerald-700' : 'text-rose-700'">
-                {{ o.side === "BUY" ? "买" : "卖" }} · {{ o.type }}
+              <span class="flex items-center gap-2">
+                <span class="h-2 w-2 rounded-full" :class="s.running ? 'bg-emerald-500' : 'bg-slate-300'" :title="s.running ? '交易中' : '已停止'" />
+                <span class="num text-slate-900 font-semibold">{{ s.symbol }}</span>
               </span>
-              <span class="num text-slate-400">{{ formatTime(new Date(o.time).toISOString(), "MM-DD HH:mm:ss") }}</span>
-            </div>
-            <div class="num mt-1 flex justify-between text-sm text-slate-900">
-              <span :title="o.amount === '全部持仓' ? '' : `数量 ${num(o.quantity)}`">{{ o.amount }}</span>
-              <span>@ {{ o.priceText }}</span>
-            </div>
-            <div class="mt-1 flex items-center gap-1 text-slate-500">
-              <el-tag v-if="o.conditional" size="small">
-                条件单
+              <el-tag :type="symbolState(s).type" size="small">
+                {{ symbolState(s).label }}
               </el-tag>
-              <el-tag v-if="o.reduce_only" size="small" type="info">
-                只减仓
-              </el-tag>
-              <span class="ml-auto">来源：{{ isOwnOrder(o.client_id) ? "本程序" : "手动" }}</span>
+            </div>
+            <div class="mt-1 flex items-center justify-between text-xs text-slate-500">
+              <span v-if="positionOf(s.symbol)" class="num">
+                {{ positionOf(s.symbol)!.leverage }}x {{ positionOf(s.symbol)!.side === "LONG" ? "多" : "空" }} · {{ Math.abs(Number(positionOf(s.symbol)!.notional)).toFixed(2) }} USDT
+              </span>
+              <span v-else />
+              <el-link type="danger" underline="never" class="text-xs!" @click.stop="remove(s)">
+                删除
+              </el-link>
             </div>
           </div>
-          <el-empty v-if="!symbolOrders.length" description="没有挂单" :image-size="48" />
+          <el-empty v-if="!symbols.length" description="还没有交易币种" :image-size="60" />
         </el-card>
 
         <el-card shadow="never">
@@ -555,6 +418,161 @@ onMounted(() => listProvidersApi().then(list => providers.value = list))
           </el-button>
         </el-card>
       </div>
+      <div class="trading-main min-w-0 flex flex-col gap-3">
+        <!-- 中：当前计划 -->
+        <PlanCard
+          v-if="current" :symbol="current" :analysis="livePlan ?? latestAnalysis" :latest="latestAnalysis" :orders="planOrders"
+          :requesting="requesting" :toggling="toggling"
+          @analyze="analyze" @detail="openAnalysis" @toggle="toggleRunning(current)" @capital="editCapital(current)"
+        />
+        <el-card v-else shadow="never">
+          <el-empty description="先在左侧新增交易币种" :image-size="60" />
+        </el-card>
+
+        <!-- 持仓 -->
+        <el-card shadow="never" body-class="p-0">
+          <template #header>
+            <div class="flex items-center justify-between">
+              持仓（{{ positions.length }}）
+              <div>
+                <el-button link type="primary" :icon="Reading" @click="signalsVisible = true">
+                  新闻信号
+                </el-button>
+                <el-button link type="primary" :icon="Clock" @click="historyVisible = true">
+                  历史仓位
+                </el-button>
+              </div>
+            </div>
+          </template>
+          <el-table :data="positions" empty-text="没有持仓" cell-class-name="num">
+            <el-table-column label="币种" min-width="120">
+              <template #default="{ row }">
+                <div class="text-slate-900 font-semibold">
+                  {{ row.symbol }}
+                </div>
+                <div class="text-xs text-slate-400 font-sans">
+                  永续
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="方向" width="80">
+              <template #default="{ row }">
+                <el-tag :type="row.side === 'LONG' ? 'success' : 'danger'" size="small">
+                  {{ row.side === "LONG" ? "↑ 多" : "↓ 空" }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="仓位价值（USDT）" min-width="120">
+              <template #default="{ row }">
+                <span :title="`数量 ${num(row.amount)}`">{{ Math.abs(Number(row.notional)).toFixed(2) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="开仓价" min-width="100">
+              <template #default="{ row }">
+                {{ num(row.entry_price) }}
+              </template>
+            </el-table-column>
+            <el-table-column label="保本价" min-width="100">
+              <template #default="{ row }">
+                <span class="text-slate-500">{{ Number(row.break_even_price).toFixed(2) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="标记价" min-width="100">
+              <template #default="{ row }">
+                <span class="text-[var(--el-color-primary)]">{{ Number(row.mark_price).toFixed(2) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="未实现盈亏" min-width="100">
+              <template #default="{ row }">
+                <span :class="pnlClass(row.unrealized_pnl)">{{ money(row.unrealized_pnl) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="强平价" min-width="100">
+              <template #default="{ row }">
+                <span class="text-amber-600">{{ Number(row.liquidation_price) ? Number(row.liquidation_price).toFixed(2) : "-" }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="杠杆" width="100">
+              <template #default="{ row }">
+                <el-tag type="info" size="small">
+                  {{ row.leverage }}x {{ row.margin_type === "ISOLATED" ? "逐仓" : "全仓" }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="止损" min-width="100">
+              <template #default="{ row }">
+                <span class="text-rose-600">{{ exitPrices(row as SnapshotPosition).stop }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="止盈" min-width="100">
+              <template #default="{ row }">
+                <span class="text-emerald-600">{{ exitPrices(row as SnapshotPosition).target }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="平仓倒计时" width="110">
+              <template #default="{ row }">
+                <el-tag type="warning" size="small">
+                  {{ closeCountdown(row.symbol) }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="80">
+              <template #default="{ row }">
+                <el-button v-if="symbols.some(s => s.symbol === row.symbol)" link type="danger" @click="closePosition(row.symbol)">
+                  平仓
+                </el-button>
+                <span v-else class="font-sans text-slate-400" title="不在交易列表中，程序不管理，请到当前交易所网页处理">-</span>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-card>
+
+        <!-- 挂单 -->
+        <el-card v-if="current" shadow="never" body-class="flex flex-col gap-2">
+          <template #header>
+            <div class="flex items-center justify-between">
+              当前挂单（{{ filteredOrders.length }} / {{ symbolOrders.length }}）
+              <el-button link type="danger" :disabled="!symbolOrders.length" @click="clearOrders">
+                清除该币全部挂单
+              </el-button>
+            </div>
+          </template>
+          <el-radio-group v-model="orderFilter">
+            <el-radio-button value="all">
+              全部
+            </el-radio-button><el-radio-button value="own">
+              程序单
+            </el-radio-button><el-radio-button value="manual">
+              手动单
+            </el-radio-button>
+          </el-radio-group>
+          <el-table :data="filteredOrders" size="small" empty-text="当前筛选下没有挂单">
+            <el-table-column label="方向与类型" min-width="150">
+              <template #default="{ row: o }">
+                <el-tag :type="o.side === 'BUY' ? 'success' : 'danger'" size="small">
+                  {{ o.side === 'BUY' ? '买' : '卖' }}
+                </el-tag> {{ o.type }} <el-tag v-if="o.conditional" size="small">
+                  条件单
+                </el-tag><el-tag v-if="o.reduce_only" size="small" type="info">
+                  只减仓
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="priceText" label="价格" min-width="120" />
+            <el-table-column prop="amount" label="金额" min-width="120" />
+            <el-table-column label="来源" min-width="90">
+              <template #default="{ row: o }">
+                {{ isOwnOrder(o.client_id) ? '本程序' : '手动' }}
+              </template>
+            </el-table-column>
+            <el-table-column label="时间（北京时间）" min-width="160">
+              <template #default="{ row: o }">
+                {{ formatTime(new Date(o.time).toISOString()) }}
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-card>
+      </div>
     </div>
 
     <AddSymbolDialog v-model="addVisible" @added="onAdded" />
@@ -566,14 +584,11 @@ onMounted(() => listProvidersApi().then(list => providers.value = list))
 
 <style scoped>
 .trading-workspace {
-  grid-template-columns: 220px minmax(0, 1fr) 320px;
+  grid-template-columns: 240px minmax(0, 1fr);
 }
 @media (max-width: 1280px) {
   .trading-workspace {
     grid-template-columns: 200px minmax(0, 1fr);
-  }
-  .trading-workspace > :last-child {
-    grid-column: 1 / -1;
   }
 }
 @media (max-width: 700px) {

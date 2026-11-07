@@ -7,6 +7,7 @@ import { listProviderModelsApi, listProvidersApi } from "@@/apis/settings"
 import { listSkillTreeApi } from "@@/apis/skills"
 import AiAvailability from "@@/components/AiAvailability/index.vue"
 import { EFFORTS } from "@@/constants/ai"
+import { downloadText } from "@@/utils/export"
 import dayjs from "dayjs"
 
 import timezone from "dayjs/plugin/timezone"
@@ -85,12 +86,45 @@ watch(vocabularyOpened, (value) => {
 const user = useUserStore()
 const route = useRoute()
 const q = ref("")
+const eventState = ref("")
+const importance = ref(0)
+watch([eventState, importance], () => {
+  page.value = 1
+  void refresh()
+})
 const tab = ref("events")
 const page = ref(1)
 const total = ref(0)
 const events = ref<Event[]>([])
 const packages = ref<Package[]>([])
 const detail = ref<EventDetail | null>(null)
+const eventDetailTab = ref("research")
+const exportingReport = ref(false)
+async function exportReport() {
+  const event = detail.value
+  if (!valid() || !opened.value || !event || exportingReport.value) return
+  const latest = event.versions.find(version => version.state === "done" && version.result)
+  if (!latest) {
+    ElMessage.warning("尚无成功研究版本，无法导出报告")
+    return
+  }
+  exportingReport.value = true
+  try {
+    const version = await api.getEventVersionApi(event.id, latest.id)
+    if (!valid() || !opened.value || detail.value?.id !== event.id) return
+    const result = version.result
+    const sections = [`# ${result.title}`, `成功研究版本 #${version.id} · 研究修订 ${version.revision}`, `当前事件状态：${states[event.state] ?? event.state} · 当前事件修订 ${event.revision}`]
+    if (event.revision !== version.revision || event.state !== "done") sections.push("> 本报告为上一成功研究版本。当前事件存在待研究的变化，新增或修订材料尚未由本报告核验。")
+    sections.push(`## 总结\n${result.summary}`, `重要性 ${result.importance_stars}/5 · 风险 ${result.risk_stars}/5 · 可信度 ${result.confidence}`, ...Object.entries({ facts: "事实", reasoning: "判断依据", verification: "核验结论", asset_impacts: "影响", opinions: "相关意见", counter_evidence: "反证", uncertainty: "不确定性", watchpoints: "后续观察" }).map(([key, label]) => `## ${label}\n${result[key as keyof typeof result]}`), `## 时间线\n${result.timeline_points.map(p => `- ${p.time_text || "发生时间未知"}：${p.description}（新闻包 ${p.package_ids.join(", ")}）`).join("\n")}`)
+    sections.push(`## 本版本新闻来源（研究时快照）\n${version.articles.map(article => `- [${article.title || `新闻 #${article.id}`}](${article.url})`).join("\n")}`)
+    const included = new Set(version.packages.map(item => item.id))
+    const additional = event.packages.filter(item => !included.has(item.id))
+    if (additional.length) sections.push(`## 当前事件其他新闻包（未纳入本版研究）\n${additional.map(item => `- [${item.title || `新闻 #${item.news_id}`}](${item.url})`).join("\n")}`)
+    downloadText(`event-${event.id}-version-${version.id}.md`, sections.join("\n\n"), "text/markdown;charset=utf-8")
+  } finally {
+    exportingReport.value = false
+  }
+}
 const packageDetail = ref<PackageDetail | null>(null)
 const opened = ref(false)
 const packageOpened = ref(false)
@@ -149,7 +183,7 @@ async function load() {
   const seq = ++sequence
   loading.value = true
   try {
-    const [settings, rows] = await Promise.all([api.getSettingsApi(), tab.value === "events" ? api.listEventsApi(q.value, page.value) : api.listPackagesApi(q.value, page.value)])
+    const [settings, rows] = await Promise.all([api.getSettingsApi(), tab.value === "events" ? api.listEventsApi(q.value, page.value, { state: eventState.value || undefined, importance_min: importance.value }) : api.listPackagesApi(q.value, page.value)])
     if (!valid() || seq !== sequence) return
     enabled.value = settings.enabled
     queue.value = settings.queue ?? null
@@ -372,97 +406,136 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="p-4">
+  <div class="research-workspace">
     <AiAvailability />
-    <div class="mb-4 flex flex-wrap items-center gap-3">
-      <h1 class="text-xl font-semibold">
-        新闻与事件研究
-      </h1>
-      <el-tag :type="enabled ? 'success' : 'info'">
-        {{ enabled ? '处理中' : '已暂停' }}
-      </el-tag>
-      <el-button @click="settings">
-        模型与 Skills
-      </el-button>
-      <el-button :loading="busy" :disabled="!enabled && (loading || error || queue?.draining)" @click="action(enabled ? api.pauseApi : enable)">
-        {{ enabled ? '暂停新任务' : '启用两阶段处理' }}
-      </el-button>
-      <el-button @click="openVocabulary">
-        短语词库
-      </el-button>
-      <el-button :loading="loading" @click="refresh">
-        刷新
-      </el-button>
-    </div>
-    <p class="mb-4 text-sm text-slate-500">
-      新闻包保存原文和关键词；事件汇集相关报道，持续更新判断与时间线。
-    </p>
-    <p class="mb-4 text-sm text-slate-500">
-      实时任务优先取得空闲并发；历史回补至 {{ savedStartAt ? dayjs(savedStartAt).tz("Asia/Shanghai").format("YYYY-MM-DD HH:mm:ss") : '—' }}（北京时间）。
-      <span v-if="queue?.draining">正在完成 {{ queue.running }} 个已接收调用，收尾后可重新启用。</span>
-    </p>
-    <p v-if="queue" class="mb-4 text-sm text-slate-500">
-      正在处理 {{ queue.running }} / {{ queue.capacity }} 个任务：关键词提取 {{ queue.running_by_stage.index }}，事件归属 {{ queue.running_by_stage.assign }}，事件研究 {{ queue.running_by_stage.research }}。
-      其中等待重试 {{ queue.waiting_retry ?? 0 }} 个，等待不代表正在调用模型。
-      实时队列：待索引 {{ (queue.realtime.missing ?? 0) + (queue.realtime.stale ?? 0) + (queue.realtime.index_pending ?? 0) }}，待归属 {{ queue.realtime.assign_pending ?? 0 }}，就绪研究 {{ queue.events.realtime.ready ?? 0 }}；
-      回补队列：待索引 {{ (queue.backfill.missing ?? 0) + (queue.backfill.stale ?? 0) + (queue.backfill.index_pending ?? 0) }}，待归属 {{ queue.backfill.assign_pending ?? 0 }}，就绪研究 {{ queue.events.backfill.ready ?? 0 }}。
-      <span v-if="queue.idle_reasons.length">{{ queue.idle_reasons.map(reason => idleReasonLabels[reason] ?? reason).join('；') }}。</span>
-      任务完成后持续补位；事件归属串行，其他任务共享剩余并发。失败和中断结果不明的任务需手动重试。
-    </p>
-    <el-alert v-if="error" title="读取失败，保留上次结果，可刷新重试" type="error" :closable="false" />
-    <div class="mb-4 flex flex-wrap gap-3">
-      <el-input v-model="q" clearable placeholder="搜索名称、规范关键词或原文别名" class="max-w-md" />
-      <el-input v-model="newsIds" placeholder="需要处理的新闻 ID，以逗号分隔" class="max-w-md" />
-      <el-button :loading="busy" @click="enroll">
-        加入处理
-      </el-button>
-    </div>
-    <el-tabs v-model="tab">
-      <el-tab-pane label="事件" name="events">
-        <el-card v-for="event in events" :key="event.id" class="mb-3" shadow="never">
-          <el-button link @click="openEvent(event.id)">
-            {{ event.title }}
-          </el-button>
-          <el-tag class="ml-2">
-            {{ states[event.state] ?? event.state }}
-          </el-tag>
-          <template v-if="event.result">
-            <p class="my-2">
-              {{ event.result.summary }}
-            </p>
-            <span>重要性 {{ event.result.importance_stars }}/5 · 风险 {{ event.result.risk_stars }}/5 · 可信度 {{ event.result.confidence }}</span>
-          </template>
-          <p v-if="event.error" class="text-red-600">
-            {{ event.error }}
-          </p>
-          <p v-if="event.result && event.state !== 'done'" class="text-sm text-slate-500">
-            显示上一成功研判，等待本次更新。
-          </p>
-        </el-card>
-        <el-empty v-if="!events.length && !loading" description="暂无事件，新闻完成关键词索引与分类后会出现在这里" />
-      </el-tab-pane>
-      <el-tab-pane label="新闻包与关键词" name="packages">
-        <el-card v-for="item in packages" :key="item.id" class="mb-3" shadow="never">
-          <el-button link @click="openPackage(item.id)">
-            {{ item.title || `新闻 #${item.news_id}` }}
-          </el-button>
-          <span class="ml-2 text-sm">{{ states[item.state] ?? item.state }}</span>
-          <div class="my-2 flex flex-wrap gap-2">
-            <el-tag v-for="word in item.keywords" :key="word.canonical" :title="word.aliases.join(' / ')">
-              {{ word.canonical }}
-            </el-tag>
+    <section class="research-controls">
+      <div class="research-control-row">
+        <el-tag :type="enabled ? 'success' : 'info'">
+          ● {{ enabled ? '处理中' : '已暂停' }}
+        </el-tag>
+        <div v-if="queue" class="stage-meters">
+          <div v-for="(label, stage) in { index: '关键词提取', assign: '事件归属', research: '事件研究' }" :key="stage" class="stage-meter" :class="{ 'stage-ai': stage === 'research' }">
+            <span>{{ label }}</span><b>{{ queue.running_by_stage[stage] }} / {{ queue.capacity }}</b>
+            <div class="pipeline-track">
+              <i :style="{ width: `${queue.capacity ? queue.running_by_stage[stage] / queue.capacity * 100 : 0}%` }" />
+            </div>
           </div>
-          <el-button v-for="event in item.events" :key="event.id" link @click="openEvent(event.id)">
-            {{ event.title }}
-          </el-button>
-          <p v-if="item.error" class="text-red-600">
-            {{ item.error }}
-          </p>
-        </el-card>
-        <el-empty v-if="!packages.length && !loading" description="暂无新闻包" />
-      </el-tab-pane>
-    </el-tabs>
-    <el-pagination v-model:current-page="page" :total="total" :page-size="20" layout="prev, pager, next, total" />
+        </div>
+        <span class="research-boundary">AI 回补起始时间<b>{{ savedStartAt ? dayjs(savedStartAt).tz("Asia/Shanghai").format("YYYY-MM-DD HH:mm:ss") : '—' }}</b><small>北京时间 · 实时任务优先</small></span>
+        <el-button :loading="busy" :disabled="!enabled && (loading || error || queue?.draining)" @click="action(enabled ? api.pauseApi : enable)">
+          {{ enabled ? '暂停新任务' : '启用两阶段处理' }}
+        </el-button>
+        <el-button class="ai-settings-button" @click="settings">
+          模型与 Skills
+        </el-button>
+      </div>
+      <div class="research-control-row">
+        <template v-if="queue">
+          <el-tag>实时待索引 {{ (queue.realtime.missing ?? 0) + (queue.realtime.stale ?? 0) + (queue.realtime.index_pending ?? 0) }} · 待归属 {{ queue.realtime.assign_pending ?? 0 }}</el-tag>
+          <el-tag type="info">
+            回补待索引 {{ (queue.backfill.missing ?? 0) + (queue.backfill.stale ?? 0) + (queue.backfill.index_pending ?? 0) }} · 待归属 {{ queue.backfill.assign_pending ?? 0 }}
+          </el-tag>
+          <el-tag :type="queue.waiting_retry ? 'warning' : 'info'">
+            等待重试 {{ queue.waiting_retry ?? 0 }}
+          </el-tag>
+          <el-popover title="动态队列" width="360" trigger="hover">
+            <template #reference>
+              <el-button link>
+                共享并发 {{ queue.running }} / {{ queue.capacity }} ⓘ
+              </el-button>
+            </template><p>实时就绪研究 {{ queue.events.realtime.ready ?? 0 }} · 回补就绪研究 {{ queue.events.backfill.ready ?? 0 }}</p><p>{{ queue.idle_reasons.map(reason => idleReasonLabels[reason] ?? reason).join('；') || '持续补入任务' }}</p><p>任务完成后持续补位；事件归属串行，其他任务共享剩余并发。等待重试不代表正在调用模型。</p>
+          </el-popover>
+        </template>
+        <div class="flex-1" />
+        <el-button @click="openVocabulary">
+          短语词库
+        </el-button>
+        <el-button :loading="loading" @click="refresh">
+          刷新
+        </el-button>
+        <el-input v-model="newsIds" placeholder="输入新闻 ID，以逗号分隔" class="w-56">
+          <template #append>
+            <el-button :loading="busy" @click="enroll">
+              入队
+            </el-button>
+          </template>
+        </el-input>
+      </div>
+      <p v-if="queue?.draining" class="text-amber-700 text-xs">
+        正在完成 {{ queue.running }} 个已接收调用，收尾后可重新启用。
+      </p>
+    </section>
+    <el-alert v-if="error" title="读取失败，保留上次结果，可刷新重试" type="error" :closable="false" />
+    <section class="research-results">
+      <div class="research-filter-row">
+        <h1>新闻与事件研究</h1><div class="flex-1" />
+        <el-input v-model="q" clearable placeholder="搜索名称、规范关键词或原文别名" class="w-80" />
+        <el-select v-if="tab === 'events'" v-model="eventState" clearable placeholder="全部研究状态" class="w-36">
+          <el-option v-for="(label, state) in { pending: '待研究', processing: '研究中', done: '研究完成', failed: '研究失败' }" :key="state" :label="label" :value="state" />
+        </el-select>
+        <el-select v-if="tab === 'events'" v-model="importance" class="w-36">
+          <el-option label="全部重要性" :value="0" /><el-option label="四星及以上" :value="4" /><el-option label="五星" :value="5" />
+        </el-select>
+      </div>
+      <el-tabs v-model="tab">
+        <el-tab-pane label="事件" name="events">
+          <el-card v-for="event in events" :key="event.id" class="event-card mb-3" shadow="never">
+            <el-button class="event-open-button" type="primary" @click="openEvent(event.id)">
+              详情抽屉
+            </el-button>
+            <el-button class="event-title" link @click="openEvent(event.id)">
+              {{ event.title }}
+            </el-button>
+            <el-tag class="ml-2">
+              {{ states[event.state] ?? event.state }}
+            </el-tag>
+            <span class="ml-3 text-xs text-slate-500">{{ event.package_count ?? 0 }} 个新闻包 · {{ event.source_count ?? 0 }} 个来源</span>
+            <template v-if="event.result">
+              <p class="my-2">
+                {{ event.result.summary }}
+              </p>
+              <div class="event-rating">
+                <el-tag type="danger">
+                  重要性 {{ "★".repeat(event.result.importance_stars) }}{{ "☆".repeat(5 - event.result.importance_stars) }}
+                </el-tag><el-tag type="info">
+                  风险 {{ event.result.risk_stars }}/5
+                </el-tag><el-tag type="success">
+                  可信度 {{ event.result.confidence }}
+                </el-tag>
+              </div>
+            </template>
+            <p v-if="event.error" class="text-red-600">
+              {{ event.error }}
+            </p>
+            <p v-if="event.result && event.state !== 'done'" class="text-sm text-slate-500">
+              显示上一成功研判，等待本次更新。
+            </p>
+          </el-card>
+          <el-empty v-if="!events.length && !loading" description="暂无事件，新闻完成关键词索引与分类后会出现在这里" />
+        </el-tab-pane>
+        <el-tab-pane label="新闻包与关键词" name="packages">
+          <el-card v-for="item in packages" :key="item.id" class="mb-3" shadow="never">
+            <el-button link @click="openPackage(item.id)">
+              {{ item.title || `新闻 #${item.news_id}` }}
+            </el-button>
+            <span class="ml-2 text-sm">{{ states[item.state] ?? item.state }}</span>
+            <div class="my-2 flex flex-wrap gap-2">
+              <el-tag v-for="word in item.keywords" :key="word.canonical" :title="word.aliases.join(' / ')">
+                {{ word.canonical }}
+              </el-tag>
+            </div>
+            <el-button v-for="event in item.events" :key="event.id" link @click="openEvent(event.id)">
+              {{ event.title }}
+            </el-button>
+            <p v-if="item.error" class="text-red-600">
+              {{ item.error }}
+            </p>
+          </el-card>
+          <el-empty v-if="!packages.length && !loading" description="暂无新闻包" />
+        </el-tab-pane>
+      </el-tabs>
+      <el-pagination v-model:current-page="page" :total="total" :page-size="20" layout="prev, pager, next, total" />
+    </section>
     <el-drawer v-model="opened" title="事件研究与时间线" size="min(820px, 100vw)">
       <el-alert v-if="detailError" title="事件详情读取失败，请重新打开重试" type="error" :closable="false" />
       <template v-if="detail">
@@ -470,67 +543,85 @@ onBeforeUnmount(() => {
           {{ detail.wait_reason }}
         </p>
         <h2>{{ detail.title }}</h2><p>{{ states[detail.state] ?? detail.state }}</p>
+        <el-button :loading="exportingReport" :disabled="!detail.versions.some(version => version.state === 'done' && version.result)" @click="exportReport">
+          导出研究报告
+        </el-button>
         <el-button :loading="busy" @click="retryEvent">
           重新研究
         </el-button>
         <el-alert v-if="detail.error" :title="detail.error" type="warning" :closable="false" />
-        <template v-if="detail.result">
-          <p class="my-3">
-            {{ detail.result.summary }}
-          </p>
-          <p>重要性 {{ detail.result.importance_stars }}/5 · 风险 {{ detail.result.risk_stars }}/5</p>
-          <div v-for="(point, i) in detail.result.timeline_points" :key="i" class="my-4 border-l-2 pl-3">
-            <b>{{ point.time_text || '发生时间未知' }}</b><p>{{ point.description }}</p>
-            <p v-if="point.planned_at">
-              计划：{{ point.planned_precision === 'day' ? point.planned_at.slice(0, 10) : point.planned_precision === 'month' ? point.planned_at.slice(0, 7) : point.planned_at }}
-            </p>
-            <p v-if="point.period_text">
-              统计期：{{ point.period_text }}
-            </p>
-            <p v-if="point.reported_at">
-              报道时间：{{ point.reported_at }}
-            </p>
-            <el-button v-for="id in point.package_ids" :key="id" link @click="openPackage(id)">
-              新闻包 #{{ id }}
-            </el-button>
-            <blockquote v-for="(ref, j) in point.evidence_refs" :key="j" class="my-2 text-slate-500">
-              {{ ref.quote }}
-            </blockquote>
-          </div>
-          <p v-for="(label, key) in { facts: '事实', reasoning: '判断依据', asset_impacts: '影响', opinions: '相关意见', counter_evidence: '反证', uncertainty: '不确定性', watchpoints: '后续观察' }" :key="key" class="my-3">
-            {{ label }}：{{ detail.result[key] }}
-          </p>
-        </template>
-        <h3 class="mt-4">
-          相关事件引用
-        </h3>
-        <div v-for="ref in detail.references" :key="ref.version_id" class="my-2">
-          <el-button link @click="openVersion(ref.event_id, ref.version_id)">
-            {{ ref.title }} · 版本 #{{ ref.version_id }}
-          </el-button>
-          <p>{{ ref.role }} · {{ ref.reason }}</p><el-tag v-if="ref.changed" type="warning">
-            引用来源有变化，待下次研究核对
-          </el-tag>
-        </div>
-        <h3 class="mt-4">
-          全部新闻包
-        </h3>
-        <div v-for="item in detail.packages" :key="item.id">
-          <el-button link @click="openPackage(item.id)">
-            {{ item.title || `新闻 #${item.news_id}` }}
-          </el-button>
-        </div>
-        <h3 class="mt-4">
-          研判版本
-        </h3>
-        <details v-for="version in detail.versions" :key="version.id" class="my-3">
-          <summary>#{{ version.id }} · {{ version.state }} · {{ version.error }}</summary>
-          <p>{{ version.result?.summary }}</p><pre class="whitespace-pre-wrap break-all">{{ version.result }}</pre>
-          <details>
-            <summary>核验记录与用量</summary><pre class="whitespace-pre-wrap break-all">{{ version.evidence }}
-            {{ version.usage }}</pre>
-          </details>
-        </details>
+        <el-tabs v-model="eventDetailTab">
+          <el-tab-pane label="研究结论" name="research">
+            <template v-if="detail.result">
+              <p class="my-3">
+                {{ detail.result.summary }}
+              </p>
+              <p>重要性 {{ detail.result.importance_stars }}/5 · 风险 {{ detail.result.risk_stars }}/5 · 可信度 {{ detail.result.confidence }}</p>
+              <p v-for="(label, key) in { facts: '事实', reasoning: '判断依据', verification: '核验结论', asset_impacts: '影响', opinions: '相关意见', counter_evidence: '反证', uncertainty: '不确定性', watchpoints: '后续观察' }" :key="key" class="my-3">
+                {{ label }}：{{ detail.result[key] }}
+              </p>
+            </template>
+          </el-tab-pane>
+          <el-tab-pane label="主体时间线" name="timeline">
+            <template v-if="detail.result">
+              <div v-for="(point, i) in detail.result.timeline_points" :key="i" class="my-4 border-l-2 pl-3">
+                <b>{{ point.time_text || '发生时间未知' }}</b><p>{{ point.description }}</p>
+                <p v-if="point.planned_at">
+                  计划：{{ point.planned_precision === 'day' ? point.planned_at.slice(0, 10) : point.planned_precision === 'month' ? point.planned_at.slice(0, 7) : point.planned_at }}
+                </p>
+                <p v-if="point.period_text">
+                  统计期：{{ point.period_text }}
+                </p>
+                <p v-if="point.reported_at">
+                  报道时间：{{ point.reported_at }}
+                </p>
+                <el-button v-for="id in point.package_ids" :key="id" link @click="openPackage(id)">
+                  新闻包 #{{ id }}
+                </el-button>
+                <blockquote v-for="(ref, j) in point.evidence_refs" :key="j" class="my-2 text-slate-500">
+                  {{ ref.quote }}
+                </blockquote>
+              </div>
+            </template><el-empty v-else description="尚无时间线" />
+          </el-tab-pane>
+          <el-tab-pane label="证据与新闻包" name="evidence">
+            <h3 class="mt-4">
+              相关事件引用
+            </h3>
+            <div v-for="ref in detail.references" :key="ref.version_id" class="my-2">
+              <el-button link @click="openVersion(ref.event_id, ref.version_id)">
+                {{ ref.title }} · 版本 #{{ ref.version_id }}
+              </el-button>
+              <p>{{ ref.role }} · {{ ref.reason }}</p><el-tag v-if="ref.changed" type="warning">
+                引用来源有变化，待下次研究核对
+              </el-tag>
+            </div>
+            <h3 class="mt-4">
+              全部新闻包
+            </h3>
+            <div v-for="item in detail.packages" :key="item.id">
+              <el-button link @click="openPackage(item.id)">
+                {{ item.title || `新闻 #${item.news_id}` }}
+              </el-button>
+              <p class="text-xs text-slate-500">
+                {{ item.source_code }} · {{ item.published_at ? dayjs(item.published_at).tz("Asia/Shanghai").format("YYYY-MM-DD HH:mm") : "" }} <a :href="item.url" target="_blank" rel="noopener noreferrer">查看来源 ↗</a>
+              </p>
+            </div>
+          </el-tab-pane>
+          <el-tab-pane label="版本历史" name="versions">
+            <h3 class="mt-4">
+              研判版本
+            </h3>
+            <details v-for="version in detail.versions" :key="version.id" class="my-3">
+              <summary>#{{ version.id }} · {{ version.state }} · {{ version.error }}</summary>
+              <p>{{ version.result?.summary }}</p><pre class="whitespace-pre-wrap break-all">{{ version.result }}</pre>
+              <details>
+                <summary>核验记录与用量</summary><pre class="whitespace-pre-wrap break-all">{{ version.evidence }}
+                {{ version.usage }}</pre>
+              </details>
+            </details>
+          </el-tab-pane>
+        </el-tabs>
       </template>
     </el-drawer>
     <el-drawer v-model="packageOpened" title="新闻原文与关键词" size="min(760px, 100vw)">
@@ -591,7 +682,7 @@ onBeforeUnmount(() => {
           {{ versionDetail.result.summary }}
         </p>
         <p>重要性 {{ versionDetail.result.importance_stars }}/5 · 风险 {{ versionDetail.result.risk_stars }}/5 · 可信度 {{ versionDetail.result.confidence }}</p>
-        <p v-for="(label, key) in { facts: '事实', reasoning: '判断依据', asset_impacts: '影响', opinions: '相关意见', counter_evidence: '反证', uncertainty: '不确定性', watchpoints: '后续观察' }" :key="key" class="my-3">
+        <p v-for="(label, key) in { facts: '事实', reasoning: '判断依据', verification: '核验结论', asset_impacts: '影响', opinions: '相关意见', counter_evidence: '反证', uncertainty: '不确定性', watchpoints: '后续观察' }" :key="key" class="my-3">
           {{ label }}：{{ versionDetail.result[key] }}
         </p>
         <div v-for="(point, i) in versionDetail.result.timeline_points" :key="i" class="my-3">

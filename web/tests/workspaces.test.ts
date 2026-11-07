@@ -320,6 +320,19 @@ test("交易确认绑定发起币种；交易所或会话切换后拒绝旧操�
     } }) }
   }, { ...globals, ElMessageBox: { confirm: () => confirm.promise } })
   const page = load("@/pages/trading/index.vue").default.setup({}, { expose() {} })
+  data.status.value = { ...tradingStatus(), snapshot: {
+    orders: [
+      { symbol: "BTCUSDT", client_id: "ap1", price: "100", quantity: "1", time: 1 },
+      { symbol: "BTCUSDT", client_id: "manual-1", price: "101", quantity: "2", time: 2 },
+      { symbol: "ETHUSDT", client_id: "ap2", price: "20", quantity: "1", time: 3 }
+    ],
+    algo_orders: [{ symbol: "BTCUSDT", client_id: "ap3", trigger_price: "90", quantity: "1", time: 3 }]
+  } } as any
+  page.orderFilter.value = "own"
+  assert.deepEqual(Array.from(page.filteredOrders.value, (o: any) => o.client_id), ["ap3", "ap1"])
+  page.orderFilter.value = "manual"
+  assert.deepEqual(Array.from(page.filteredOrders.value, (o: any) => o.client_id), ["manual-1"])
+  assert.equal(writes.length, 0)
   const first = page.clearOrders()
   data.selected.value = "ETHUSDT"
   confirm.resolve()

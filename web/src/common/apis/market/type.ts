@@ -75,12 +75,15 @@ export interface TickerMessage {
 }
 
 export interface Subscription {
+  quotes?: boolean
   market: Market
   symbol: string
   interval: string
 }
 
+export interface QuoteMessage { type: "depth" | "trade" | "mark_price", market: Market, symbol: string, data: { bids?: string[][], asks?: string[][], at?: number, id?: number, price?: string, quantity?: string, time?: number, buyer_maker?: boolean, mark_price?: string, index_price?: string, funding_rate?: string, next_funding_at?: number } }
+
 export type MarketMessage
-  = | { type: "kline", market: Market, symbol: string, interval: string, data: KlineMessage }
+  = QuoteMessage | { type: "kline", market: Market, symbol: string, interval: string, data: KlineMessage }
     | { type: "ticker", market: Market, symbol: string, interval: null, data: TickerMessage }
     | { type: "error", message: string }

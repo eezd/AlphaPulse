@@ -7,7 +7,7 @@ export const enableApi = () => request<Research.Coverage>({ url: "/risk/enable",
 export const getCoverageApi = (start_at: string) => request<Research.Coverage>({ url: "/risk/coverage", method: "get", params: { start_at } })
 export const pauseApi = () => request<null>({ url: "/risk/pause", method: "post" })
 export const createSkillsApi = () => request<{ index: number, research: number }>({ url: "/risk/skill-templates", method: "post" })
-export const listEventsApi = (q: string, page: number) => request<{ items: Research.Event[], total: number }>({ url: "/risk/events", method: "get", params: { q, page } })
+export const listEventsApi = (q: string, page: number, filters: { state?: string, importance_min?: number } = {}) => request<{ items: Research.Event[], total: number }>({ url: "/risk/events", method: "get", params: { q, page, ...filters } })
 export const getEventApi = (id: number) => request<Research.EventDetail>({ url: `/risk/events/${id}`, method: "get" })
 export const retryEventApi = (id: number) => request<null>({ url: `/risk/events/${id}/retry`, method: "post" })
 export const listPackagesApi = (q: string, page: number) => request<{ items: Research.Package[], total: number }>({ url: "/risk/packages", method: "get", params: { q, page } })

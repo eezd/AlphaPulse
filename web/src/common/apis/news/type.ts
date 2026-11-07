@@ -13,10 +13,16 @@ export interface NewsBrief {
   published_at: string
   first_seen_at: string
   revision_no: number
+  bookmarked?: boolean
+  keywords?: { canonical: string }[]
+  events?: { id: number, title: string }[]
   risk?: { state: string, stars: number | null, summary: string | null, verification: string | null } | null
 }
 
 export interface NewsQuery {
+  processing_state?: string
+  bookmarked?: boolean
+  sort?: "asc" | "desc"
   ids?: number[]
   source?: string[]
   q?: string

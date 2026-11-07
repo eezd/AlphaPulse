@@ -130,3 +130,11 @@ class CrawlLog(Base):
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     level: Mapped[str] = mapped_column(String(8))
     message: Mapped[str] = mapped_column(Text)
+
+
+class NewsBookmark(Base):
+    __tablename__ = "news_bookmarks"
+
+    username: Mapped[str] = mapped_column(String(128), primary_key=True)
+    news_id: Mapped[int] = mapped_column(ForeignKey("news_items.id", ondelete="CASCADE"), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -340,6 +340,7 @@ async def package_out(session, package, news):
         "news_id": news.id,
         "title": news.title,
         "url": news.url,
+        "source_code": news.source_code,
         "published_at": news.published_at,
         "state": package.state if current else "index_pending",
         "error": package.error if current else None,
@@ -437,8 +438,12 @@ async def retry_package(identifier: int, session: DB):
 
 
 @router.get("/events")
-async def events(session: DB, q: str = "", page: int = Query(1, ge=1)):
+async def events(session: DB, q: str = "", page: int = Query(1, ge=1), state: Literal["pending", "processing", "done", "failed", "interrupted"] | None = None, importance_min: Annotated[int, Query(ge=0, le=5)] = 0):
     query = select(Event).where(Event.state != "retired")
+    if state:
+        query = query.where(Event.state == state)
+    if importance_min:
+        query = query.where(Event.result["importance_stars"].as_integer() >= importance_min)
     if q:
         query = query.where(
             or_(*(Event.title.icontains(t, autoescape=True) | Event.tags.contains([t])
@@ -451,10 +456,16 @@ async def events(session: DB, q: str = "", page: int = Query(1, ge=1)):
             .limit(20)
         )
     )
+    counts = {eid: (packages, sources) for eid, packages, sources in await session.execute(
+        select(Membership.event_id, func.count(Membership.package_id), func.count(func.distinct(NewsItem.source_code)))
+        .join(Package, Package.id == Membership.package_id).join(NewsItem, NewsItem.id == Package.news_id)
+        .where(Membership.event_id.in_([e.id for e in rows])).group_by(Membership.event_id))}
     return success(
         {
             "items": [
                 {
+                    "package_count": counts.get(e.id, (0, 0))[0],
+                    "source_count": counts.get(e.id, (0, 0))[1],
                     "id": e.id,
                     "title": e.title,
                     "state": e.state,

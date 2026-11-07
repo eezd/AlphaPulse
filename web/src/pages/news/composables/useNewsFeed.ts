@@ -1,5 +1,5 @@
-import type { NewsBrief, NewsEvent } from "@@/apis/news/type"
-import { listNewsApi, subscribeNewsApi } from "@@/apis/news"
+import type { NewsBrief, NewsEvent, NewsQuery } from "@@/apis/news/type"
+import { bookmarkNewsApi, listNewsApi, subscribeNewsApi } from "@@/apis/news"
 import { useSessionScope } from "@@/composables/useSessionScope"
 import { useSourceNames } from "@@/composables/useSourceNames"
 import { usePersisted } from "@@/utils/storage"
@@ -11,6 +11,9 @@ export function useNewsFeed() {
   const filters = reactive({
     source: [] as string[],
     q: "",
+    processing_state: "",
+    bookmarked: false,
+    sort: "desc" as "asc" | "desc",
     range: null as [Date, Date] | null
   })
   const items = ref<NewsBrief[]>([])
@@ -21,6 +24,7 @@ export function useNewsFeed() {
   const failed = ref(false)
   const riskFailed = ref(false)
   let riskLoading = false
+  const savingBookmarks = reactive(new Set<number>())
   let timer: ReturnType<typeof setInterval> | undefined
   const pendingCount = ref(0)
   const openedId = ref<number | null>(null)
@@ -29,18 +33,25 @@ export function useNewsFeed() {
   // 多次快速翻页时只采用最后一次请求的结果
   let requestSeq = 0
 
+  function query(): NewsQuery {
+    return {
+      source: filters.source.length ? filters.source : undefined,
+      q: filters.q || undefined,
+      processing_state: filters.processing_state || undefined,
+      bookmarked: filters.bookmarked,
+      sort: filters.sort,
+      start: filters.range?.[0].toISOString(),
+      end: filters.range?.[1].toISOString(),
+      page: page.value,
+      limit: pageSize.value
+    }
+  }
+
   async function load() {
     const seq = ++requestSeq
     loading.value = true
     try {
-      const result = await listNewsApi({
-        source: filters.source.length ? filters.source : undefined,
-        q: filters.q || undefined,
-        start: filters.range?.[0].toISOString(),
-        end: filters.range?.[1].toISOString(),
-        page: page.value,
-        limit: pageSize.value
-      })
+      const result = await listNewsApi(query())
       if (seq !== requestSeq)
         return
       failed.value = false
@@ -64,17 +75,46 @@ export function useNewsFeed() {
     else return load()
   }
 
+  async function toggleBookmark(item: NewsBrief) {
+    if (savingBookmarks.has(item.id) || !scope.isCurrent()) return
+    savingBookmarks.add(item.id)
+    const next = !item.bookmarked
+    try {
+      await bookmarkNewsApi(item.id, next)
+      if (!scope.isCurrent()) return
+      const current = items.value.find(row => row.id === item.id)
+      if (current) current.bookmarked = next
+      // 写入前发出的列表请求可能仍带旧收藏状态，重新查询并使这些响应失效。
+      if (loading.value || riskLoading || (filters.bookmarked && !next)) await load()
+    } finally {
+      savingBookmarks.delete(item.id)
+    }
+  }
+
   async function refreshRisk() {
-    if (!scope.isCurrent() || loading.value || riskLoading || !items.value.length) return
+    if (!scope.isCurrent() || loading.value || riskLoading || (!items.value.length && !filters.processing_state)) return
     const seq = requestSeq
+    const filtered = !!filters.processing_state
     riskLoading = true
     try {
-      const result = await listNewsApi({ ids: items.value.map(item => item.id), limit: 100 }, false)
+      const result = await listNewsApi(filtered ? query() : { ids: items.value.map(item => item.id), limit: 100 }, false)
       if (seq !== requestSeq || !scope.isCurrent()) return
+      if (filtered) {
+        items.value = result.items
+        total.value = result.total
+        page.value = Math.min(page.value, Math.max(1, Math.ceil(result.total / pageSize.value)))
+        failed.value = false
+        riskFailed.value = false
+        return
+      }
       const latest = new Map(result.items.map(item => [item.id, item]))
       for (const item of items.value) {
         const current = latest.get(item.id)
-        if (current?.revision_no === item.revision_no) item.risk = current.risk
+        if (current?.revision_no === item.revision_no) {
+          item.risk = current.risk
+          item.keywords = current.keywords
+          item.events = current.events
+        }
       }
       riskFailed.value = false
     } catch {
@@ -101,7 +141,7 @@ export function useNewsFeed() {
   onMounted(load)
   onMounted(() => {
     timer = setInterval(() => {
-      if (!document.hidden && items.value.some(item => item.risk?.state !== "done")) void refreshRisk()
+      if (!document.hidden && (filters.processing_state || items.value.some(item => item.risk?.state !== "done"))) void refreshRisk()
     }, 15000)
   })
   onBeforeUnmount(() => {
@@ -109,5 +149,5 @@ export function useNewsFeed() {
     clearInterval(timer)
   })
 
-  return { sourceNames, filters, items, total, page, pageSize, loading, failed, riskFailed, pendingCount, openedId, listBox, connected, load, search, refreshRisk }
+  return { sourceNames, filters, items, total, page, pageSize, loading, failed, riskFailed, pendingCount, openedId, listBox, connected, load, search, refreshRisk, savingBookmarks, toggleBookmark }
 }

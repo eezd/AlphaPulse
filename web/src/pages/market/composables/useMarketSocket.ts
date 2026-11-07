@@ -1,4 +1,4 @@
-import type { KlineMessage, MarketMessage, Subscription, TickerMessage } from "@@/apis/market/type"
+import type { KlineMessage, MarketMessage, QuoteMessage, Subscription, TickerMessage } from "@@/apis/market/type"
 
 import { createWebSocketTicketApi } from "@@/apis/auth"
 import { createMarketSocketApi } from "@@/apis/market"
@@ -10,7 +10,7 @@ import { useUserStore } from "@/pinia/stores/user"
 const RETRY_MAX_MS = 30_000
 
 /** 行情 WebSocket：断线指数退避重连，重连后自动恢复当前订阅；切换订阅后丢弃旧订阅的残留消息 */
-export function useMarketSocket(onKline: (k: KlineMessage) => void, onTicker: (t: TickerMessage) => void) {
+export function useMarketSocket(onKline: (k: KlineMessage) => void, onTicker: (t: TickerMessage) => void, onQuote?: (message: QuoteMessage) => void) {
   const connected = ref(false)
   const user = useUserStore()
   const version = user.sessionVersion
@@ -55,6 +55,10 @@ export function useMarketSocket(onKline: (k: KlineMessage) => void, onTicker: (t
         }
         if (!current || message.market !== current.market || message.symbol !== current.symbol)
           return
+        if (["depth", "trade", "mark_price"].includes(message.type)) {
+          onQuote?.(message as QuoteMessage)
+          return
+        }
         if (message.type === "kline" && message.interval === current.interval)
           onKline(message.data)
         else if (message.type === "ticker")

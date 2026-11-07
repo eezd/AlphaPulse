@@ -15,6 +15,12 @@ Deployment, migration commands, Compose interpolation and CI outputs use these v
 
 The date comes from the commit's committer timestamp in UTC, and the suffix is the first eight characters of its full SHA. Existing versions are immutable. Images are public on Gitea only; private configuration and data are excluded. `/api/health` and `/version.json` identify the deployed API and web revision. `build.json` is the CI receipt, not a tracked source file.
 
+## Research workspace UI
+
+The Stitch workspace shares navigation across research, news, calendar, collection, market, trading, Chat, Skills and settings. News supports personal bookmarks and current-revision processing filters; research reports bind conclusions and original sources to an immutable successful version. Calendar and collector details adapt to the viewport. Market depth, aggregate trades and funding data use Redis cache/replay; futures depth retains the exchange event timestamp. Fullscreen includes popup menus. Trading configuration supports editing and saving at desktop and mobile widths.
+
+The additive `de5678901234` migration follows `dd4567890123` and creates only `news_bookmarks` (username/news ID key, creation time and a cascading news foreign key). It does not rewrite original news, research results or model settings. Its production execution requires the independent schema authorization described below before the deployment schema guard can pass. CI browser acceptance covers full-screen menus and configuration editing/saving at 1600px, 390px and 320px.
+
 ## The single data-bearing instance
 
 `/docker/gitea/dev/AlphaPulse` contains the runtime Compose configuration, `.env`, version-tag selection, deployment receipts (which retain accepted digests for identity checks) and `.deploy.lock`. The repository-root `.env` points to that sole private configuration. The Compose project is `alphapulse-dev`; `AlphaPulse-dev` is the web container, and the other application containers append their service name (`-api`, `-crawler`, `-market`, `-calendar`, `-trader`, or the new `-news-risk`).

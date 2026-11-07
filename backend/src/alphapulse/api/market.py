@@ -73,6 +73,7 @@ class Subscription(BaseModel):
     market: Market
     symbol: str = Field(pattern=r"^[A-Z0-9]{2,30}$")
     interval: str
+    quotes: bool = False
 
     @field_validator("interval")
     @classmethod
@@ -220,6 +221,17 @@ async def market_ws(websocket: WebSocket) -> None:
             if subscribed.is_set():
                 await pubsub.unsubscribe()
             await pubsub.subscribe(kline_channel(sub.market, sub.symbol, sub.interval), ticker_channel(sub.market, sub.symbol))
+            if sub.quotes:
+                await pubsub.subscribe(*(f'{KEY_PREFIX}pub:{kind}:{sub.market}:{sub.symbol}' for kind in ('depth', 'trade', 'mark_price')))
+                for kind in ('depth', 'trade', 'mark_price'):
+                    if kind == "trade":
+                        recent = await redis.lrange(f"{KEY_PREFIX}quote:{sub.market}:{sub.symbol}:trade:recent", 0, 99)
+                        for payload in reversed(recent):
+                            await websocket.send_json({"type": kind, "market": sub.market, "symbol": sub.symbol, "interval": None, "data": json.loads(payload)})
+                        continue
+                    cached = await redis.get(f'{KEY_PREFIX}quote:{sub.market}:{sub.symbol}:{kind}')
+                    if cached:
+                        await websocket.send_json({'type': kind, 'market': sub.market, 'symbol': sub.symbol, 'interval': None, 'data': json.loads(cached)})
             subscribed.set()
 
     async def forward() -> None:

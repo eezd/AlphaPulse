@@ -48,14 +48,14 @@ async function save() {
 
 <template>
   <el-card shadow="never">
-    <el-form ref="formRef" :model="form" :rules="rules" :disabled="saving" inline class="trading-config" @submit.prevent="save">
+    <el-form ref="formRef" :model="form" :rules="rules" :disabled="saving" label-position="top" class="trading-config" @submit.prevent="save">
       <el-form-item label="模型">
-        <el-select v-model="form.provider_id" class="w-56" clearable :value-on-clear="null" placeholder="跟随默认配置">
+        <el-select v-model="form.provider_id" class="w-full" clearable :value-on-clear="null" placeholder="跟随默认配置">
           <el-option v-for="provider in providers" :key="provider.id" :value="provider.id" :label="`${provider.name}（${provider.model}）`" />
         </el-select>
       </el-form-item>
       <el-form-item label="思考强度">
-        <el-select v-model="form.reasoning_effort" class="w-36" clearable :value-on-clear="null" placeholder="跟随配置">
+        <el-select v-model="form.reasoning_effort" class="w-full" clearable :value-on-clear="null" placeholder="跟随配置">
           <el-option v-for="effort in EFFORTS" :key="effort" :value="effort" :label="effort" />
         </el-select>
       </el-form-item>
@@ -81,6 +81,6 @@ async function save() {
 <style scoped>
 .trading-config :deep(.el-form-item) {
   margin-bottom: 12px;
-  margin-right: 16px;
+  margin-right: 0;
 }
 </style>
