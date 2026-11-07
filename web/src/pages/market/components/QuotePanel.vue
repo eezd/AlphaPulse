@@ -67,6 +67,7 @@ const time = (value?: number) => value ? new Date(value).toLocaleTimeString("zh-
   flex-shrink: 0;
   border-left: 1px solid #e2e8f0;
   background: #fff;
+  color: #0f172a;
   overflow: auto;
   padding: 10px;
   font-size: 11px;

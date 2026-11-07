@@ -1,9 +1,9 @@
 import type { DeepPartial, Period, Styles } from "klinecharts"
 
-export const UP = "#16a34a"
-export const DOWN = "#dc2626"
-const GRID = "#e2e8f0"
-const TEXT = "#64748b"
+export const UP = "#0ecb81"
+export const DOWN = "#f6465d"
+const GRID = "#2b3139"
+const TEXT = "#848e9c"
 
 /** “分时”用 1m 数据画面积图，与币安一致 */
 export const TIME_LINE = "time"

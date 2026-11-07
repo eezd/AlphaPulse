@@ -175,7 +175,7 @@ export function useMarketChart() {
     const fallback = symbols.value.find(s => s.symbol === "BTCUSDT") ?? symbols.value[0]
     if (!current.value && fallback)
       selection.value = { market: fallback.market, symbol: fallback.symbol }
-    chart.value = init(chartEl.value!, { locale: "zh-CN", timezone: "Asia/Shanghai", styles: "light" })
+    chart.value = init(chartEl.value!, { locale: "zh-CN", timezone: "Asia/Shanghai", styles: "dark" })
     chart.value!.setStyles(BINANCE_STYLES)
     chart.value!.setDataLoader(dataLoader)
     applyChartState()
