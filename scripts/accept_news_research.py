@@ -24,7 +24,6 @@ from alphapulse.news_research.models import (
     Version,
     Membership,
     Reference,
-    VocabularyVersion,
 )
 
 
@@ -99,16 +98,6 @@ async def main(args):
                 "reasoning_effort": "medium" if stage == "index" else "xhigh",
                 "skill_id": None,
             }
-        session.add(
-            VocabularyVersion(
-                revision=1,
-                entries=[
-                    {"canonical": "币安", "aliases": ["Binance"]},
-                    {"canonical": "星桥交易所", "aliases": ["XBridge"]},
-                    {"canonical": "中国外交部", "aliases": ["中华人民共和国外交部"]},
-                ],
-            )
-        )
         columns = set(NewsItem.__table__.columns.keys())
         for item in news:
             values = {k: v for k, v in item.items() if k in columns}
@@ -192,7 +181,6 @@ async def main(args):
             Version,
             Membership,
             Reference,
-            VocabularyVersion,
         ):
             tables[model.__tablename__] = [
                 {c.name: getattr(row, c.name) for c in model.__table__.columns}

@@ -16,6 +16,4 @@ export const retryPackageApi = (id: number) => request<null>({ url: `/risk/packa
 export const listNewsPackagesApi = (id: number, revision: number) => request<Research.Package[]>({ url: `/risk/news/${id}/packages`, method: "get", params: { revision_no: revision } })
 export const enrollApi = (news_ids: number[]) => request<null>({ url: "/risk/packages", method: "post", data: { news_ids } })
 
-export const getVocabularyApi = () => request<Research.Vocabulary>({ url: "/risk/tag-vocabulary", method: "get" })
-export const saveVocabularyApi = (data: { base_revision: number, entries: Research.VocabularyEntry[] }) => request<Research.Vocabulary>({ url: "/risk/tag-vocabulary", method: "put", data })
 export const getEventVersionApi = (event: number, version: number) => request<Research.VersionDetail>({ url: `/risk/events/${event}/versions/${version}`, method: "get" })

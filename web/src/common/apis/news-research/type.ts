@@ -11,6 +11,4 @@ export interface Event { package_count?: number, source_count?: number, id: numb
 export interface EventDetail extends Event { wait_reason?: string | null, packages: Package[], references: { event_id: number, title: string, version_id: number, role: string, reason: string, changed: boolean }[], versions: { id: number, revision: number, state: string, result: Result | null, error: string | null, usage: unknown, evidence: unknown }[] }
 export interface PackageDetail extends Package { article: { title: string, summary: string, content: string }, attempts: { id: number, stage: string, state: string, error: string | null, output: unknown, usage: unknown }[] }
 
-export interface VocabularyEntry { canonical: string, aliases: string[] }
-export interface Vocabulary { revision: number, entries: VocabularyEntry[] }
 export interface VersionDetail { evidence: unknown, usage: unknown, id: number, event_id: number, revision: number, state: string, result: Result, packages: { id: number, news_id: number }[], articles: { id: number, title: string, summary: string, content: string, url: string }[], references: EventDetail["references"] }

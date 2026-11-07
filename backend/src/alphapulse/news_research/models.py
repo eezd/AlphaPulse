@@ -18,13 +18,6 @@ from sqlalchemy.orm import Mapped, mapped_column
 from alphapulse.core.db import Base
 
 
-class VocabularyVersion(Base):
-    __tablename__ = "news_research_vocabulary_versions"
-    revision: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
-    entries: Mapped[list] = mapped_column(JSONB)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-
 class ResearchSettings(Base):
     __tablename__ = "news_research_settings"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -137,7 +130,6 @@ class Reference(Base):
 
 
 TABLES = [
-    VocabularyVersion.__table__,
     ResearchSettings.__table__,
     Package.__table__,
     Attempt.__table__,

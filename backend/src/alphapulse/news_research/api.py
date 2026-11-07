@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import AwareDatetime, Field
-from sqlalchemy import select, update, func, or_, text
+from sqlalchemy import select, update, func, text
 from sqlalchemy.dialects.postgresql import insert
 from alphapulse.core.db import get_session
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,8 +20,7 @@ from alphapulse.news_research.models import (
     Version,
     Reference,
 )
-from alphapulse.news_research import service, scheduling, vocabulary as vocab, coverage as reports
-from alphapulse.news_research.models import VocabularyVersion
+from alphapulse.news_research import service, scheduling, coverage as reports
 from alphapulse.news_research.contracts import (
     INDEX_ASSIGN_SKILL,
     SkillFormatError,
@@ -36,23 +35,6 @@ router = APIRouter(
     prefix="/api/risk", tags=["news-research"], dependencies=[Depends(require_admin)]
 )
 DB = Annotated[AsyncSession, Depends(get_session)]
-
-
-@router.get("/tag-vocabulary")
-async def vocabulary(session: DB):
-    return success(await vocab.snapshot(session))
-
-
-@router.put("/tag-vocabulary")
-async def save_vocabulary(body: vocab.VocabularyInput, session: DB):
-    await session.execute(text("SELECT pg_advisory_xact_lock(20261103, 3)"))
-    current = await vocab.snapshot(session)
-    if current["revision"] != body.base_revision:
-        raise HTTPException(409, "词库已更新，请重新读取后保存")
-    row = VocabularyVersion(revision=current["revision"] + 1, entries=[e.model_dump() for e in body.entries])
-    session.add(row)
-    await session.commit()
-    return success({"revision": row.revision, "entries": row.entries})
 
 
 async def version_references(session, version_id):
@@ -358,7 +340,7 @@ async def package_out(session, package, news):
 async def packages(session: DB, q: str = "", page: int = Query(1, ge=1)):
     query = select(Package, NewsItem).join(NewsItem, NewsItem.id == Package.news_id)
     if q:
-        condition, _ = service.package_matching([q], await vocab.snapshot(session))
+        condition, _ = service.package_matching([q])
         query = query.where(condition)
     rows = list(
         await session.execute(
@@ -445,9 +427,9 @@ async def events(session: DB, q: str = "", page: int = Query(1, ge=1), state: Li
     if importance_min:
         query = query.where(Event.result["importance_stars"].as_integer() >= importance_min)
     if q:
+        term = q.strip().casefold()
         query = query.where(
-            or_(*(Event.title.icontains(t, autoescape=True) | Event.tags.contains([t])
-                  for t in vocab.expand([q], await vocab.snapshot(session))))
+            Event.title.icontains(term, autoescape=True) | Event.tags.contains([term])
         )
     rows = list(
         await session.scalars(

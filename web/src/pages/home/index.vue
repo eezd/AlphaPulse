@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { Config, Coverage, Event, EventDetail, Package, PackageDetail, QueueStatus, VersionDetail, Vocabulary } from "@@/apis/news-research/type"
+import type { Config, Coverage, Event, EventDetail, Package, PackageDetail, QueueStatus, VersionDetail } from "@@/apis/news-research/type"
 import type { Provider } from "@@/apis/settings/type"
 import type { SkillNode } from "@@/apis/skills/type"
 import * as api from "@@/apis/news-research"
@@ -17,45 +17,10 @@ import { useUserStore } from "@/pinia/stores/user"
 dayjs.extend(utc)
 dayjs.extend(timezone)
 
-const vocabularyOpened = ref(false)
-const vocabulary = ref<Vocabulary>({ revision: 0, entries: [] })
-const vocabularyBusy = ref(false)
-const vocabularyLoading = ref(false)
-const vocabularyError = ref(false)
-let vocabularySequence = 0
 const versionOpened = ref(false)
 const versionDetail = ref<VersionDetail | null>(null)
 const versionError = ref(false)
 let versionSequence = 0
-async function openVocabulary() {
-  if (!valid() || vocabularyBusy.value) return
-  const seq = ++vocabularySequence
-  vocabularyOpened.value = true
-  vocabularyLoading.value = true
-  vocabularyError.value = false
-  try {
-    const value = await api.getVocabularyApi()
-    if (valid() && vocabularyOpened.value && seq === vocabularySequence) vocabulary.value = value
-  } catch {
-    if (valid() && vocabularyOpened.value && seq === vocabularySequence) vocabularyError.value = true
-  } finally {
-    if (valid() && seq === vocabularySequence) vocabularyLoading.value = false
-  }
-}
-async function saveVocabulary() {
-  if (!valid() || !vocabularyOpened.value || vocabularyLoading.value || vocabularyError.value || vocabularyBusy.value) return
-  const seq = vocabularySequence
-  vocabularyBusy.value = true
-  try {
-    const value = await api.saveVocabularyApi({ base_revision: vocabulary.value.revision, entries: vocabulary.value.entries })
-    if (!valid() || !vocabularyOpened.value || seq !== vocabularySequence) return
-    vocabulary.value = value
-    vocabularyOpened.value = false
-    await refresh()
-  } finally {
-    if (valid()) vocabularyBusy.value = false
-  }
-}
 async function openVersion(event: number, version: number) {
   const seq = ++versionSequence
   versionDetail.value = null
@@ -76,12 +41,6 @@ async function openCurrentEvent() {
 }
 watch(versionOpened, (value) => {
   if (!value) versionSequence++
-})
-watch(vocabularyOpened, (value) => {
-  if (!value) {
-    vocabularySequence++
-    vocabularyLoading.value = false
-  }
 })
 const user = useUserStore()
 const route = useRoute()
@@ -368,7 +327,6 @@ watch(() => user.sessionVersion, () => {
   sequence++
   versionSequence++
   versionOpened.value = false
-  vocabularyOpened.value = false
   versionDetail.value = null
   detailSequence++
   packageSequence++
@@ -447,9 +405,6 @@ onBeforeUnmount(() => {
           </el-popover>
         </template>
         <div class="flex-1" />
-        <el-button @click="openVocabulary">
-          短语词库
-        </el-button>
         <el-button :loading="loading" @click="refresh">
           刷新
         </el-button>
@@ -645,30 +600,6 @@ onBeforeUnmount(() => {
         </p><article class="whitespace-pre-wrap">
           {{ packageDetail.article.content }}
         </article>
-      </template>
-    </el-drawer>
-    <el-drawer v-model="vocabularyOpened" title="短语词库" size="min(720px, 100vw)">
-      <p class="mb-3">
-        将同一主体的名称归为一个规范词。保存后用于索引归一和检索，不自动重新研究事件。
-      </p>
-      <p v-if="vocabularyLoading">
-        正在读取词库…
-      </p>
-      <el-alert v-else-if="vocabularyError" title="词库读取失败，请重新打开重试" type="error" :closable="false" />
-      <template v-else>
-        <div v-for="(entry, i) in vocabulary.entries" :key="i" class="mb-4">
-          <el-input v-model="entry.canonical" :disabled="vocabularyBusy" placeholder="规范词，例如：币安" />
-          <el-select v-model="entry.aliases" :disabled="vocabularyBusy" multiple filterable allow-create default-first-option placeholder="输入别名并回车，例如：Binance" class="my-2 w-full" />
-          <el-button :disabled="vocabularyBusy" @click="vocabulary.entries.splice(i, 1)">
-            删除词条
-          </el-button>
-        </div>
-        <el-button :disabled="vocabularyBusy" @click="vocabulary.entries.push({ canonical: '', aliases: [] })">
-          新增词条
-        </el-button>
-        <el-button type="primary" :loading="vocabularyBusy" @click="saveVocabulary">
-          保存词库
-        </el-button>
       </template>
     </el-drawer>
     <el-drawer v-model="versionOpened" title="被引用的固定版本" size="min(820px, 100vw)">

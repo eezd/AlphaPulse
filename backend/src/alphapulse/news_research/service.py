@@ -37,7 +37,6 @@ from alphapulse.news_research.contracts import (
     ResearchResult,
 )
 
-from alphapulse.news_research import vocabulary as vocab
 from alphapulse.news_research.scheduling import manual_review, active_research
 
 publication_lock = asyncio.Lock()
@@ -286,9 +285,9 @@ async def enroll(session, ids):
     await session.commit()
 
 
-async def candidates(session, keywords, vocabulary=None):
-    vocabulary = vocabulary if vocabulary is not None else await vocab.snapshot(session)
-    groups = [vocab.expand([k["canonical"], *k["aliases"]], vocabulary) for k in vocab.normalize(keywords, vocabulary)]
+async def candidates(session, keywords):
+    groups = [list(dict.fromkeys(t.strip().casefold() for t in [k["canonical"], *k["aliases"]] if t.strip()))
+              for k in keywords]
     conditions = [
         or_(
             *(
@@ -320,8 +319,8 @@ async def candidates(session, keywords, vocabulary=None):
 
 
 
-def package_matching(terms, vocabulary=None):
-    term_groups = vocab.groups(terms, vocabulary) if vocabulary is not None else [[t] for t in dict.fromkeys(t.strip().lower() for t in terms if t.strip())]
+def package_matching(terms):
+    term_groups = [[t] for t in dict.fromkeys(t.strip().lower() for t in terms if t.strip())]
     # Compare JSON values without changing literal aliases stored as evidence.
     words = (
         func.jsonb_array_elements(Package.keywords)
@@ -471,9 +470,8 @@ async def _process_package(identifier, config, expected_stage):
         used = None
         output_audit = {}
         try:
-            vocabulary = await vocab.snapshot(session)
             if stage == "assign":
-                catalog = await candidates(session, package.keywords, vocabulary)
+                catalog = await candidates(session, package.keywords)
                 payload = {
                     **payload,
                     "keywords": package.keywords,
@@ -481,7 +479,7 @@ async def _process_package(identifier, config, expected_stage):
                 }
                 attempt.input = payload
             provider, skill, rules = await model_config(session, config, stage)
-            attempt.rules = {**rules, "vocabulary": vocabulary}
+            attempt.rules = rules
             await session.commit()
             output, used = await complete(
                 provider,
@@ -517,7 +515,7 @@ async def _process_package(identifier, config, expected_stage):
                     attempt.state = "superseded"
                     await enroll(session, [current.id])
                 elif stage == "index":
-                    package.keywords = vocab.normalize([k.model_dump() for k in output.keywords], vocabulary)
+                    package.keywords = [k.model_dump() for k in output.keywords]
                     package.state = "assign_pending"
                     attempt.state = "done"
                 else:
@@ -627,7 +625,7 @@ class Research(ResearchTools):
         self.sources.update({a["id"]: a for a in payload["articles"]})
 
     def restore(self, records):
-        # Retry local searches against current data and reviewed vocabulary.
+        # Retry local searches against current data.
         from alphapulse.news_research.tools import TOOLS
         records = [r for r in records if r['tool'] in TOOLS
                    and r['tool'] not in ('search_packages', 'search_events')
@@ -703,14 +701,12 @@ class Research(ResearchTools):
                     query = arguments.get("query", "").strip()
                     if not query:
                         raise ValueError("检索词不能为空")
-                    vocabulary = getattr(self, "vocabulary", None)
-                    if vocabulary is None:
-                        vocabulary = await vocab.snapshot(session)
                     terms = arguments.get("keywords") or query.split()
                     if name == "search_events":
-                        conditions = [or_(*(Event.title.icontains(t, autoescape=True) | Event.tags.contains([t]) for t in group))
-                                      for group in vocab.groups([query, *terms[:6]], vocabulary)]
-                        phrase = or_(*(Event.title.icontains(t, autoescape=True) | Event.tags.contains([t]) for t in vocab.expand([query], vocabulary)))
+                        search_terms = dict.fromkeys(t.strip().casefold() for t in [query, *terms[:6]] if t.strip())
+                        conditions = [Event.title.icontains(t, autoescape=True) | Event.tags.contains([t])
+                                      for t in search_terms]
+                        phrase = Event.title.icontains(query, autoescape=True) | Event.tags.contains([query.casefold()])
                         score = sum(case((c, 1), else_=0) for c in conditions)
                         rows = await session.scalars(
                             select(Event)
@@ -733,8 +729,8 @@ class Research(ResearchTools):
                         ]
                     else:
                         # Retain the phrase in addition to the bounded search terms.
-                        condition, score = package_matching([query, *terms[:6]], vocabulary)
-                        phrase, _ = package_matching([query], vocabulary)
+                        condition, score = package_matching([query, *terms[:6]])
+                        phrase, _ = package_matching([query])
                         rows = await session.execute(
                             select(Package, NewsItem.content_hash, NewsItem.title)
                             .join(NewsItem)
@@ -908,8 +904,7 @@ async def process_event(identifier, config, force=False):
             version.input = payload
             researcher.register_members(payload)
             provider, skill, rules = await model_config(session, config, "research")
-            researcher.vocabulary = await vocab.snapshot(session)
-            version.rules = {**rules, "vocabulary": researcher.vocabulary}
+            version.rules = rules
             await session.commit()
             previous = await session.scalar(
                 select(Version)

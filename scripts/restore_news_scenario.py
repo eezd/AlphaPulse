@@ -87,13 +87,8 @@ async def restore(args):
     config = await initialize(credentials)
     async with SessionLocal() as session:
         await session.execute(NewsItem.__table__.insert(), [values(NewsItem, row) for row in originals])
-        # Foreign keys require parents to be restored first; vocabulary was frozen by initialize.
-        from alphapulse.news_research.models import Package, Event, Membership, Attempt, Version, Reference, VocabularyVersion
-        # Compare content/revision, since the new row has a different creation time.
-        old = [(r['revision'], r['entries']) for r in tables[VocabularyVersion.__tablename__]]
-        new = [(r['revision'], r['entries']) for r in await _vocabulary(session)]
-        if old != new:
-            raise ValueError('恢复词库与冻结词库不一致')
+        # Foreign keys require parents to be restored first.
+        from alphapulse.news_research.models import Package, Event, Membership, Attempt, Version, Reference
         for model in (Package, Event, Membership, Attempt, Version, Reference):
             rows = tables[model.__tablename__]
             if rows:
@@ -113,10 +108,6 @@ async def restore(args):
     save(args.output / 'state.json', state)
     print(json.dumps({'restored_news': len(originals), 'next_batch': batch, 'requests_new': count, 'model_calls': 0}))
 
-
-async def _vocabulary(session):
-    from alphapulse.news_research.models import VocabularyVersion
-    return [{'revision': v.revision, 'entries': v.entries} for v in await session.scalars(select(VocabularyVersion))]
 
 
 if __name__ == '__main__':

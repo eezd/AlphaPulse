@@ -1,81 +1,9 @@
-"""Vocabulary and fixed-version behavior, isolated from production I/O."""
+"""Fixed-version and evidence behavior, isolated from production I/O."""
 
 import asyncio
 from types import SimpleNamespace as N
 from unittest.mock import AsyncMock
 import pytest
-
-
-def test_equivalence_preserves_literal_aliases_and_quotes(trading):
-    from alphapulse.news_research.vocabulary import normalize, expand, VocabularyInput
-
-    data = VocabularyInput(
-        base_revision=0, entries=[{"canonical": "币安", "aliases": ["Binance"]}]
-    )
-    snapshot = {"revision": 1, "entries": [e.model_dump() for e in data.entries]}
-    original = [
-        {
-            "canonical": "Binance交易所",
-            "aliases": ["Binance"],
-            "quote": "Binance reported",
-        }
-    ]
-    assert normalize(original, snapshot) == [{**original[0], "canonical": "币安"}]
-    assert original[0]["canonical"] == "Binance交易所"
-    assert expand([" BINANCE "], snapshot) == ["币安", "binance"]
-    assert expand(["Bank of Canada"], snapshot) == ["bank of canada"]
-
-
-@pytest.mark.parametrize(
-    "entries",
-    [
-        [{"canonical": " ", "aliases": []}],
-        [{"canonical": "币安", "aliases": ["Binance", "BINANCE"]}],
-        [
-            {"canonical": "币安", "aliases": ["Binance"]},
-            {"canonical": "别家", "aliases": ["binance"]},
-        ],
-        [{"canonical": "币安", "aliases": []}, {"canonical": "币安", "aliases": []}],
-    ],
-)
-def test_reject_ambiguous_or_empty_vocabulary(trading, entries):
-    from alphapulse.news_research.vocabulary import VocabularyInput
-
-    with pytest.raises(ValueError):
-        VocabularyInput(base_revision=0, entries=entries)
-
-
-def test_merging_tags_never_invents_literal_alias(trading):
-    from alphapulse.news_research.vocabulary import normalize
-
-    snapshot = {"entries": [{"canonical": "币安", "aliases": ["Binance"]}]}
-    result = normalize(
-        [
-            {"canonical": c, "aliases": [a], "quote": a}
-            for c, a in [("币安", "币安"), ("Binance", "Binance")]
-        ],
-        snapshot,
-    )
-    assert len(result) == 1 and result[0]["aliases"] == ["币安", "Binance"]
-
-
-def test_stale_vocabulary_save_conflicts_without_writing(trading, monkeypatch):
-    from fastapi import HTTPException
-    from alphapulse.news_research import api
-
-    monkeypatch.setattr(
-        api.vocab, "snapshot", AsyncMock(return_value={"revision": 2, "entries": []})
-    )
-    session = N(execute=AsyncMock(), add=AsyncMock(), commit=AsyncMock())
-    with pytest.raises(HTTPException) as error:
-        asyncio.run(
-            api.save_vocabulary(
-                api.vocab.VocabularyInput(base_revision=1, entries=[]), session
-            )
-        )
-    assert error.value.status_code == 409
-    session.add.assert_not_called()
-    session.commit.assert_not_called()
 
 
 @pytest.mark.parametrize(

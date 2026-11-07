@@ -36,7 +36,7 @@ async def protected_records(connection):
     tables = list(await connection.scalars(text("""
         SELECT tablename FROM pg_tables WHERE schemaname='public' AND
         (tablename IN ('ai_providers','skill_nodes','skill_versions',
-         'news_research_vocabulary_versions','chat_sessions','chat_messages','context_versions')
+         'chat_sessions','chat_messages','context_versions')
          OR starts_with(tablename, 'trading_')) ORDER BY tablename
     """)))
     quote = connection.dialect.identifier_preparer.quote

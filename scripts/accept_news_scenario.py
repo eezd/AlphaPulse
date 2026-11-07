@@ -17,10 +17,10 @@ from alphapulse.core.db import SessionLocal, engine
 from alphapulse.models import AiProvider, NewsItem, SkillNode
 from alphapulse.news_research import service
 from alphapulse.news_research.contracts import INDEX_ASSIGN_SKILL, RESEARCH_SKILL
-from alphapulse.news_research.models import Package, Attempt, Event, Version, Membership, Reference, VocabularyVersion
+from alphapulse.news_research.models import Package, Attempt, Event, Version, Membership, Reference
 from accept_news_research import Budget
 
-MODELS = (Package, Attempt, Event, Version, Membership, Reference, VocabularyVersion)
+MODELS = (Package, Attempt, Event, Version, Membership, Reference)
 
 
 def digest(value):
@@ -84,7 +84,6 @@ async def initialize(credentials):
             skill.published_version_id = version.id
             config[stage] = {'provider_id': provider.id, 'model': 'gpt-6.1-terra',
                 'reasoning_effort': 'medium' if stage == 'index' else 'xhigh', 'skill_id': skill.id}
-        session.add(VocabularyVersion(revision=1, entries=[{'canonical': '币安', 'aliases': ['Binance']}]))
         await session.commit()
     return config
 
@@ -191,9 +190,6 @@ async def _run(args):
             actual['api_key'] = decrypt(provider.api_key_encrypted)
             if actual != credentials[stage]:
                 raise ValueError('隔离模型连接配置与冻结配置不一致')
-        vocabulary = list(await session.scalars(select(VocabularyVersion)))
-        if len(vocabulary) != 1 or vocabulary[0].revision != 1 or vocabulary[0].entries != [{'canonical': '币安', 'aliases': ['Binance']}]:
-            raise ValueError('冻结词库已变化')
         allowed = {i for batch in manifest['batches'][:state['batch'] + 1] for i in batch}
         originals = {n['id']: n for n in manifest['news']}
         for row in await session.scalars(select(NewsItem)):

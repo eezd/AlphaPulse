@@ -233,7 +233,7 @@ async def main():
                     "SELECT count(*) FROM information_schema.tables WHERE table_name LIKE 'news_research_%'"
                 )
             )
-            == 11
+            == 10
         )
     # Exercise actual routes and published-Skill resolution against isolated storage.
     import httpx
@@ -249,6 +249,8 @@ async def main():
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app), base_url="http://ci"
     ) as client:
+        assert (await client.get("/api/risk/tag-vocabulary")).status_code == 404
+        assert (await client.put("/api/risk/tag-vocabulary", json={"base_revision": 0, "entries": []})).status_code == 404
         assert (await client.get("/api/risk/events?page=0")).status_code == 422
         assert (await client.get("/api/risk/packages/2147483647")).status_code == 404
         assert (
@@ -621,7 +623,7 @@ async def main():
     await phrase_search_regressions()
     await event_search_regressions()
     await compound_candidate_regressions()
-    await vocabulary_regressions()
+    await keyword_recall_regressions()
     await retrieval_revision_regressions()
     await membership_tag_regressions()
     await research_scope_regressions()
@@ -1078,22 +1080,19 @@ async def compound_candidate_regressions():
     print("Compound-alias candidate recall, whole-token boundaries, ranking and sixty-result cap passed.")
 
 
-async def vocabulary_regressions():
+async def keyword_recall_regressions():
     from alphapulse.news_research import api
     now = datetime.now(UTC)
-    # Vocabulary changes affect recall without rewriting prior evidence or paid work.
-    from alphapulse.news_research import vocabulary as vocab
+    # Package TAGs and literal aliases recall historical evidence without paid work.
     from alphapulse.news_research.models import Reference
     async with SessionLocal() as session:
-        saved = await api.save_vocabulary(vocab.VocabularyInput(base_revision=0, entries=[{"canonical": "币安", "aliases": ["Binance"]}]), session)
-        assert saved.data["revision"] == 1
         old = Event(title="Historical incident A", tags=["binance", "incident-a"], revision=1, state="done", updated_at=now-timedelta(days=400))
         session.add(old)
         session.add_all([Event(title=f"Unrelated subject occurrence {i}", tags=["binance"], revision=1, state="done") for i in range(65)])
-        story = NewsItem(source_code="wscn_news", external_id=f"ci-vocab-{now.timestamp()}", title="Original evidence", content_text="Binance incident-a", content_hash="f"*64, published_at=now-timedelta(days=400), url="https://example.invalid/vocab")
+        story = NewsItem(source_code="wscn_news", external_id=f"ci-keyword-{now.timestamp()}", title="Original evidence", content_text="Binance incident-a", content_hash="f"*64, published_at=now-timedelta(days=400), url="https://example.invalid/keyword")
         session.add(story)
         await session.flush()
-        package = Package(news_id=story.id, content_hash=story.content_hash, state="done", keywords=[{"canonical": "Binance", "aliases": ["Binance"], "quote": "Binance incident-a"}])
+        package = Package(news_id=story.id, content_hash=story.content_hash, state="done", keywords=[{"canonical": "币安", "aliases": ["Binance"], "quote": "Binance incident-a"}])
         session.add(package)
         await session.flush()
         frozen = service.article(story)
@@ -1104,10 +1103,9 @@ async def vocabulary_regressions():
         assert (await service.candidates(session, keys))[0].id == old.id
         rows = await api.packages(session, q="币安", page=1)
         assert package.id in {row["id"] for row in rows.data["items"]}
-        await api.save_vocabulary(vocab.VocabularyInput(base_revision=1, entries=[{"canonical": "币安", "aliases": ["Binance", "BNC"]}]), session)
-        rows = await api.packages(session, q=" BNC ", page=1)
+        rows = await api.packages(session, q=" BINANCE ", page=1)
         assert package.id in {row["id"] for row in rows.data["items"]}
-        assert package.keywords[0]["canonical"] == "Binance"
+        assert package.keywords[0]["aliases"] == ["Binance"]
         snapshot = await api.event_version(old.id, target.id, session)
         assert snapshot.data["articles"][0]["content"] == "Binance incident-a"
         consumers = []
@@ -1132,13 +1130,13 @@ async def vocabulary_regressions():
         assert (await api.event_version(old.id, target.id, session)).data["articles"][0]["content"] == "Binance incident-a"
         assert (await session.get(Package, package.id)).state == "done"
         old_id = old.id
-    results = await service.Research(event={"id": 0}).tool("search_events", {"query": "BNC", "keywords": ["incident-a"]})
+    results = await service.Research(event={"id": 0}).tool("search_events", {"query": "Binance", "keywords": ["incident-a"]})
     assert results[0]["id"] == old_id
-    print("Vocabulary API, cross-year recall above 60 distractors, alias updates and two immutable references passed.")
+    print("Package TAG/alias recall above 60 cross-year distractors and two immutable references passed.")
 
 
 async def retrieval_revision_regressions():
-    from alphapulse.news_research import api, vocabulary as vocab
+    from alphapulse.news_research import api
 
     now = datetime.now(UTC)
     async with SessionLocal() as session:
@@ -1175,30 +1173,31 @@ async def retrieval_revision_regressions():
         package = await session.get(Package, package_id)
         package.content_hash = "8" * 64
         package.keywords = [{"canonical": "Binance", "aliases": ["Binance"], "quote": "Binance"}]
-        current = await vocab.snapshot(session)
-        before = {"revision": current["revision"], "entries": current["entries"]}
-        entries = [{**e, "aliases": [*e["aliases"], "BNC-reviewed"]} if e["canonical"] == "币安" else e for e in current["entries"]]
-        await api.save_vocabulary(vocab.VocabularyInput(base_revision=current["revision"], entries=entries), session)
-        after = await vocab.snapshot(session)
-        event = Event(title="Reviewed independent incident", tags=["binance"])
+        event = Event(title="Independent incident", tags=["binance"])
         session.add(event)
         await session.commit()
         event_id = event.id
     for tool, target in (("search_packages", package_id), ("search_events", event_id)):
-        args = {"query": "BNC-reviewed", "keywords": []}
+        args = {"query": "fresh-retrieval-term", "keywords": []}
         prior = service.Research(event={"id": 0})
-        prior.vocabulary = before
         assert await prior.tool(tool, args) == []
+        async with SessionLocal() as session:
+            if tool == "search_packages":
+                package = await session.get(Package, package_id)
+                package.keywords = [{"canonical": "fresh-retrieval-term", "aliases": ["Binance"], "quote": "Binance"}]
+            else:
+                event = await session.get(Event, event_id)
+                event.tags = ["binance", "fresh-retrieval-term"]
+            await session.commit()
         retry = service.Research(event={"id": 0})
-        retry.vocabulary = after
         retry.restore(prior.records)
         rows = await retry.tool(tool, args)
         assert target in {row["id"] for row in rows}
         assert len(retry.records) == 1 and not retry.records[0].get("reused")
     async with SessionLocal() as session:
-        fresh = await api.packages(session, q="BNC-reviewed", page=1)
+        fresh = await api.packages(session, q="fresh-retrieval-term", page=1)
         assert package_id in {row["id"] for row in fresh.data["items"]}
-    print("Stale TAG exclusion, current-title lookup and vocabulary retry refresh passed.")
+    print("Stale TAG exclusion, current-title lookup and fresh-data retry searches passed.")
 
 
 async def membership_tag_regressions():

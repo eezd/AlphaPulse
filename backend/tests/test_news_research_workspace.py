@@ -211,7 +211,7 @@ def test_retry_reuses_original_snapshots_and_keeps_the_evidence_auditable(tradin
 
 @pytest.mark.parametrize("tool", ["search_packages", "search_events"])
 @pytest.mark.parametrize("cached", [[], [{"id": 1}]])
-def test_retry_refreshes_local_search_with_current_vocabulary(
+def test_retry_refreshes_local_search_with_current_data(
     trading, monkeypatch, tool, cached
 ):
     import asyncio
@@ -226,11 +226,7 @@ def test_retry_refreshes_local_search_with_current_vocabulary(
     session.scalars.return_value = [N(id=2, title="Fresh event", tags=["binance"])]
     monkeypatch.setattr(service, "SessionLocal", lambda: session)
     reader = service.Research(event={"id": 8})
-    reader.vocabulary = {
-        "revision": 2,
-        "entries": [{"canonical": "币安", "aliases": ["Binance", "BNC"]}],
-    }
-    arguments = {"query": "BNC", "keywords": []}
+    arguments = {"query": "Binance", "keywords": []}
     reader.restore([{"tool": tool, "arguments": arguments, "result": cached}])
 
     result = asyncio.run(reader.tool(tool, arguments))
@@ -689,7 +685,6 @@ def test_long_event_compaction_uses_final_research_context(trading, monkeypatch,
     session.rollback = AsyncMock()
     monkeypatch.setattr(service, "SessionLocal", lambda: session)
     monkeypatch.setattr(service, "model_config", AsyncMock(return_value=(provider, skill, {})))
-    monkeypatch.setattr(service.vocab, "snapshot", AsyncMock(return_value={}))
     extract = AsyncMock(return_value=(extracts, []))
     monkeypatch.setattr(service, "extract_articles", extract)
     # Quote and timeline validation are independent of this context-budget regression.
@@ -790,7 +785,6 @@ def test_quote_adjustment_audit_survives_validation_and_publication_failures(tra
     monkeypatch.setattr(service, "SessionLocal", lambda: session)
     monkeypatch.setattr(service, "model_config", AsyncMock(return_value=(
         N(max_tokens=32000, context_window=250000), "研究规则", {"system_prompt": "研究规则"})))
-    monkeypatch.setattr(service.vocab, "snapshot", AsyncMock(return_value={}))
     monkeypatch.setattr(service.Research, "run", AsyncMock(return_value=(output, {"input_tokens": 10})))
 
     asyncio.run(service.process_event(1, {}))
@@ -844,7 +838,6 @@ def test_alias_adjustment_audit_survives_index_failures(trading, monkeypatch, fa
     session.execute = AsyncMock()
     session.scalar = AsyncMock(return_value=None)
     monkeypatch.setattr(service, "SessionLocal", lambda: session)
-    monkeypatch.setattr(service.vocab, "snapshot", AsyncMock(return_value={"entries": []}))
     monkeypatch.setattr(service, "model_config", AsyncMock(return_value=(None, "索引规则", {})))
     monkeypatch.setattr(service, "complete", AsyncMock(return_value=(output, {"input_tokens": 10})))
 
