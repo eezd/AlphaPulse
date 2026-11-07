@@ -34,7 +34,7 @@ const time = (value?: number) => value ? new Date(value).toLocaleTimeString("zh-
       </el-tag>
     </div>
     <div v-if="market === 'um'" class="quote-funding">
-      <span v-if="markStale || !connected" class="text-amber-600">资金数据未就绪或已过期</span>
+      <span v-if="markStale || !connected" class="quote-warning">资金数据未就绪或已过期</span>
       <span>资金费率 {{ mark.funding_rate ? `${(+mark.funding_rate * 100).toFixed(4)}%` : '—' }}</span><span>标记 {{ mark.mark_price || '—' }}</span><span>指数 {{ mark.index_price || '—' }}</span><span>距结算 {{ mark.next_funding_at ? `${Math.max(0, Math.floor((mark.next_funding_at - now) / 60000))} 分钟` : '—' }}</span>
     </div>
     <el-tabs v-model="tab">
@@ -63,11 +63,22 @@ const time = (value?: number) => value ? new Date(value).toLocaleTimeString("zh-
 
 <style scoped>
 .quote-panel {
+  --el-color-primary: #f0b90b;
+  --el-color-success: #0ecb81;
+  --el-color-success-light-8: rgb(14 203 129 / 24%);
+  --el-color-success-light-9: rgb(14 203 129 / 12%);
+  --el-color-warning: #f0b90b;
+  --el-color-warning-light-8: rgb(240 185 11 / 24%);
+  --el-color-warning-light-9: rgb(240 185 11 / 12%);
+  --el-text-color-primary: #eaecef;
+  --el-text-color-secondary: #848e9c;
+  --el-border-color-light: #2b3139;
+
   width: 270px;
   flex-shrink: 0;
-  border-left: 1px solid #e2e8f0;
-  background: #fff;
-  color: #0f172a;
+  border-left: 1px solid var(--el-border-color-light);
+  background: #161a1e;
+  color: var(--el-text-color-primary);
   overflow: auto;
   padding: 10px;
   font-size: 11px;
@@ -81,7 +92,10 @@ const time = (value?: number) => value ? new Date(value).toLocaleTimeString("zh-
   display: grid;
   gap: 5px;
   margin: 12px 0;
-  color: #64748b;
+  color: var(--el-text-color-secondary);
+}
+.quote-warning {
+  color: var(--el-color-warning);
 }
 .quote-row {
   display: flex;
@@ -91,24 +105,24 @@ const time = (value?: number) => value ? new Date(value).toLocaleTimeString("zh-
   font-variant-numeric: tabular-nums;
 }
 .quote-row small {
-  color: #64748b;
+  color: var(--el-text-color-secondary);
   margin-left: 4px;
 }
 .buy {
-  color: #059669;
-  background: #f0fdf480;
+  color: var(--el-color-success);
+  background: var(--el-color-success-light-9);
 }
 .sell {
-  color: #dc2626;
-  background: #fef2f280;
+  color: #f6465d;
+  background: rgb(246 70 93 / 12%);
 }
 .muted {
-  color: #64748b;
+  color: var(--el-text-color-secondary);
 }
 .quote-mid {
   padding: 10px 4px;
-  border-block: 1px solid #e2e8f0;
-  color: #64748b;
+  border-block: 1px solid var(--el-border-color-light);
+  color: var(--el-text-color-secondary);
 }
 @media (max-width: 1023px) {
   .quote-panel {
@@ -123,7 +137,7 @@ const time = (value?: number) => value ? new Date(value).toLocaleTimeString("zh-
     bottom: 0;
     width: min(320px, 90%);
     z-index: 5;
-    box-shadow: -8px 0 20px #0f172a15;
+    box-shadow: -8px 0 20px rgb(0 0 0 / 35%);
   }
   .quote-panel.mobile-hidden {
     display: none;
