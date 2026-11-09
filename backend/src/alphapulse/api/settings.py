@@ -1,13 +1,12 @@
-"""环境变量页：模型接入配置、交易所模拟盘 key。密钥只写不读，接口只返回末 4 位"""
+"""环境变量页：模型接入配置。密钥只写不读，接口只返回末 4 位"""
 
 import time
 from datetime import datetime
-from decimal import Decimal
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field, HttpUrl, StringConstraints, model_validator
-from sqlalchemy import func, select, update
+from pydantic import BaseModel, Field, HttpUrl, StringConstraints
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,10 +15,7 @@ from alphapulse.ai import llm
 from alphapulse.core.auth import require_admin
 from alphapulse.core.crypto import encrypt
 from alphapulse.core.db import get_session
-from alphapulse.core.redis import redis
-from alphapulse.models import AiProvider, TradingAccount, TradingAnalysis, TradingCredential, TradingSymbol
-from alphapulse.trading.client import ExchangeError, create_client
-from alphapulse.trading.snapshot import STATUS_KEY
+from alphapulse.models import AiProvider
 
 router = APIRouter(prefix="/api/settings", tags=["settings"], dependencies=[Depends(require_admin)])
 
@@ -27,7 +23,6 @@ Protocol = Literal["openai", "anthropic"]
 # 从页面粘贴时容易带上首尾空格，模型名带空格会被上游当成另一个模型（404）
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]
 Model = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
-ApiCredential = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
 
 
 class ProviderOut(BaseModel):
@@ -194,140 +189,3 @@ async def test_provider(provider_id: int, session: Annotated[AsyncSession, Depen
     finally:
         llm.fail_fast.reset(token)
     return success(TestResult(ok=True, elapsed_ms=round((time.monotonic() - started) * 1000), reply=completion.text[:200]))
-
-
-# ---------- 模拟盘 ----------
-
-ExchangeName = Literal["binance", "bybit"]
-
-
-class ExchangeOut(BaseModel):
-    exchange: ExchangeName
-    configured_exchanges: list[ExchangeName]
-    configured: bool
-    api_key_hint: str | None
-    running: bool
-    updated_at: datetime | None
-
-
-class ExchangeIn(BaseModel):
-    # key 和 secret 成对生效，修改时两个都要填
-    exchange: ExchangeName | None = None
-    api_key: ApiCredential | None = None
-    api_secret: ApiCredential | None = None
-
-    @model_validator(mode="after")
-    def paired_credentials(self):
-        if (self.api_key is None) != (self.api_secret is None):
-            raise ValueError("API Key 和 Secret Key 必须同时填写")
-        if self.exchange is None and self.api_key is None:
-            raise ValueError("请选择交易所或填写凭证")
-        return self
-
-
-class ExchangeTestResult(BaseModel):
-    ok: bool
-    elapsed_ms: int
-    available_usdt: str | None = None
-    wallet_usdt: str | None = None
-    # 双向持仓模式；引擎使用单向持仓，启动时会切换
-    dual_side_position: bool | None = None
-    error: str | None = None
-
-
-async def any_running(session: AsyncSession) -> bool:
-    return bool(await session.scalar(select(func.count()).where(TradingSymbol.running)))
-
-
-async def exchange_out(session: AsyncSession, account: TradingAccount | None) -> ExchangeOut:
-    exchange = account.exchange if account else "binance"
-    credential = await session.get(TradingCredential, exchange)
-    configured = list(await session.scalars(select(TradingCredential.exchange).where(TradingCredential.api_key_encrypted.is_not(None))))
-    return ExchangeOut(
-        exchange=exchange, configured_exchanges=configured,
-        configured=bool(credential and credential.api_key_encrypted), api_key_hint=credential.api_key_hint if credential else None,
-        running=await any_running(session), updated_at=credential.updated_at if credential else None,
-    )
-
-
-async def editable_account(session: AsyncSession) -> TradingAccount:
-    account = await session.get(TradingAccount, 1)
-    if await any_running(session):
-        raise HTTPException(status.HTTP_409_CONFLICT, "有币种正在交易，请先全部停止再修改交易所或 key")
-    if await session.scalar(select(func.count()).where(TradingAnalysis.status == "running")):
-        raise HTTPException(status.HTTP_409_CONFLICT, "有分析正在进行，请等待完成后再修改交易所或 key")
-    return account or TradingAccount(id=1, exchange="binance")
-
-
-async def ensure_no_positions(session: AsyncSession, exchange: str) -> None:
-    credential = await session.get(TradingCredential, exchange)
-    if credential and credential.api_key_encrypted:
-        try:
-            async with create_client(credential) as client:
-                positions = await client.positions()
-        except ExchangeError as e:
-            raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"无法确认当前交易所持仓，请稍后再试：{e}") from None
-        if any(Decimal(p["positionAmt"]) != 0 for p in positions):
-            raise HTTPException(status.HTTP_409_CONFLICT, "当前模拟账户仍有持仓，请先平仓再切换交易所或修改 key")
-
-
-@router.get("/exchange")
-async def get_exchange(session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[ExchangeOut]:
-    return success(await exchange_out(session, await session.get(TradingAccount, 1)))
-
-
-@router.put("/exchange")
-async def put_exchange(body: ExchangeIn, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[ExchangeOut]:
-    account = await editable_account(session)
-    await ensure_no_positions(session, account.exchange)
-    exchange = body.exchange or account.exchange
-    credential = None
-    if body.api_key is not None:
-        credential = await session.get(TradingCredential, exchange) or TradingCredential(exchange=exchange)
-        credential.api_key_encrypted = encrypt(body.api_key)
-        credential.api_secret_encrypted = encrypt(body.api_secret)
-        credential.api_key_hint = body.api_key[-4:]
-        session.add(credential)
-    account.exchange = exchange
-    session.add(account)
-    # 停止状态下仍可能排有手动分析；切换后不能把旧请求交给另一家交易所。
-    await session.execute(update(TradingSymbol).values(analysis_requested_at=None, analysis_reasons=[]))
-    await session.commit()
-    if credential is not None:
-        await session.refresh(credential)
-    await redis.delete(STATUS_KEY)
-    return success(await exchange_out(session, account))
-
-
-@router.delete("/exchange")
-async def delete_exchange(session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[ExchangeOut]:
-    account = await editable_account(session)
-    await ensure_no_positions(session, account.exchange)
-    credential = await session.get(TradingCredential, account.exchange)
-    if credential:
-        credential.api_key_encrypted = credential.api_secret_encrypted = credential.api_key_hint = None
-    await session.commit()
-    if credential is not None:
-        await session.refresh(credential)
-    await redis.delete(STATUS_KEY)
-    return success(await exchange_out(session, account))
-
-
-@router.post("/exchange/test")
-async def test_exchange(session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[ExchangeTestResult]:
-    account = await session.get(TradingAccount, 1)
-    credential = await session.get(TradingCredential, account.exchange) if account else None
-    if credential is None or credential.api_key_encrypted is None:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "还没有填写当前交易所的模拟盘 key")
-    started = time.monotonic()
-    try:
-        async with create_client(credential) as client:
-            info = await client.account()
-            dual = await client.position_mode()
-    except ExchangeError as e:
-        hint = "（请在所选交易所的模拟交易账户创建 key，确认合约权限及 IP 白名单；Bybit Testnet 和实盘 key 均不可用）" if e.code in (-2015, 10003, 10005, 10010) else ""
-        return success(ExchangeTestResult(ok=False, elapsed_ms=round((time.monotonic() - started) * 1000), error=f"{e}{hint}"))
-    return success(ExchangeTestResult(
-        ok=True, elapsed_ms=round((time.monotonic() - started) * 1000),
-        available_usdt=info["availableBalance"], wallet_usdt=info["totalWalletBalance"], dual_side_position=dual,
-    ))

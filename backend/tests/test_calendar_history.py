@@ -161,7 +161,7 @@ def test_legacy_bls_html_encoding_and_double_dash_heading():
     assert announcement.at == datetime(2026, 1, 9, 13, 30, tzinfo=UTC)
 
 
-def test_official_missing_cpi_monthly_is_not_zero_or_two_month_change(trading):
+def test_official_missing_cpi_monthly_is_not_zero_or_two_month_change(app_env):
     from pathlib import Path
     from alphapulse.calendar.parsers import parse_values
     from alphapulse.calendar.service import release_rows
@@ -186,7 +186,7 @@ def test_official_missing_cpi_monthly_is_not_zero_or_two_month_change(trading):
     assert "两个月" in mom["explanation"] and mom["impact"] == "uncertain"
 
 
-def test_archive_discovery_uses_real_links_and_excludes_state_gdp(trading):
+def test_archive_discovery_uses_real_links_and_excludes_state_gdp(app_env):
     from alphapulse.calendar.backfill import archive_links
     body = """<a href="/news/2025/pce">Personal Income and Outlays, December 2024</a>
     <a href="/news/2025/state">Gross Domestic Product by State, 2025</a>
@@ -197,7 +197,7 @@ def test_archive_discovery_uses_real_links_and_excludes_state_gdp(trading):
     assert following == "https://www.bea.gov/news/archive?page=1"
 
 
-def test_result_cannot_cross_period_or_stage_and_does_not_change_first_arrival(trading):
+def test_result_cannot_cross_period_or_stage_and_does_not_change_first_arrival(app_env):
     from alphapulse.calendar.service import save_result
     row = SimpleNamespace(period="2025-07", stage="preliminary", values={})
     with pytest.raises(ValueError, match="统计期或发布阶段"):
@@ -205,7 +205,7 @@ def test_result_cannot_cross_period_or_stage_and_does_not_change_first_arrival(t
     assert row.values == {}
 
 
-def test_umich_poll_waits_for_final_instead_of_reusing_preliminary(trading):
+def test_umich_poll_waits_for_final_instead_of_reusing_preliminary(app_env):
     import httpx
     from unittest.mock import AsyncMock
     from alphapulse.calendar.worker import CalendarWorker
@@ -232,7 +232,7 @@ def test_umich_poll_waits_for_final_instead_of_reusing_preliminary(trading):
 @pytest.mark.parametrize("limited_path,status", [("/news.release/cpi_02122025.htm", 429),
                                                 ("/news.release/cpi_02122025.htm", 503),
                                                 ("/bls/news-release/cpi.htm", 429)])
-def test_archive_limit_stops_entire_source_preserves_documents_and_continues_other_source(trading, monkeypatch, limited_path, status):
+def test_archive_limit_stops_entire_source_preserves_documents_and_continues_other_source(app_env, monkeypatch, limited_path, status):
     import httpx
     from unittest.mock import AsyncMock
     from alphapulse.calendar import backfill
@@ -267,7 +267,7 @@ def test_archive_limit_stops_entire_source_preserves_documents_and_continues_oth
 
 
 @pytest.mark.parametrize("status", [200, 429, 503])
-def test_umich_report_fetch_skips_stored_documents_and_stops_on_rate_limit(trading, monkeypatch, status):
+def test_umich_report_fetch_skips_stored_documents_and_stops_on_rate_limit(app_env, monkeypatch, status):
     import httpx
     from unittest.mock import AsyncMock
     from alphapulse.calendar import backfill
@@ -313,7 +313,7 @@ def test_umich_report_fetch_skips_stored_documents_and_stops_on_rate_limit(tradi
 
 
 @pytest.mark.parametrize("schedule_date,valid", [("1/24/2025", True), ("1/23/2025", False)])
-def test_umich_preview_matches_report_date_to_schedule_without_writes(trading, monkeypatch, schedule_date, valid):
+def test_umich_preview_matches_report_date_to_schedule_without_writes(app_env, monkeypatch, schedule_date, valid):
     from unittest.mock import AsyncMock
     from alphapulse.calendar import backfill
 

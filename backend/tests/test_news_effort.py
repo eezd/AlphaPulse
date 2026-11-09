@@ -7,7 +7,7 @@ import pytest
 @pytest.mark.parametrize('stage', ['index', 'assign', 'research'])
 @pytest.mark.parametrize('selected', [None, 'low', 'medium', 'high', 'xhigh', 'max'])
 @pytest.mark.parametrize('inherited', [None, 'medium'])
-def test_stage_effort_isolated(trading, stage, selected, inherited):
+def test_stage_effort_isolated(app_env, stage, selected, inherited):
     from alphapulse.models import AiProvider, SkillNode
     from alphapulse.news_research.service import model_config
     from alphapulse.news_research.contracts import task_skill
@@ -36,7 +36,7 @@ def test_stage_effort_isolated(trading, stage, selected, inherited):
 
 
 @pytest.mark.parametrize('stage', ['index', 'research'])
-def test_effort_validation_and_default(trading, stage):
+def test_effort_validation_and_default(app_env, stage):
     from pydantic import ValidationError
     from alphapulse.news_research.api import ModelConfig
     config = {'provider_id': 1, 'model': stage, 'skill_id': 1}
@@ -45,7 +45,7 @@ def test_effort_validation_and_default(trading, stage):
 
 
 @pytest.mark.parametrize('scope,enabled,published', [('shared', True, 1), ('news', False, 1), ('news', True, None)])
-def test_unpublished_disabled_and_shared_skills_never_reach_model(trading, scope, enabled, published):
+def test_unpublished_disabled_and_shared_skills_never_reach_model(app_env, scope, enabled, published):
     from alphapulse.models import AiProvider, SkillNode
     from alphapulse.news_research.service import model_config
     class Session:

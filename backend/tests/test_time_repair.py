@@ -13,7 +13,7 @@ class Result(BaseModel):
 
 
 @pytest.mark.parametrize('outcome', ['success', 'invalid', 'query', 'truncated', 'context'])
-def test_time_repair_is_bounded_and_accounts_for_calls(trading, monkeypatch, outcome):
+def test_time_repair_is_bounded_and_accounts_for_calls(app_env, monkeypatch, outcome):
     from alphapulse.news_research import model as service
     from alphapulse.ai.llm import Completion
     payload = {'timeline_points': [{'occurred_at': None, 'time_precision': 'day', 'time_text': '',
@@ -48,7 +48,7 @@ def test_time_repair_is_bounded_and_accounts_for_calls(trading, monkeypatch, out
         assert 'timeline_points' in calls[1][0][-1]['result']
 
 
-def test_unrelated_validation_does_not_retry(trading, monkeypatch):
+def test_unrelated_validation_does_not_retry(app_env, monkeypatch):
     from alphapulse.news_research import model as service
     from alphapulse.ai.llm import Completion
     calls = []
@@ -62,7 +62,7 @@ def test_unrelated_validation_does_not_retry(trading, monkeypatch):
     assert len(calls) == 1
 
 
-def test_research_time_repair_preserves_round_budget_and_thinking(trading, monkeypatch):
+def test_research_time_repair_preserves_round_budget_and_thinking(app_env, monkeypatch):
     from alphapulse.news_research import model as service
     from alphapulse.news_research.tools import Research
     from alphapulse.ai.llm import Completion
@@ -98,7 +98,7 @@ def usage_tokens(usage):
 
 
 @pytest.mark.parametrize('failure', ['second_call', 'evidence'])
-def test_extraction_failure_keeps_completed_and_failed_call_usage(trading, monkeypatch, failure):
+def test_extraction_failure_keeps_completed_and_failed_call_usage(app_env, monkeypatch, failure):
     from unittest.mock import AsyncMock
     from alphapulse.news_research import pipeline, model as service
     extract = pipeline.EvidenceSelection(facts='Source', evidence_ids=[0 if failure == 'second_call' else 999])
@@ -113,7 +113,7 @@ def test_extraction_failure_keeps_completed_and_failed_call_usage(trading, monke
 
 
 @pytest.mark.parametrize('failure', ['second_call', 'evidence', 'no_shrink'])
-def test_compaction_failure_keeps_every_paid_call(trading, monkeypatch, failure):
+def test_compaction_failure_keeps_every_paid_call(app_env, monkeypatch, failure):
     from unittest.mock import AsyncMock
     from alphapulse.news_research import pipeline, model as service
     group = {'facts': 'Very long source fact ' * 50, 'evidence_refs': [{'article_id': 1, 'quote': 'Source'}]}
@@ -131,7 +131,7 @@ def test_compaction_failure_keeps_every_paid_call(trading, monkeypatch, failure)
 
 
 @pytest.mark.parametrize('error_kind', ['missing', 'extra'])
-def test_structural_repair_submits_full_result_once(trading, monkeypatch, error_kind):
+def test_structural_repair_submits_full_result_once(app_env, monkeypatch, error_kind):
     from pydantic import ConfigDict
     from alphapulse.news_research import model as service
     from alphapulse.ai.llm import Completion

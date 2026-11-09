@@ -94,7 +94,7 @@ def test_archives_only_follow_official_links_and_requested_range():
 
 
 @pytest.mark.parametrize("offset,received,expected", [(0, False, "page"), (7, False, "pending"), (-7, True, "pending"), (-7, False, "error")])
-def test_live_result_never_applies_another_week(trading, monkeypatch, offset, received, expected):
+def test_live_result_never_applies_another_week(app_env, monkeypatch, offset, received, expected):
     from alphapulse.calendar import worker as module
 
     async def run():
@@ -118,7 +118,7 @@ def test_live_result_never_applies_another_week(trading, monkeypatch, offset, re
     asyncio.run(run())
 
 
-def test_weekly_rows_show_their_own_week_and_uncertain_crypto_impact(trading):
+def test_weekly_rows_show_their_own_week_and_uncertain_crypto_impact(app_env):
     from alphapulse.calendar.service import release_rows
     announcement = dol.report(REPORT)["continued_claims"]
     row = SimpleNamespace(id=1, family="continued_claims", source="dol", title="Weekly claims",
@@ -131,7 +131,7 @@ def test_weekly_rows_show_their_own_week_and_uncertain_crypto_impact(trading):
     assert item["impact"] == "uncertain" and item["forecast"] is None
 
 
-def test_history_preview_includes_both_series_without_writing(trading, monkeypatch):
+def test_history_preview_includes_both_series_without_writing(app_env, monkeypatch):
     from alphapulse.calendar import backfill
 
     class Session:
@@ -160,7 +160,7 @@ def test_history_preview_includes_both_series_without_writing(trading, monkeypat
     save.assert_not_awaited()
 
 
-def test_archive_year_gaps_are_explicit_and_current_report_is_still_collected(trading, monkeypatch):
+def test_archive_year_gaps_are_explicit_and_current_report_is_still_collected(app_env, monkeypatch):
     from alphapulse.calendar import backfill
     requests = []
 

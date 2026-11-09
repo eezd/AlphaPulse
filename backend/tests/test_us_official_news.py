@@ -16,7 +16,7 @@ from alphapulse.crawler.content_policy import file_url
 from alphapulse.core.us_news import SOURCES, article, official_url, published, selection
 
 
-def spider(trading, source='ofac'):
+def spider(app_env, source='ofac'):
     from alphapulse.crawler.spiders.base import RunState
     from alphapulse.crawler.spiders.us_official import USOfficialSpider
     obj = USOfficialSpider(name=source)
@@ -43,11 +43,11 @@ def collection_sample(source, suffix=''):
 
 @pytest.mark.parametrize('source', ['ofac', 'sec'])
 @pytest.mark.parametrize('status', [200, 403, 429, 503])
-def test_stopped_binary_response_preserves_http_errors(trading, source, status):
+def test_stopped_binary_response_preserves_http_errors(app_env, source, status):
     from scrapy.exceptions import StopDownload
     from scrapy.http import Headers
     from alphapulse.crawler.middlewares import NewsContentPolicyMiddleware
-    obj = spider(trading, source)
+    obj = spider(app_env, source)
     obj.run.history_deadline = time.monotonic() - 1
     doc = {'url': SOURCES[source].entries[0] + '/document', 'kind': 'article'}
     obj.cursor['history']['pending'] = [doc]
@@ -76,9 +76,9 @@ def test_stopped_binary_response_preserves_http_errors(trading, source, status):
 
 
 @pytest.mark.parametrize('missing_material', [False, True])
-def test_legacy_bill_pdf_skip_does_not_hide_real_text_gaps(trading, monkeypatch, missing_material):
+def test_legacy_bill_pdf_skip_does_not_hide_real_text_gaps(app_env, monkeypatch, missing_material):
     monkeypatch.setattr('alphapulse.crawler.spiders.us_official.configuration_error', lambda _: None)
-    obj = spider(trading, 'congress')
+    obj = spider(app_env, 'congress')
     base = 'https://api.congress.gov/v3/bill/119/s/1'
     pdf = {'url': 'https://www.congress.gov/old.pdf', 'kind': 'text', 'bill': base}
     obj.cursor['history'].update(entry=len(SOURCES['congress'].entries), pending=[pdf, {'url': base, 'kind': 'bill_finish'}],
@@ -96,9 +96,9 @@ def test_legacy_bill_pdf_skip_does_not_hide_real_text_gaps(trading, monkeypatch,
         assert obj.run.stats['unresolved_bills'] == 0
 
 
-def test_decoded_pdf_error_keeps_http_failure_before_raw_storage(trading):
+def test_decoded_pdf_error_keeps_http_failure_before_raw_storage(app_env):
     from alphapulse.crawler.middlewares import RawResponseMiddleware
-    obj = spider(trading)
+    obj = spider(app_env)
     request = Request('https://ofac.treasury.gov/recent-actions/20261104')
     response = Response(request.url, status=503, body=b'%PDF error body', request=request)
     with pytest.raises(HttpError) as error:
@@ -107,8 +107,8 @@ def test_decoded_pdf_error_keeps_http_failure_before_raw_storage(trading):
     assert not request.meta.get('policy_skipped')
 
 
-def test_real_empty_register_day_continues_to_previous_day(trading):
-    obj = spider(trading, 'federal_register')
+def test_real_empty_register_day_continues_to_previous_day(app_env):
+    obj = spider(app_env, 'federal_register')
     obj.cursor['realtime']['day'] = '2026-11-05'
     sample = collection_sample('federal_register')
     request, = obj.parse_listing(response(sample['url'], sample['body'], lane='realtime'))
@@ -117,8 +117,8 @@ def test_real_empty_register_day_continues_to_previous_day(trading):
 
 
 @pytest.mark.parametrize('recent', [False, True])
-def test_register_completed_body_checkpoint_matches_discovery_after_restart(trading, recent):
-    obj = spider(trading, 'federal_register')
+def test_register_completed_body_checkpoint_matches_discovery_after_restart(app_env, recent):
+    obj = spider(app_env, 'federal_register')
     body = 'https://www.federalregister.gov/documents/full_text/html/2026/11/03/2026-22248.html'
     metadata = 'https://www.federalregister.gov/api/v1/documents/2026-22248.json'
     obj.cursor['checked'] = {body: (obj.run.started_at - timedelta(hours=1 if recent else 25)).timestamp()}
@@ -128,8 +128,8 @@ def test_register_completed_body_checkpoint_matches_discovery_after_restart(trad
     assert any(r.url == metadata for r in requests) is not recent
 
 
-def test_register_completes_after_text_without_pdf(trading, monkeypatch):
-    obj = spider(trading, 'federal_register')
+def test_register_completes_after_text_without_pdf(app_env, monkeypatch):
+    obj = spider(app_env, 'federal_register')
     obj.run.history_deadline = time.monotonic() - 1
     doc = {'url': 'https://www.federalregister.gov/body', 'kind': 'text', 'title': 'Digital asset rule', 'at': '2026-11-03', 'pdf': 'https://www.govinfo.gov/a.pdf', 'metadata_url': 'https://www.federalregister.gov/metadata'}
     obj.cursor['history']['pending'] = [doc]
@@ -143,15 +143,15 @@ def test_register_completes_after_text_without_pdf(trading, monkeypatch):
 
 
 @pytest.mark.parametrize('data', [{'count': 2}, {'count': '0', 'description': 'x'}, {'count': 0}, {'count': 0, 'description': 'x', 'results': None}])
-def test_register_does_not_hide_malformed_responses(trading, data):
-    obj = spider(trading, 'federal_register')
+def test_register_does_not_hide_malformed_responses(app_env, data):
+    obj = spider(app_env, 'federal_register')
     with pytest.raises(ValueError, match='列表结构'):
         list(obj.parse_listing(response(SOURCES[obj.name].entries[0], json.dumps(data), lane='realtime')))
 
 
 @pytest.mark.parametrize('source', ['treasury', 'cftc', 'fincen', 'whitehouse'])
-def test_real_realtime_lists_filter_dated_old_documents(trading, source):
-    obj = spider(trading, source)
+def test_real_realtime_lists_filter_dated_old_documents(app_env, source):
+    obj = spider(app_env, source)
     sample = collection_sample(source, '/press-releases' if source == 'fincen' else '')
     # All sample pages precede January 2027; no old body should be requested.
     obj.run.cutoff = datetime(2027, 1, 1, tzinfo=UTC)
@@ -161,8 +161,8 @@ def test_real_realtime_lists_filter_dated_old_documents(trading, source):
     assert all(not r.meta.get('document') for r in requests)
 
 
-def test_treasury_real_realtime_stops_at_date_boundary_before_broken_pagination(trading):
-    obj = spider(trading, 'treasury')
+def test_treasury_real_realtime_stops_at_date_boundary_before_broken_pagination(app_env):
+    obj = spider(app_env, 'treasury')
     sample = collection_sample('treasury')
     obj.cursor['realtime']['page'] = sample['url']
     requests = list(obj.parse_listing(response(sample['url'], sample['body'], lane='realtime')))
@@ -175,8 +175,8 @@ def test_treasury_real_realtime_stops_at_date_boundary_before_broken_pagination(
 
 
 @pytest.mark.parametrize('suffix', ['/news/enforcement-actions', '/resources/advisoriesbulletinsfact-sheets'])
-def test_fincen_real_pdf_tables_finish_outside_realtime_window(trading, suffix):
-    obj = spider(trading, 'fincen')
+def test_fincen_real_pdf_tables_finish_outside_realtime_window(app_env, suffix):
+    obj = spider(app_env, 'fincen')
     sample = collection_sample('fincen', suffix)
     obj.cursor['realtime']['entry'] = SOURCES['fincen'].entries.index(sample['url'])
     requests = list(obj.parse_listing(response(sample['url'], sample['body'], lane='realtime')))
@@ -186,8 +186,8 @@ def test_fincen_real_pdf_tables_finish_outside_realtime_window(trading, suffix):
 
 
 @pytest.mark.parametrize('suffix,title', [('/news/enforcement-actions', 'Bank of America'), ('/resources/advisoriesbulletinsfact-sheets', 'Foreign-Agent-Directed')])
-def test_fincen_pdf_tables_skip_files_and_continue_history(trading, suffix, title):
-    obj = spider(trading, 'fincen')
+def test_fincen_pdf_tables_skip_files_and_continue_history(app_env, suffix, title):
+    obj = spider(app_env, 'fincen')
     sample = collection_sample('fincen', suffix)
     output = list(obj.parse_listing(response(sample['url'], sample['body'], lane='history')))
     assert all(not file_url(r.url) for r in output if isinstance(r, Request))
@@ -195,8 +195,8 @@ def test_fincen_pdf_tables_skip_files_and_continue_history(trading, suffix, titl
 
 
 
-def test_fincen_direct_pdf_is_skipped(trading, monkeypatch):
-    obj = spider(trading, 'fincen')
+def test_fincen_direct_pdf_is_skipped(app_env, monkeypatch):
+    obj = spider(app_env, 'fincen')
     obj.run.history_deadline = time.monotonic() - 1
     doc = {'url': 'https://www.fincen.gov/system/files/report.pdf', 'kind': 'article', 'format': 'pdf'}
     obj.cursor['history']['pending'] = [doc]
@@ -208,8 +208,8 @@ def test_fincen_direct_pdf_is_skipped(trading, monkeypatch):
 
 
 
-def test_fincen_pdf_error_response_is_still_policy_skipped(trading):
-    obj = spider(trading, 'fincen')
+def test_fincen_pdf_error_response_is_still_policy_skipped(app_env):
+    obj = spider(app_env, 'fincen')
     obj.run.history_deadline = time.monotonic() - 1
     doc = {'url': 'https://www.fincen.gov/system/files/report.pdf', 'kind': 'article', 'format': 'pdf'}
     obj.cursor['history']['pending'] = [doc]
@@ -221,32 +221,32 @@ def test_fincen_pdf_error_response_is_still_policy_skipped(trading):
 
 
 
-def test_fincen_pdf_table_missing_date_fails_explicitly(trading):
-    obj = spider(trading, 'fincen')
+def test_fincen_pdf_table_missing_date_fails_explicitly(app_env):
+    obj = spider(app_env, 'fincen')
     body = '<main><h1>Actions</h1><table><tr><td><a href="/system/files/order.pdf">Consent order</a></td><td></td></tr></table></main>'
     output = list(obj.parse_listing(response(SOURCES['fincen'].entries[1], body, lane='realtime')))
     assert all(not file_url(r.url) for r in output)
     assert not obj.run.errors
 
 
-def test_fincen_pdf_table_does_not_invent_day_for_current_month(trading):
-    obj = spider(trading, 'fincen')
+def test_fincen_pdf_table_does_not_invent_day_for_current_month(app_env):
+    obj = spider(app_env, 'fincen')
     body = '<main><h1>Actions</h1><table><tr><td><a href="/system/files/order.pdf">Consent order</a></td><td>11/2026</td></tr></table></main>'
     output = list(obj.parse_listing(response(SOURCES['fincen'].entries[1], body, lane='realtime')))
     assert all(not file_url(r.url) for r in output)
     assert not obj.run.errors
 
 
-def test_cftc_commissioner_index_is_not_a_speech(trading):
-    obj = spider(trading, 'cftc')
+def test_cftc_commissioner_index_is_not_a_speech(app_env):
+    obj = spider(app_env, 'cftc')
     body = '<main><h1>Speeches</h1><a href="/PressRoom/SpeechesTestimony/MichaelSelig/index.htm">Commissioner</a><a href="/PressRoom/SpeechesTestimony/opaselig1">Speech</a></main>'
     request, = obj.parse_listing(response(SOURCES['cftc'].entries[1], body, lane='realtime'))
     assert request.url.endswith('/opaselig1')
     assert len(obj.cursor['realtime']['pending']) == 1
 
 
-def test_cftc_drops_only_confirmed_profile_gaps_from_old_cursor(trading):
-    obj = spider(trading, 'cftc')
+def test_cftc_drops_only_confirmed_profile_gaps_from_old_cursor(app_env):
+    obj = spider(app_env, 'cftc')
     profile = {'url': 'https://www.cftc.gov/PressRoom/SpeechesTestimony/MichaelSelig/index.htm', 'kind': 'article'}
     speech = {'url': 'https://www.cftc.gov/PressRoom/SpeechesTestimony/opaselig1', 'kind': 'article'}
     obj.cursor['realtime']['pending'] = [profile, speech]
@@ -257,8 +257,8 @@ def test_cftc_drops_only_confirmed_profile_gaps_from_old_cursor(trading):
     assert all(d['url'] != profile['url'] for d in obj.cursor['realtime'].get('pending', []))
 
 
-def test_undated_or_unordered_lists_do_not_stop_early(trading):
-    obj = spider(trading, 'treasury')
+def test_undated_or_unordered_lists_do_not_stop_early(app_env):
+    obj = spider(app_env, 'treasury')
     url = SOURCES[obj.name].entries[0]
     body = '<h1>News</h1><div><time datetime="2025-01-01"></time><h3><a href="/news/press-releases/sb0001">Old</a></h3></div><a href="/news/press-releases/sb0002">Undated</a><a rel="next" href="?page=2">Next</a>'
     list(obj.parse_listing(response(url, body, lane='realtime')))
@@ -266,8 +266,8 @@ def test_undated_or_unordered_lists_do_not_stop_early(trading):
     assert obj.cursor['realtime']['pending'][0]['url'].endswith('sb0002')
 
 
-def test_failed_document_does_not_block_next_document_or_retry_immediately(trading):
-    obj = spider(trading, 'doj')
+def test_failed_document_does_not_block_next_document_or_retry_immediately(app_env):
+    obj = spider(app_env, 'doj')
     docs = [{'url': f'https://www.justice.gov/api/v1/press_releases/{uuid.uuid4()}.json', 'kind': 'doj'} for _ in range(2)]
     obj.cursor['realtime']['pending'] = copy.deepcopy(docs)
     request = Request(docs[0]['url'], meta={'document': docs[0], 'lane': 'realtime'})
@@ -282,8 +282,8 @@ def test_failed_document_does_not_block_next_document_or_retry_immediately(tradi
 
 
 @pytest.mark.parametrize('attempts,due,expected', [(1, False, False), (3, True, False), (1, True, True)])
-def test_document_retry_is_bounded_and_survives_rounds(trading, attempts, due, expected):
-    obj = spider(trading, 'ofac')
+def test_document_retry_is_bounded_and_survives_rounds(app_env, attempts, due, expected):
+    obj = spider(app_env, 'ofac')
     url = 'https://ofac.treasury.gov/recent-actions/20261104'
     obj.cursor['document_retries'] = {url: {'document': {'url': url, 'kind': 'article'}, 'attempts': attempts, 'next_at': obj.run.started_at.timestamp() + (-60 if due else 3600), 'error': 'HTTP503'}}
     listing = '<h1>Actions</h1><a href="'+url+'">Sanctions</a>'
@@ -292,8 +292,8 @@ def test_document_retry_is_bounded_and_survives_rounds(trading, attempts, due, e
     assert url in obj.cursor['document_retries']
 
 
-def test_old_pending_cursor_cannot_bypass_exhausted_document_retry(trading):
-    obj = spider(trading)
+def test_old_pending_cursor_cannot_bypass_exhausted_document_retry(app_env):
+    obj = spider(app_env)
     doc = {'url': 'https://ofac.treasury.gov/recent-actions/20261104', 'kind': 'article'}
     obj.cursor['realtime']['pending'] = [doc]
     obj.cursor['document_retries'] = {doc['url']: {'document': doc, 'attempts': 3, 'next_at': 0, 'error': 'unavailable'}}
@@ -302,8 +302,8 @@ def test_old_pending_cursor_cannot_bypass_exhausted_document_retry(trading):
     assert doc['url'] in obj.cursor['document_retries']
 
 
-def test_due_retry_in_old_pending_cursor_is_not_discarded_by_moving_window(trading):
-    obj = spider(trading)
+def test_due_retry_in_old_pending_cursor_is_not_discarded_by_moving_window(app_env):
+    obj = spider(app_env)
     doc = {'url': 'https://ofac.treasury.gov/recent-actions/20250101', 'kind': 'article', 'listing_date': '2025-01-01'}
     obj.cursor['realtime']['pending'] = [doc]
     obj.cursor['document_retries'] = {doc['url']: {'document': copy.deepcopy(doc), 'attempts': 1, 'next_at': 0, 'error': 'unavailable'}}
@@ -319,8 +319,8 @@ def test_due_retry_in_old_pending_cursor_is_not_discarded_by_moving_window(tradi
 
 
 @pytest.mark.parametrize('restored_pending', [False, True])
-def test_legacy_attachment_retry_is_not_scheduled(trading, monkeypatch, restored_pending):
-    obj = spider(trading)
+def test_legacy_attachment_retry_is_not_scheduled(app_env, monkeypatch, restored_pending):
+    obj = spider(app_env)
     doc = {'url': 'https://ofac.treasury.gov/recent-actions/20250101', 'kind': 'article', 'listing_date': '2025-01-01'}
     obj.cursor['attachment_retries'] = {doc['url']: {'document': doc, 'attempts': 1, 'next_at': 0}}
     if restored_pending:
@@ -331,8 +331,8 @@ def test_legacy_attachment_retry_is_not_scheduled(trading, monkeypatch, restored
 
 
 
-def test_only_document_retry_is_scheduled(trading):
-    obj = spider(trading)
+def test_only_document_retry_is_scheduled(app_env):
+    obj = spider(app_env)
     documents = [{'url': f'https://ofac.treasury.gov/recent-actions/2026110{day}', 'kind': 'article'} for day in (3, 4)]
     obj.cursor['document_retries'] = {documents[0]['url']: {'document': documents[0], 'attempts': 1, 'next_at': 0, 'error': 'HTTP503'}}
     obj.cursor['attachment_retries'] = {doc['url']: {'document': doc, 'attempts': 1, 'next_at': 0} for doc in documents}
@@ -345,8 +345,8 @@ def test_only_document_retry_is_scheduled(trading):
 
 
 @pytest.mark.parametrize('first_lane', ['realtime', 'history'])
-def test_successful_retry_is_not_requeued_by_other_lane(trading, first_lane):
-    obj = spider(trading)
+def test_successful_retry_is_not_requeued_by_other_lane(app_env, first_lane):
+    obj = spider(app_env)
     doc = {'url': 'https://ofac.treasury.gov/recent-actions/20261104', 'kind': 'article'}
     obj.cursor['document_retries'] = {doc['url']: {'document': doc, 'attempts': 1, 'next_at': 0, 'error': 'HTTP503'}}
     for lane in ('realtime', 'history'):
@@ -363,8 +363,8 @@ def test_successful_retry_is_not_requeued_by_other_lane(trading, first_lane):
 
 
 @pytest.mark.parametrize('first_lane', ['realtime', 'history'])
-def test_document_retry_is_requested_once_across_both_lanes(trading, first_lane):
-    obj = spider(trading)
+def test_document_retry_is_requested_once_across_both_lanes(app_env, first_lane):
+    obj = spider(app_env)
     doc = {'url': 'https://ofac.treasury.gov/recent-actions/20261104', 'kind': 'article'}
     obj.cursor['document_retries'] = {doc['url']: {'document': doc, 'attempts': 1, 'next_at': 0, 'error': 'HTTP503'}}
     for lane in ('realtime', 'history'):
@@ -384,8 +384,8 @@ def test_document_retry_is_requested_once_across_both_lanes(trading, first_lane)
     assert all(r.url != doc['url'] for r in requests)
 
 
-def test_concurrent_initial_document_failures_keep_one_attempt_and_all_errors(trading):
-    obj = spider(trading)
+def test_concurrent_initial_document_failures_keep_one_attempt_and_all_errors(app_env):
+    obj = spider(app_env)
     doc = {'url': 'https://ofac.treasury.gov/recent-actions/20261104', 'kind': 'article'}
     for lane in ('realtime', 'history'):
         obj.cursor[lane]['pending'] = [copy.deepcopy(doc)]
@@ -398,8 +398,8 @@ def test_concurrent_initial_document_failures_keep_one_attempt_and_all_errors(tr
     assert len(obj.run.errors) == 2
 
 
-def test_document_retry_waits_one_hour_after_failure_in_long_round(trading):
-    obj = spider(trading)
+def test_document_retry_waits_one_hour_after_failure_in_long_round(app_env):
+    obj = spider(app_env)
     obj.run.started_at = datetime.now(UTC) - timedelta(hours=2)
     doc = {'url': 'https://ofac.treasury.gov/recent-actions/20261104', 'kind': 'article'}
     obj.cursor['realtime']['pending'] = [doc]
@@ -413,16 +413,16 @@ def test_document_retry_waits_one_hour_after_failure_in_long_round(trading):
     assert (before + timedelta(hours=1)).timestamp() <= due_at <= (after + timedelta(hours=1)).timestamp()
 
 
-def test_pipeline_error_prevents_completed_read_checkpoint(trading):
-    obj = spider(trading)
+def test_pipeline_error_prevents_completed_read_checkpoint(app_env):
+    obj = spider(app_env)
     obj.run.completed_documents_safe = True
     obj._on_item_error(Failure(ValueError('test persistence failure')))
     assert not obj.run.completed_documents_safe
     assert '落库失败' in obj.run.errors[0]
 
 
-def test_completed_document_error_cannot_remove_next_pending_document(trading, monkeypatch):
-    obj = spider(trading)
+def test_completed_document_error_cannot_remove_next_pending_document(app_env, monkeypatch):
+    obj = spider(app_env)
     doc = {'url': 'https://ofac.treasury.gov/recent-actions/20261104', 'kind': 'article'}
     following = {'url': 'https://ofac.treasury.gov/recent-actions/20261103', 'kind': 'article'}
     obj.cursor['realtime']['pending'] = [following]
@@ -439,9 +439,9 @@ def test_completed_document_error_cannot_remove_next_pending_document(trading, m
 
 
 @pytest.mark.parametrize('safe', [False, True])
-def test_failed_round_saves_only_safe_completed_reads_and_explicit_gaps(trading, monkeypatch, safe):
+def test_failed_round_saves_only_safe_completed_reads_and_explicit_gaps(app_env, monkeypatch, safe):
     from alphapulse.crawler.spiders import base
-    obj = spider(trading, 'doj')
+    obj = spider(app_env, 'doj')
     source = SimpleNamespace(history_target=obj.run.history_target, history_cursor={'history': {'entry': 0}, 'realtime': {'entry': 0}}, consecutive_failures=0)
     class Session:
         async def __aenter__(self): return self
@@ -463,7 +463,7 @@ def test_failed_round_saves_only_safe_completed_reads_and_explicit_gaps(trading,
     if safe:
         assert source.history_cursor['checked'] == {'good': 123}
         assert 'bad' in source.history_cursor['document_retries']
-        restored = spider(trading, 'doj')
+        restored = spider(app_env, 'doj')
         restored.cursor = copy.deepcopy(source.history_cursor)
         restored.first_requests()
         assert restored.cursor['checked'] == {'good': 123}
@@ -471,8 +471,8 @@ def test_failed_round_saves_only_safe_completed_reads_and_explicit_gaps(trading,
 
 
 @pytest.mark.parametrize('status', [403, 429])
-def test_access_block_stops_round_and_honors_retry_after(trading, status):
-    obj = spider(trading, 'cftc')
+def test_access_block_stops_round_and_honors_retry_after(app_env, status):
+    obj = spider(app_env, 'cftc')
     doc = {'url': 'https://www.cftc.gov/PressRoom/PressReleases/9321-26', 'kind': 'article'}
     obj.cursor['realtime']['pending'] = [doc]
     request = Request(doc['url'], meta={'document': doc, 'lane': 'realtime'})
@@ -487,8 +487,8 @@ def test_access_block_stops_round_and_honors_retry_after(trading, status):
 
 
 @pytest.mark.parametrize('later_block', ['403', '429', 'listing_challenge', 'document_challenge'])
-def test_later_block_does_not_shorten_existing_retry_after(trading, later_block):
-    obj = spider(trading, 'cftc')
+def test_later_block_does_not_shorten_existing_retry_after(app_env, later_block):
+    obj = spider(app_env, 'cftc')
     doc = {'url': 'https://www.cftc.gov/PressRoom/PressReleases/9321-26', 'kind': 'article'}
     obj.cursor['realtime']['pending'] = [doc]
     request = Request(doc['url'], meta={'document': doc, 'lane': 'realtime'})
@@ -566,8 +566,8 @@ def test_live_ofac_body_and_policy_selection():
         assert bool(selection(case['source_code'], case['title'], case['content_text'])) is case['expected'], case['title']
 
 
-def test_unrelated_failed_attachment_is_not_news(trading):
-    obj = spider(trading, 'doj')
+def test_unrelated_failed_attachment_is_not_news(app_env):
+    obj = spider(app_env, 'doj')
     obj.run.history_deadline = time.monotonic() - 1
     doc = {'url': 'https://www.justice.gov/api/v1/press_releases/x.json', 'kind': 'doj'}
     obj.cursor['history']['pending'] = [doc]
@@ -580,8 +580,8 @@ def test_unrelated_failed_attachment_is_not_news(trading):
 
 @pytest.mark.parametrize('content_type,body', [('image/png', b'\x89PNG\r\n\x1a\n'), ('image/jpeg', b'\xff\xd8\xff'), ('image/gif', b'GIF89a')])
 @pytest.mark.parametrize('relevant', [True, False])
-def test_legacy_image_attachment_does_not_create_a_gap(trading, monkeypatch, content_type, body, relevant):
-    obj = spider(trading, 'doj')
+def test_legacy_image_attachment_does_not_create_a_gap(app_env, monkeypatch, content_type, body, relevant):
+    obj = spider(app_env, 'doj')
     obj.run.history_deadline = time.monotonic() - 1
     url = 'https://www.justice.gov/media/1/dl'
     doc = {'url': 'https://www.justice.gov/api/v1/press_releases/x.json', 'kind': 'doj'}
@@ -602,7 +602,7 @@ def test_legacy_image_attachment_does_not_create_a_gap(trading, monkeypatch, con
     assert not obj.cursor.get('attachment_retries')
 
 
-def test_source_api_separates_ignored_attachments_from_real_gaps(trading, monkeypatch):
+def test_source_api_separates_ignored_attachments_from_real_gaps(app_env, monkeypatch):
     from unittest.mock import AsyncMock
     from alphapulse.api import crawler
     from alphapulse.models import Source
@@ -661,20 +661,20 @@ def test_source_api_separates_ignored_attachments_from_real_gaps(trading, monkey
     assert result.collection_stats['round_running'] == 1
 
 
-def test_challenge_is_failure_not_empty_success(trading):
-    obj = spider(trading)
+def test_challenge_is_failure_not_empty_success(app_env):
+    obj = spider(app_env)
     with pytest.raises(ValueError, match='未识别'):
         list(obj.parse_listing(response(SOURCES['ofac'].entries[0], '<html>Please wait</html>', lane='history')))
 
 
-def test_history_pending_documents_survive_deadline_and_resume(trading):
-    obj = spider(trading)
+def test_history_pending_documents_survive_deadline_and_resume(app_env):
+    obj = spider(app_env)
     doc = {'url': 'https://ofac.treasury.gov/recent-actions/20250101', 'kind': 'article'}
     obj.cursor['history']['pending'] = [doc]
     obj.run.history_deadline = time.monotonic() - 1
     assert obj.advance('history') == []
     saved = copy.deepcopy(obj.cursor)
-    resumed = spider(trading)
+    resumed = spider(app_env)
     resumed.cursor = saved
     request, = resumed.advance('history')
     assert request.url == doc['url'] and resumed.cursor['history']['pending'] == [doc]
@@ -682,8 +682,8 @@ def test_history_pending_documents_survive_deadline_and_resume(trading):
 
 
 @pytest.mark.parametrize('count', [1999, 2000, 2001])
-def test_register_oversized_day_uses_xml(trading, count):
-    obj = spider(trading, 'federal_register')
+def test_register_oversized_day_uses_xml(app_env, count):
+    obj = spider(app_env, 'federal_register')
     obj.cursor['history']['day'] = '2025-01-01'
     req, = obj.parse_listing(response(SOURCES[obj.name].entries[0], json.dumps({'count': count, 'results': [{'document_number': '2025-1'}]}), lane='history'))
     assert ('govinfo.gov' in req.url) is (count > 2000)
@@ -691,16 +691,16 @@ def test_register_oversized_day_uses_xml(trading, count):
     assert not obj.run.history_done
 
 
-def test_keys_only_sent_to_congress_api(trading, monkeypatch):
+def test_keys_only_sent_to_congress_api(app_env, monkeypatch):
     from alphapulse.crawler.spiders import us_official
     monkeypatch.setattr(us_official, 'get_settings', lambda: SimpleNamespace(congress_api_key='test-key', crawler_contact_email='public@example.invalid'))
-    obj = spider(trading, 'congress')
+    obj = spider(app_env, 'congress')
     assert obj.request_for('https://api.congress.gov/v3/bill', lambda x: x, 'history').headers['X-Api-Key'] == b'test-key'
     assert 'X-Api-Key' not in obj.request_for('https://www.congress.gov/text', lambda x: x, 'history').headers
 
 
-def test_register_body_and_pdf_are_part_of_the_same_package(trading):
-    obj = spider(trading, 'federal_register')
+def test_register_body_and_pdf_are_part_of_the_same_package(app_env):
+    obj = spider(app_env, 'federal_register')
     doc = {'url': 'https://www.federalregister.gov/api/v1/documents/2025-1.json', 'kind': 'register'}
     obj.cursor['history']['pending'] = [doc]
     res = response(doc['url'], json.dumps({'title': 'Digital asset rule', 'publication_date': '2025-01-01', 'document_number': '2025-1', 'body_html_url': 'https://www.federalregister.gov/documents/full_text/html/2025/01/01/2025-1.html', 'html_url': 'https://www.federalregister.gov/documents/2025/01/01/2025-1/a', 'pdf_url': 'https://www.govinfo.gov/a.pdf'}), lane='history', document=doc)
@@ -710,20 +710,20 @@ def test_register_body_and_pdf_are_part_of_the_same_package(trading):
     assert request.meta['document']['pdf'] == 'https://www.govinfo.gov/a.pdf'
 
 
-def test_summary_scope_tests_do_not_hide_fed_enrichment(trading):
+def test_summary_scope_tests_do_not_hide_fed_enrichment(app_env):
     from alphapulse.crawler.spiders.rss import FedSpider
     from alphapulse.crawler.spiders.us_official import USOfficialSpider
     assert issubclass(FedSpider, USOfficialSpider)
     assert len(SOURCES['fed'].entries) >= 8
 
 
-def test_fed_entries_match_real_archives_and_discover_documents(trading):
+def test_fed_entries_match_real_archives_and_discover_documents(app_env):
     import gzip
     from pathlib import Path
     samples = json.loads(gzip.decompress((Path(__file__).parent / 'fixtures/us_news/fed_archives.json.gz').read_bytes()))
     for sample in samples:
         assert sample['url'] in SOURCES['fed'].entries
-        obj = spider(trading, 'fed')
+        obj = spider(app_env, 'fed')
         obj.cursor['history']['entry'] = SOURCES['fed'].entries.index(sample['url'])
         request, = obj.advance('history')
         assert request.url == sample['url']
@@ -734,14 +734,14 @@ def test_fed_entries_match_real_archives_and_discover_documents(trading):
         assert obj.run.stats['discovered'] > 0
 
 
-def test_fed_realtime_completes_all_real_discovery_entries(trading, monkeypatch):
+def test_fed_realtime_completes_all_real_discovery_entries(app_env, monkeypatch):
     from dataclasses import replace
     import gzip
     from pathlib import Path
     samples = json.loads(gzip.decompress((Path(__file__).parent / 'fixtures/us_news/fed_archives.json.gz').read_bytes()))
     bodies = {s['url']: s['body'] for s in samples}
     monkeypatch.setitem(SOURCES, 'fed', replace(SOURCES['fed'], entries=tuple(bodies)))
-    obj = spider(trading, 'fed')
+    obj = spider(app_env, 'fed')
     requests = obj.first_requests()
     visited = []
     while requests:
@@ -759,8 +759,8 @@ def test_fed_realtime_completes_all_real_discovery_entries(trading, monkeypatch)
 
 
 @pytest.mark.parametrize('lane', ['history', 'realtime'])
-def test_fed_discovery_respects_old_and_boundary_dates(trading, lane):
-    obj = spider(trading, 'fed')
+def test_fed_discovery_respects_old_and_boundary_dates(app_env, lane):
+    obj = spider(app_env, 'fed')
     obj.run.cutoff = datetime(2026, 11, 1, 15, tzinfo=UTC)
     body = '<h1>FOMC</h1>' + ''.join(
         f'<a href="/newsevents/pressreleases/monetary{day}a1.htm">Note</a>'
@@ -774,12 +774,12 @@ def test_fed_discovery_respects_old_and_boundary_dates(trading, lane):
 
 
 @pytest.mark.parametrize('lane', ['history', 'realtime'])
-def test_fed_minutes_use_official_release_day_instead_of_meeting_day(trading, monkeypatch, lane):
+def test_fed_minutes_use_official_release_day_instead_of_meeting_day(app_env, monkeypatch, lane):
     import gzip
     from pathlib import Path
     samples = json.loads(gzip.decompress((Path(__file__).parent / 'fixtures/us_news/fed_archives.json.gz').read_bytes()))
     sample = next(s for s in samples if 'fomccalendars' in s['url'])
-    obj = spider(trading, 'fed')
+    obj = spider(app_env, 'fed')
     obj.run.cutoff = obj.run.history_target = datetime(2026, 2, 18, 15, tzinfo=UTC)
     list(obj.parse_listing(response(sample['url'], sample['body'], lane=lane)))
     doc = next(d for d in obj.cursor[lane]['pending'] if 'fomcminutes20260128.htm' in d['url'])
@@ -802,8 +802,8 @@ def test_fed_minutes_use_official_release_day_instead_of_meeting_day(trading, mo
     assert parsed['extra']['published_at_source'] == sample['url']
 
 
-def test_fed_minutes_missing_release_date_fail_explicitly(trading):
-    obj = spider(trading, 'fed')
+def test_fed_minutes_missing_release_date_fail_explicitly(app_env):
+    obj = spider(app_env, 'fed')
     body = '<h1>FOMC</h1><a href="/monetarypolicy/fomcminutes20260128.htm">HTML</a>'
     with pytest.raises(ValueError, match='官方发布日期'):
         list(obj.parse_listing(response(SOURCES['fed'].entries[-2], body, lane='history')))
@@ -841,8 +841,8 @@ def test_fifty_real_public_documents_parse_without_io():
         assert parsed['extra']['published_at_precision'] in ('date', 'datetime')
 
 
-def test_daily_register_partitions_resume_without_marking_done(trading):
-    obj = spider(trading, 'federal_register')
+def test_daily_register_partitions_resume_without_marking_done(app_env):
+    obj = spider(app_env, 'federal_register')
     obj.cursor['history']['day'] = '2025-01-02'
     requests = list(obj.parse_listing(response(SOURCES[obj.name].entries[0], json.dumps({'count': 0, 'results': []}), lane='history')))
     assert len(requests) == 1
@@ -850,16 +850,16 @@ def test_daily_register_partitions_resume_without_marking_done(trading):
     assert not obj.run.history_done
 
 
-def test_h41_uses_publisher_release_dates_not_assumed_thursdays(trading):
-    obj = spider(trading, 'fed')
+def test_h41_uses_publisher_release_dates_not_assumed_thursdays(app_env):
+    obj = spider(app_env, 'fed')
     data = [{'yearValue': '2025', 'Months': [{'MonthName': 'January', 'Dates': ['20250103', '20250109']}]}]
     req, = obj.parse_listing(response('https://www.federalreserve.gov/releases/h41/releaseDates.json', json.dumps(data), lane='history'))
     assert req.url == 'https://www.federalreserve.gov/releases/h41/20250109/'
     assert obj.cursor['history']['pending'][1]['url'].endswith('20250103/')
 
 
-def test_attachment_reference_is_skipped_without_retry(trading):
-    obj = spider(trading)
+def test_attachment_reference_is_skipped_without_retry(app_env):
+    obj = spider(app_env)
     obj.run.history_deadline = time.monotonic() - 1
     url = 'https://ofac.treasury.gov/recent-actions/20250101'
     doc = {'url': url, 'kind': 'article'}
@@ -872,7 +872,7 @@ def test_attachment_reference_is_skipped_without_retry(trading):
 
 
 @pytest.mark.parametrize('canceled,failed', [(False, False), (True, False), (False, True)])
-def test_checkpoint_does_not_advance_failed_or_canceled_history(trading, monkeypatch, canceled, failed):
+def test_checkpoint_does_not_advance_failed_or_canceled_history(app_env, monkeypatch, canceled, failed):
     from alphapulse.crawler.spiders import base
     now = datetime.now(UTC)
     target = now - timedelta(days=300)
@@ -889,7 +889,7 @@ def test_checkpoint_does_not_advance_failed_or_canceled_history(trading, monkeyp
         async def commit(self):
             pass
     monkeypatch.setattr(base, 'SessionLocal', Session)
-    obj = spider(trading)
+    obj = spider(app_env)
     run = base.RunState(uuid.uuid4(), 'schedule', now, target, history_target=target, history_position=now, official_cursor={'history': {'entry': 5}, 'realtime': {'entry': 2}})
     if failed:
         run.errors.append('write failed')
@@ -897,30 +897,30 @@ def test_checkpoint_does_not_advance_failed_or_canceled_history(trading, monkeyp
     assert source.history_cursor['history']['entry'] == (0 if canceled or failed else 5)
 
 
-def test_congress_action_links_use_public_bill_type(trading):
+def test_congress_action_links_use_public_bill_type(app_env):
     from alphapulse.crawler.spiders.us_official import congress_bill_url
     assert congress_bill_url('https://api.congress.gov/v3/bill/119/hr/1') == 'https://www.congress.gov/bill/119th-congress/house-bill/1'
     assert congress_bill_url('https://api.congress.gov/v3/bill/119/s/1582') == 'https://www.congress.gov/bill/119th-congress/senate-bill/1582'
 
 
-def test_tick_during_active_round_does_not_replace_its_cursors(trading):
-    obj = spider(trading)
+def test_tick_during_active_round_does_not_replace_its_cursors(app_env):
+    obj = spider(app_env)
     obj.crawler = SimpleNamespace(engine=SimpleNamespace(spider_is_idle=lambda: False))
     before = copy.deepcopy(obj.cursor)
     assert obj.make_request_from_data(json.dumps({'trigger': 'schedule', 'official_cursor': {'history': {'entry': 99}}}).encode()) == []
     assert obj.cursor == before
 
 
-def test_realtime_keeps_next_page(trading):
-    obj = spider(trading)
+def test_realtime_keeps_next_page(app_env):
+    obj = spider(app_env)
     url = SOURCES['ofac'].entries[0]
     list(obj.parse_listing(response(url, '<h1>Recent actions</h1><a href="/recent-actions/20261104">Crypto</a><a rel="next" href="?page=1">Next</a>', lane='realtime')))
     assert obj.cursor['realtime']['next'] == url + '?page=1'
 
 
 @pytest.mark.parametrize('body', ['', '<h1>Just a moment...</h1><p>Enable JavaScript and cookies to continue.</p>'])
-def test_text_challenge_never_emits_or_advances(trading, body):
-    obj = spider(trading, 'federal_register')
+def test_text_challenge_never_emits_or_advances(app_env, body):
+    obj = spider(app_env, 'federal_register')
     doc = {'url': 'https://www.federalregister.gov/body', 'kind': 'text', 'title': 'Digital asset regulation', 'at': '2026-11-04'}
     obj.cursor['history']['pending'] = [doc]
     async def collect():
@@ -930,10 +930,10 @@ def test_text_challenge_never_emits_or_advances(trading, body):
     assert obj.cursor['history']['pending'] == [doc]
 
 
-def test_genius_bill_requires_evidence_before_exclusion(trading, monkeypatch):
+def test_genius_bill_requires_evidence_before_exclusion(app_env, monkeypatch):
     from alphapulse.crawler.spiders import us_official
     monkeypatch.setattr(us_official, 'get_settings', lambda: SimpleNamespace(congress_api_key='test', crawler_contact_email='test@example.invalid'))
-    obj = spider(trading, 'congress')
+    obj = spider(app_env, 'congress')
     doc = {'url': 'https://api.congress.gov/v3/bill/119/s/1582', 'kind': 'bill'}
     obj.cursor['history']['pending'] = [doc]
     async def collect():
@@ -956,7 +956,7 @@ def test_real_titles_are_article_headlines():
 
 
 @pytest.mark.parametrize('enabled,history_enabled,save_failed', [(True, True, False), (False, True, False), (True, False, False), (True, True, True)])
-def test_round_waits_for_commit_and_reads_fresh_state(trading, monkeypatch, enabled, history_enabled, save_failed):
+def test_round_waits_for_commit_and_reads_fresh_state(app_env, monkeypatch, enabled, history_enabled, save_failed):
     from alphapulse.crawler.spiders import us_official
     fresh = {'history': {'entry': 0, 'target': '2025-01-01T00:00:00+00:00', 'pending': [{'url': 'https://ofac.treasury.gov/recent-actions/20250101', 'kind': 'article'}]}}
     source = SimpleNamespace(enabled=enabled, paused_until=None, history_cursor=fresh, history_target=datetime(2025, 1, 1, tzinfo=UTC) if history_enabled else None, history_done=False, history_position=None, backfill_hours=72)
@@ -969,7 +969,7 @@ def test_round_waits_for_commit_and_reads_fresh_state(trading, monkeypatch, enab
             return source
     monkeypatch.setattr(us_official, 'SessionLocal', Session)
     async def run():
-        obj = spider(trading)
+        obj = spider(app_env)
         obj.run = None
         obj.crawler = SimpleNamespace(engine=SimpleNamespace(crawl=reads.append))
         obj._insert_run = lambda run: asyncio.sleep(0)
@@ -994,8 +994,8 @@ def test_round_waits_for_commit_and_reads_fresh_state(trading, monkeypatch, enab
     asyncio.run(run())
 
 
-def test_register_realtime_finishes_all_pages_before_changing_day(trading):
-    obj = spider(trading, 'federal_register')
+def test_register_realtime_finishes_all_pages_before_changing_day(app_env):
+    obj = spider(app_env, 'federal_register')
     obj.cursor['realtime']['day'] = '2026-11-04'
     url = SOURCES[obj.name].entries[0]
     list(obj.parse_listing(response(url, json.dumps({'count': 1001, 'results': [{'document_number': '2026-1234'}], 'next_page_url': url + '?page=2'}), lane='realtime')))
@@ -1010,8 +1010,8 @@ def test_register_realtime_finishes_all_pages_before_changing_day(trading):
     assert obj.cursor['realtime']['day'] == '2026-11-03'
 
 
-def test_pagination_cycle_does_not_claim_success(trading):
-    obj = spider(trading)
+def test_pagination_cycle_does_not_claim_success(app_env):
+    obj = spider(app_env)
     url = SOURCES[obj.name].entries[0]
     obj.cursor['history']['visited_pages'] = [url]
     with pytest.raises(ValueError, match='循环'):
@@ -1019,8 +1019,8 @@ def test_pagination_cycle_does_not_claim_success(trading):
     assert not obj.run.history_done
 
 
-def test_fragment_is_valid_without_page_heading(trading):
-    obj = spider(trading, 'federal_register')
+def test_fragment_is_valid_without_page_heading(app_env):
+    obj = spider(app_env, 'federal_register')
     obj.run.history_deadline = time.monotonic() - 1
     doc = {'url': 'https://www.federalregister.gov/body', 'kind': 'text', 'title': 'Digital asset regulation', 'at': '2026-11-04'}
     obj.cursor['history']['pending'] = [doc]
@@ -1031,10 +1031,10 @@ def test_fragment_is_valid_without_page_heading(trading):
 
 
 @pytest.mark.parametrize('undated', [False, True])
-def test_bill_full_text_can_supply_relevance_and_resume(trading, monkeypatch, undated):
+def test_bill_full_text_can_supply_relevance_and_resume(app_env, monkeypatch, undated):
     from alphapulse.crawler.spiders import us_official
     monkeypatch.setattr(us_official, 'get_settings', lambda: SimpleNamespace(congress_api_key='test', crawler_contact_email='test@example.invalid'))
-    obj = spider(trading, 'congress')
+    obj = spider(app_env, 'congress')
     base = 'https://api.congress.gov/v3/bill/119/s/1582'
     obj.cursor['history']['pending'] = [{'url': base, 'kind': 'bill'}]
     async def parse(body):
@@ -1059,10 +1059,10 @@ def test_bill_full_text_can_supply_relevance_and_resume(trading, monkeypatch, un
         assert not obj.cursor.get('bill_retries')
 
 
-def test_missing_bill_material_is_a_retryable_gap(trading, monkeypatch):
+def test_missing_bill_material_is_a_retryable_gap(app_env, monkeypatch):
     from alphapulse.crawler.spiders import us_official
     monkeypatch.setattr(us_official, 'get_settings', lambda: SimpleNamespace(congress_api_key='test', crawler_contact_email='test@example.invalid'))
-    obj = spider(trading, 'congress')
+    obj = spider(app_env, 'congress')
     base = 'https://api.congress.gov/v3/bill/119/s/1582'
     obj.cursor['history']['pending'] = [{'url': base, 'kind': 'bill'}]
     async def parse(data):
@@ -1082,10 +1082,10 @@ def test_missing_bill_material_is_a_retryable_gap(trading, monkeypatch):
 
 
 @pytest.mark.parametrize('attempts,version,expected_kind', [(3, 'v1', 'listing'), (1, 'v1', 'listing'), (3, 'v2', 'subjects')])
-def test_bill_retries_are_bounded_until_official_update(trading, monkeypatch, attempts, version, expected_kind):
+def test_bill_retries_are_bounded_until_official_update(app_env, monkeypatch, attempts, version, expected_kind):
     from alphapulse.crawler.spiders import us_official
     monkeypatch.setattr(us_official, 'get_settings', lambda: SimpleNamespace(congress_api_key='test', crawler_contact_email='test@example.invalid'))
-    obj = spider(trading, 'congress')
+    obj = spider(app_env, 'congress')
     url = 'https://api.congress.gov/v3/bill/119/s/1582'
     doc = {'url': url, 'kind': 'bill'}
     obj.cursor['history']['pending'] = [doc]
@@ -1096,15 +1096,15 @@ def test_bill_retries_are_bounded_until_official_update(trading, monkeypatch, at
     assert ('/subjects?' in req.url) is (expected_kind == 'subjects')
 
 
-def test_fed_archive_is_not_discovered_as_article(trading):
-    obj = spider(trading, 'fed')
+def test_fed_archive_is_not_discovered_as_article(app_env):
+    obj = spider(app_env, 'fed')
     url = SOURCES['fed'].entries[0]
     req, = obj.parse_listing(response(url, '<h1>Press releases</h1><a href="2026-press.htm#content">Archive</a><a href="monetary20261104a.htm">News</a>', lane='history'))
     assert req.url.endswith('monetary20261104a.htm')
 
 
-def test_ofac_entire_old_page_can_end_realtime_window(trading):
-    obj = spider(trading)
+def test_ofac_entire_old_page_can_end_realtime_window(app_env):
+    obj = spider(app_env)
     url = SOURCES['ofac'].entries[0]
     list(obj.parse_listing(response(url, '<h1>Recent actions</h1><a href="/recent-actions/20250101">Old</a><a rel="next" href="?page=2">Next</a>', lane='realtime')))
     assert obj.cursor['realtime']['next'] is None
@@ -1117,10 +1117,10 @@ def test_error_html_and_malformed_xml_are_rejected(body):
         validate_body(body)
 
 
-def test_later_bill_version_recalls_earlier_version(trading, monkeypatch):
+def test_later_bill_version_recalls_earlier_version(app_env, monkeypatch):
     from alphapulse.crawler.spiders import us_official
     monkeypatch.setattr(us_official, 'get_settings', lambda: SimpleNamespace(congress_api_key='test', crawler_contact_email='test@example.invalid'))
-    obj = spider(trading, 'congress')
+    obj = spider(app_env, 'congress')
     base = 'https://api.congress.gov/v3/bill/119/s/1582'
     first = {'url': 'https://www.congress.gov/first', 'kind': 'text', 'title': 'GENIUS Act', 'at': '2026-11-04', 'bill': base}
     second = {**first, 'url': 'https://www.congress.gov/second'}
@@ -1137,10 +1137,10 @@ def test_later_bill_version_recalls_earlier_version(trading, monkeypatch):
     assert output[0]['title'] == 'GENIUS Act'
 
 
-def test_bill_retry_keeps_historical_text_outside_realtime_window(trading, monkeypatch):
+def test_bill_retry_keeps_historical_text_outside_realtime_window(app_env, monkeypatch):
     from alphapulse.crawler.spiders import us_official
     monkeypatch.setattr(us_official, 'get_settings', lambda: SimpleNamespace(congress_api_key='test', crawler_contact_email='test@example.invalid'))
-    obj = spider(trading, 'congress')
+    obj = spider(app_env, 'congress')
     base = 'https://api.congress.gov/v3/bill/119/s/1582'
     doc = {'url': 'https://www.congress.gov/old', 'kind': 'text', 'title': 'GENIUS Act', 'at': '2025-01-01', 'bill': base}
     obj.cursor['realtime'].update(bill={'url': base, 'title': 'GENIUS Act', 'reasons': ['crypto_policy'], 'bodies': 0, 'retry': True}, pending=[doc])
@@ -1149,7 +1149,7 @@ def test_bill_retry_keeps_historical_text_outside_realtime_window(trading, monke
     assert asyncio.run(collect())[0]['published_at'].year == 2025
 
 
-def test_failed_checkpoint_save_recovers_on_later_trigger(trading, monkeypatch):
+def test_failed_checkpoint_save_recovers_on_later_trigger(app_env, monkeypatch):
     from alphapulse.crawler.spiders import us_official
     source = SimpleNamespace(enabled=True, paused_until=None, history_cursor={}, history_target=None, history_done=False, backfill_hours=72)
     class Session:
@@ -1158,7 +1158,7 @@ def test_failed_checkpoint_save_recovers_on_later_trigger(trading, monkeypatch):
         async def get(self, *args): return source
     monkeypatch.setattr(us_official, 'SessionLocal', Session)
     async def check():
-        obj = spider(trading)
+        obj = spider(app_env)
         requests, attempts = [], []
         obj.crawler = SimpleNamespace(engine=SimpleNamespace(crawl=requests.append))
         obj._insert_run = lambda run: asyncio.sleep(0)
@@ -1177,7 +1177,7 @@ def test_failed_checkpoint_save_recovers_on_later_trigger(trading, monkeypatch):
     asyncio.run(check())
 
 
-def test_queued_tick_obeys_newly_saved_backoff(trading, monkeypatch):
+def test_queued_tick_obeys_newly_saved_backoff(app_env, monkeypatch):
     from alphapulse.crawler.spiders import us_official
     source = SimpleNamespace(enabled=True, paused_until=datetime.now(UTC) + timedelta(minutes=5), history_cursor={}, history_target=None, history_done=False, backfill_hours=72)
     class Session:
@@ -1186,7 +1186,7 @@ def test_queued_tick_obeys_newly_saved_backoff(trading, monkeypatch):
         async def get(self, *args): return source
     monkeypatch.setattr(us_official, 'SessionLocal', Session)
     async def check():
-        obj = spider(trading)
+        obj = spider(app_env)
         obj.run = None
         requests = []
         obj.crawler = SimpleNamespace(engine=SimpleNamespace(crawl=requests.append))
@@ -1197,11 +1197,11 @@ def test_queued_tick_obeys_newly_saved_backoff(trading, monkeypatch):
     asyncio.run(check())
 
 
-def test_checkpoint_retry_budget_preserves_original_round(trading, monkeypatch):
+def test_checkpoint_retry_budget_preserves_original_round(app_env, monkeypatch):
     from alphapulse.crawler.spiders import us_official
     monkeypatch.setattr(us_official, 'SessionLocal', lambda: pytest.fail('Uncommitted checkpoint must block source reads'))
     async def check():
-        obj = spider(trading)
+        obj = spider(app_env)
         original, attempts = obj.run, []
         async def fail(run):
             attempts.append(run)
@@ -1217,8 +1217,8 @@ def test_checkpoint_retry_budget_preserves_original_round(trading, monkeypatch):
 
 
 @pytest.mark.parametrize('failure', ['', 'count', 'date', 'malformed'])
-def test_register_xml_validates_and_resumes(trading, failure):
-    obj = spider(trading, 'federal_register')
+def test_register_xml_validates_and_resumes(app_env, failure):
+    obj = spider(app_env, 'federal_register')
     doc = {'url': 'https://www.govinfo.gov/issue.xml', 'kind': 'register_issue', 'day': '2025-01-01', 'count': 2001}
     obj.cursor['history'].update(day=doc['day'], pending=[doc])
     xml = '<FEDREG><DATE>January 1, 2025</DATE>' + ''.join(f'<FRDOC>[FR Doc. 2025-{n} Filed 1-1-25]</FRDOC>' for n in range(2001)) + '<FRDOC>[FR Doc. 2025-0 Filed 1-1-25]</FRDOC></FEDREG>'
@@ -1240,27 +1240,27 @@ def test_register_xml_validates_and_resumes(trading, failure):
         assert obj.cursor['history']['day'] == '2025-01-01'
         obj.run.history_deadline = time.monotonic() - 1
         assert not obj.complete('history')
-        resumed = spider(trading, 'federal_register')
+        resumed = spider(app_env, 'federal_register')
         resumed.cursor = json.loads(json.dumps(obj.cursor))
         assert resumed.advance('history')[0].meta['document'] == obj.cursor['history']['pending'][0]
 
 
-def test_doj_api_pagination_and_old_day_stop(trading):
-    obj = spider(trading, 'doj')
+def test_doj_api_pagination_and_old_day_stop(app_env):
+    obj = spider(app_env, 'doj')
     url = SOURCES['doj'].entries[0]
     def data(day):
         return {'metadata': {'responseInfo': {'status': 200}, 'resultset': {'count': '100', 'page': 0, 'pagesize': 50}}, 'results': [{'uuid': str(uuid.uuid4()), 'date': str(int(day.timestamp()))}]}
     req, = obj.parse_listing(response(url, json.dumps(data(obj.run.started_at)), lane='realtime'))
     assert req.meta['document']['kind'] == 'doj'
     assert 'page=1' in obj.cursor['realtime']['next']
-    obj = spider(trading, 'doj')
+    obj = spider(app_env, 'doj')
     list(obj.parse_listing(response(url, json.dumps(data(datetime(2024,1,1,tzinfo=UTC))), lane='history')))
     assert obj.cursor['history']['next'] is None
 
 
 @pytest.mark.parametrize('bad_body', [False, True])
-def test_doj_body_identity_date_and_validation(trading, bad_body):
-    obj = spider(trading, 'doj')
+def test_doj_body_identity_date_and_validation(app_env, bad_body):
+    obj = spider(app_env, 'doj')
     obj.run.history_deadline = time.monotonic() - 1
     identifier = str(uuid.uuid4())
     doc = {'url': f'https://www.justice.gov/api/v1/press_releases/{identifier}.json', 'kind': 'doj'}
@@ -1282,8 +1282,8 @@ def test_doj_body_identity_date_and_validation(trading, bad_body):
         assert item['source_updated_at'] == datetime(2025,1,2,12,tzinfo=UTC)
 
 
-def test_doj_old_discovery_cursor_is_rebuilt(trading):
-    obj = spider(trading, 'doj')
+def test_doj_old_discovery_cursor_is_rebuilt(app_env):
+    obj = spider(app_env, 'doj')
     obj.cursor.update(checked={'old': 1}, history={'entry': 2}, attachment_retries={})
     obj.first_requests()
     assert obj.cursor['transport'] == 'doj-api-v1'
@@ -1291,8 +1291,8 @@ def test_doj_old_discovery_cursor_is_rebuilt(trading):
     assert obj.run.history_target == datetime(2025,1,1,tzinfo=UTC)
 
 
-def test_bill_undated_text_is_visible_retry_gap(trading):
-    obj = spider(trading, 'congress')
+def test_bill_undated_text_is_visible_retry_gap(app_env):
+    obj = spider(app_env, 'congress')
     obj.run.history_deadline = time.monotonic() - 1
     base = 'https://api.congress.gov/v3/bill/119/s/1582'
     doc = {'url': base + '/text', 'kind': 'texts', 'title': 'GENIUS Act', 'bill': base}
@@ -1307,7 +1307,7 @@ def test_bill_undated_text_is_visible_retry_gap(trading):
     assert '缺少官方日期' in obj.cursor['bill_retries'][base]['error']
 
 
-def test_public_api_text_fixtures_replay_without_io(trading):
+def test_public_api_text_fixtures_replay_without_io(app_env):
     import runpy
     from pathlib import Path
     script = runpy.run_path(str(Path(__file__).resolve().parents[2] / 'scripts/smoke_us_news.py'))
@@ -1317,15 +1317,15 @@ def test_public_api_text_fixtures_replay_without_io(trading):
 
 
 
-def test_congress_official_xml_crosscheck(trading):
+def test_congress_official_xml_crosscheck(app_env):
     import runpy
     from pathlib import Path
     script = runpy.run_path(str(Path(__file__).resolve().parents[2] / 'scripts/smoke_us_news.py'))
     assert len(asyncio.run(script['congress_reference_items']())) == 3
 
 
-def test_congress_meeting_keeps_deduplicated_pdf_references(trading, monkeypatch):
-    obj = spider(trading, 'congress')
+def test_congress_meeting_keeps_deduplicated_pdf_references(app_env, monkeypatch):
+    obj = spider(app_env, 'congress')
     obj.run.history_deadline = time.monotonic() - 1
     doc = {'url': 'https://api.congress.gov/v3/committee-meeting/119/house/1', 'kind': 'meeting'}
     obj.cursor['history']['pending'] = [doc]
@@ -1340,8 +1340,8 @@ def test_congress_meeting_keeps_deduplicated_pdf_references(trading, monkeypatch
 
 
 
-def test_dated_but_unavailable_bill_text_remains_a_gap(trading):
-    obj = spider(trading, 'congress')
+def test_dated_but_unavailable_bill_text_remains_a_gap(app_env):
+    obj = spider(app_env, 'congress')
     obj.run.history_deadline = time.monotonic() - 1
     base = 'https://api.congress.gov/v3/bill/119/s/1582'
     doc = {'url': base + '/text', 'kind': 'texts', 'title': 'GENIUS Act', 'bill': base}
@@ -1355,7 +1355,7 @@ def test_dated_but_unavailable_bill_text_remains_a_gap(trading):
 
 
 
-def test_real_congress_api_fixture_replays_with_visible_source_gap(trading, tmp_path):
+def test_real_congress_api_fixture_replays_with_visible_source_gap(app_env, tmp_path):
     import runpy
     import shutil
     from pathlib import Path
@@ -1378,8 +1378,8 @@ def test_real_congress_api_fixture_replays_with_visible_source_gap(trading, tmp_
     assert any(item['extra']['content_scope'] == 'official_action' for item in items)
 
 
-def test_terminal_news_gap_survives_rediscovery(trading):
-    obj = spider(trading, 'doj')
+def test_terminal_news_gap_survives_rediscovery(app_env):
+    obj = spider(app_env, 'doj')
     url = 'https://www.justice.gov/opa/pr/example'
     doc = {'url': url, 'kind': 'article'}
     obj.cursor['history']['pending'] = [doc]
@@ -1395,14 +1395,14 @@ def test_terminal_news_gap_survives_rediscovery(trading):
     assert obj.cursor['attachment_retries'][url]['retired_at']
 
 
-def test_selected_news_requests_have_one_retry_owner(trading):
-    obj = spider(trading, 'doj')
+def test_selected_news_requests_have_one_retry_owner(app_env):
+    obj = spider(app_env, 'doj')
     req = obj.request_for(SOURCES['doj'].entries[0], obj.parse_listing, 'realtime')
     assert req.meta['dont_retry'] is True
 
 
-def test_doj_captioned_photo_is_not_a_document_gap(trading):
-    obj = spider(trading, 'doj')
+def test_doj_captioned_photo_is_not_a_document_gap(app_env):
+    obj = spider(app_env, 'doj')
     obj.run.history_deadline = time.monotonic() - 1
     identifier = str(uuid.uuid4())
     doc = {'url': f'https://www.justice.gov/api/v1/press_releases/{identifier}.json', 'kind': 'doj'}
@@ -1428,8 +1428,8 @@ def test_sec_uses_official_dateline_not_last_reviewed_date():
     assert item['extra']['published_at_precision'] == 'date'
 
 
-def test_legacy_attachment_failure_does_not_spend_retry_budget(trading):
-    obj = spider(trading, 'doj')
+def test_legacy_attachment_failure_does_not_spend_retry_budget(app_env):
+    obj = spider(app_env, 'doj')
     obj.run.history_deadline = time.monotonic() - 1
     url = 'https://www.justice.gov/opa/pr/example'
     doc = {'url': url, 'kind': 'doj'}
@@ -1446,9 +1446,9 @@ def test_legacy_attachment_failure_does_not_spend_retry_budget(trading):
 
 
 @pytest.mark.parametrize('dated', [True, False])
-def test_sec_historical_listing_stops_only_with_verified_dates(trading, dated, monkeypatch):
+def test_sec_historical_listing_stops_only_with_verified_dates(app_env, dated, monkeypatch):
     monkeypatch.setattr('alphapulse.crawler.spiders.us_official.configuration_error', lambda code: None)
-    obj = spider(trading, 'sec')
+    obj = spider(app_env, 'sec')
     stamp = '<time datetime="2024-12-30T12:00:00Z">Dec 30</time>' if dated else ''
     body = '<h1>Press releases</h1><table><tr><td>' + stamp + '</td><td><a href="/newsroom/press-releases/2024-199">Release</a></td></tr></table><a rel="next" href="?page=1">Next</a>'
     requests = list(obj.parse_listing(response(SOURCES['sec'].entries[0], body, lane='history')))
@@ -1477,8 +1477,8 @@ def treasury_manifest():
         {'path': '/news-data/press-releases/2024-2023.json', 'count': 1, 'offset': 2, 'endOffset': 3, 'startYear': 2023, 'endYear': 2024}]}
 
 
-def test_treasury_json_replaces_only_discovery_cursors(trading):
-    obj = spider(trading, 'treasury')
+def test_treasury_json_replaces_only_discovery_cursors(app_env):
+    obj = spider(app_env, 'treasury')
     obj.cursor.update(checked={'completed': 1}, document_retries={'gap': {'document': {'url': 'https://home.treasury.gov/news/press-releases/sb0001'}, 'attempts': 3, 'next_at': 0, 'policy_checked': 'web_text_images_v1'}},
                       attachment_retries={'attachment': {'attempts': 3}}, transport='old')
     obj.cursor['history']['page'] = SOURCES['treasury'].entries[0] + '?page=2'
@@ -1493,13 +1493,13 @@ def test_treasury_json_replaces_only_discovery_cursors(trading):
     assert obj.cursor == checkpoint
 
 
-def test_treasury_json_history_resumes_pending_full_articles(trading):
-    obj = spider(trading, 'treasury')
+def test_treasury_json_history_resumes_pending_full_articles(app_env):
+    obj = spider(app_env, 'treasury')
     manifest = 'https://home.treasury.gov/news-data/press-releases/manifest.json'
     request, = obj.parse_listing(response(manifest, json.dumps(treasury_manifest()), lane='history'))
     assert request.url.endswith('/2026-2025.json')
     # A restart must fetch the shard, not declare the empty manifest a finished history.
-    resumed = spider(trading, 'treasury')
+    resumed = spider(app_env, 'treasury')
     resumed.cursor = copy.deepcopy(obj.cursor)
     assert resumed.advance('history')[0].url == request.url
     data = {'category': 'press-releases', 'count': 2, 'items': [
@@ -1515,23 +1515,23 @@ def test_treasury_json_history_resumes_pending_full_articles(trading):
 
 
 @pytest.mark.parametrize('failure', ['total', 'offset', 'host', 'empty'])
-def test_treasury_json_incomplete_manifest_cannot_complete_history(trading, failure):
+def test_treasury_json_incomplete_manifest_cannot_complete_history(app_env, failure):
     data = treasury_manifest()
     if failure == 'total': data['total'] = 4
     if failure == 'offset': data['shards'][1]['offset'] = 0
     if failure == 'host': data['shards'][0]['path'] = 'https://evil.example/shard.json'
     if failure == 'empty': data['shards'] = []
-    obj = spider(trading, 'treasury')
+    obj = spider(app_env, 'treasury')
     with pytest.raises(ValueError):
         list(obj.parse_listing(response('https://home.treasury.gov/news-data/press-releases/manifest.json', json.dumps(data), lane='history')))
     assert not obj.run.history_done
 
 
 @pytest.mark.parametrize('source, expected', [('fincen', 4_000_000), ('sec', 2_000_000)])
-def test_news_spider_has_no_pdf_parser(trading, monkeypatch, source, expected):
+def test_news_spider_has_no_pdf_parser(app_env, monkeypatch, source, expected):
     from alphapulse.crawler.middlewares import NewsContentPolicyMiddleware
     from scrapy.exceptions import IgnoreRequest
-    obj = spider(trading, source)
+    obj = spider(app_env, source)
     assert not hasattr(obj, 'pdf_text')
     request = Request(SOURCES[source].entries[0] + '/report.pdf')
     with pytest.raises(IgnoreRequest):
@@ -1540,8 +1540,8 @@ def test_news_spider_has_no_pdf_parser(trading, monkeypatch, source, expected):
 
 
 
-def test_legacy_pdf_resource_is_a_policy_skip(trading, monkeypatch):
-    obj = spider(trading, 'fincen')
+def test_legacy_pdf_resource_is_a_policy_skip(app_env, monkeypatch):
+    obj = spider(app_env, 'fincen')
     obj.run.history_deadline = time.monotonic() - 1
     doc = {'url': 'https://www.fincen.gov/system/files/report.pdf', 'kind': 'article', 'format': 'pdf'}
     obj.cursor['history']['pending'] = [doc]
@@ -1554,8 +1554,8 @@ def test_legacy_pdf_resource_is_a_policy_skip(trading, monkeypatch):
 
 
 @pytest.mark.parametrize('failure', ['count', 'date', 'host', 'path'])
-def test_treasury_invalid_shard_keeps_history_unfinished(trading, failure):
-    obj = spider(trading, 'treasury')
+def test_treasury_invalid_shard_keeps_history_unfinished(app_env, failure):
+    obj = spider(app_env, 'treasury')
     url = 'https://home.treasury.gov/news-data/press-releases/2026-2025.json'
     obj.cursor['history']['treasury_shards'] = [{'url': url, 'count': 1}]
     item = {'url': '/news/press-releases/sb0001/', 'date': '2025-01-01', 'datetime': '2025-01-01T18:00:00Z'}
@@ -1570,8 +1570,8 @@ def test_treasury_invalid_shard_keeps_history_unfinished(trading, failure):
     assert obj.cursor['history']['treasury_shards'] == [{'url': url, 'count': 1}]
 
 
-def test_treasury_shard_excludes_known_categories_and_retains_legacy_articles(trading):
-    obj = spider(trading, 'treasury')
+def test_treasury_shard_excludes_known_categories_and_retains_legacy_articles(app_env):
+    obj = spider(app_env, 'treasury')
     url = 'https://home.treasury.gov/news-data/press-releases/2026-2023.json'
     obj.cursor['history']['treasury_shards'] = [{'url': url, 'count': 4}]
     items = [{'url': f'/news/press-releases/{name}/'} for name in ('readouts', 'statements-remarks', 'testimonies')]
@@ -1582,9 +1582,9 @@ def test_treasury_shard_excludes_known_categories_and_retains_legacy_articles(tr
 
 
 @pytest.mark.parametrize('failed', [False, True])
-def test_treasury_transport_migration_commits_only_with_json_lanes(trading, monkeypatch, failed):
+def test_treasury_transport_migration_commits_only_with_json_lanes(app_env, monkeypatch, failed):
     from alphapulse.crawler.spiders import base
-    obj = spider(trading, 'treasury')
+    obj = spider(app_env, 'treasury')
     old = {'entry': 0, 'page': SOURCES['treasury'].entries[0] + '?page=2'}
     source = SimpleNamespace(history_target=obj.run.history_target, history_cursor={'history': old, 'realtime': old}, consecutive_failures=0)
     class Session:
@@ -1606,6 +1606,6 @@ def test_treasury_transport_migration_commits_only_with_json_lanes(trading, monk
     else:
         assert source.history_cursor['transport'] == 'treasury-json-v1'
         assert '/news-data/' in source.history_cursor['history']['page']
-    resumed = spider(trading, 'treasury')
+    resumed = spider(app_env, 'treasury')
     resumed.cursor = copy.deepcopy(source.history_cursor)
     assert resumed.first_requests()[0].url.endswith('/news-data/press-releases/manifest.json')

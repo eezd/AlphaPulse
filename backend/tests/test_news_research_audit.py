@@ -10,7 +10,7 @@ import pytest
     "event_id,state", [(2, "done"), (1, "failed"), (1, "superseded")]
 )
 def test_fixed_version_rejects_wrong_event_and_unsuccessful_versions(
-    trading, event_id, state
+    app_env, event_id, state
 ):
     from fastapi import HTTPException
     from alphapulse.news_research.api import event_version
@@ -21,7 +21,7 @@ def test_fixed_version_rejects_wrong_event_and_unsuccessful_versions(
     assert error.value.status_code == 404
 
 
-def test_acceptance_budget_is_shared_and_counts_failed_streams(trading, tmp_path):
+def test_acceptance_budget_is_shared_and_counts_failed_streams(app_env, tmp_path):
     import importlib.util
     from pathlib import Path
 
@@ -41,7 +41,7 @@ def test_acceptance_budget_is_shared_and_counts_failed_streams(trading, tmp_path
     assert counter.read_text() == "2"
 
 
-def test_budget_counts_transport_failures_before_retry(trading, tmp_path):
+def test_budget_counts_transport_failures_before_retry(app_env, tmp_path):
     import importlib.util
     from pathlib import Path
 
@@ -73,7 +73,7 @@ def test_budget_counts_transport_failures_before_retry(trading, tmp_path):
     assert sum(isinstance(e, module.BudgetExceeded) for e in errors) == 1
 
 
-def test_supplemental_citation_must_use_returned_article_id(trading):
+def test_supplemental_citation_must_use_returned_article_id(app_env):
     from alphapulse.news_research.pipeline import validate_evidence, Evidence
 
     sources = {-1: {"news_id": 1004, "content": "Original correction"}}

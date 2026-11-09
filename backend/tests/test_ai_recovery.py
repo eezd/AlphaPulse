@@ -9,7 +9,7 @@ import pytest
 
 
 
-def test_global_failure_takes_over_local_retry_and_recovers(trading, monkeypatch):
+def test_global_failure_takes_over_local_retry_and_recovers(app_env, monkeypatch):
     from alphapulse.ai import llm
     states = iter([
         dict(level=0, epoch=0, admitted=True, probe=False, now=0, retry_at=0),
@@ -41,7 +41,7 @@ def test_global_failure_takes_over_local_retry_and_recovers(trading, monkeypatch
     local.assert_not_awaited()
 
 
-def test_coordinator_failure_does_not_send(trading, monkeypatch):
+def test_coordinator_failure_does_not_send(app_env, monkeypatch):
     from alphapulse.ai import llm
     adapter = AsyncMock()
     monkeypatch.setattr(llm, '_stream_openai', adapter)
@@ -54,7 +54,7 @@ def test_coordinator_failure_does_not_send(trading, monkeypatch):
     adapter.assert_not_called()
 
 
-def test_fail_fast_does_not_send_or_wait(trading, monkeypatch):
+def test_fail_fast_does_not_send_or_wait(app_env, monkeypatch):
     from alphapulse.ai import llm
     gate = N(call=AsyncMock(return_value=dict(level=2, epoch=1, admitted=False, probe=False, now=100, retry_at=700)))
     monkeypatch.setattr(llm, 'recovery_gate', lambda _: gate)
@@ -72,7 +72,7 @@ def test_fail_fast_does_not_send_or_wait(trading, monkeypatch):
     adapter.assert_not_called()
 
 
-def test_completed_probe_is_confirmed_before_caller_returns(trading, monkeypatch):
+def test_completed_probe_is_confirmed_before_caller_returns(app_env, monkeypatch):
     from alphapulse.ai import llm
     gate = N(call=AsyncMock(return_value=dict(level=0, epoch=1, admitted=True, probe=True, now=1, retry_at=0)))
     monkeypatch.setattr(llm, 'recovery_gate', lambda _: gate)
@@ -87,7 +87,7 @@ def test_completed_probe_is_confirmed_before_caller_returns(trading, monkeypatch
     asyncio.run(run())
 
 
-def test_retry_refreshes_only_current_request(trading, monkeypatch):
+def test_retry_refreshes_only_current_request(app_env, monkeypatch):
     from alphapulse.ai import llm
     calls = []
     async def adapter(provider, system, messages, tools, effort):
@@ -108,7 +108,7 @@ def test_retry_refreshes_only_current_request(trading, monkeypatch):
 
 
 @pytest.mark.parametrize('failed_operation', ['success', 'release', 'both'])
-def test_completed_result_survives_coordination_write_failure(trading, monkeypatch, failed_operation):
+def test_completed_result_survives_coordination_write_failure(app_env, monkeypatch, failed_operation):
     from alphapulse.ai import llm
     from alphapulse.news_research.model import complete
     from alphapulse.news_research.contracts import IndexResult
@@ -136,7 +136,7 @@ def test_completed_result_survives_coordination_write_failure(trading, monkeypat
     assert calls.count('enter') == 1 and 'release' in calls
 
 
-def test_cancellation_survives_lease_release_failure(trading, monkeypatch):
+def test_cancellation_survives_lease_release_failure(app_env, monkeypatch):
     from alphapulse.ai import llm
     started = asyncio.Event()
     async def coordinate(operation, *args):

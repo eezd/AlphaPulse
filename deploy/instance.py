@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 import subprocess
 
-SERVICES = ('api', 'web', 'market', 'crawler', 'calendar', 'trader', 'news-risk', 'jin10-calendar')
+SERVICES = ('api', 'web', 'market', 'crawler', 'calendar', 'news-risk', 'jin10-calendar')
 SEARCH_IMAGE = 'docker.io/searxng/searxng:2026.10.30-ffa88e3ba'
 SEARCH_DIGEST = 'sha256:f4aa660c54d062dedb268be84e821ea24e39f48c7a496af8dd02cc9eedb93847'
 

@@ -18,7 +18,7 @@ AI_TABLES = (
     'news_ai_event_versions', 'news_ai_event_members', 'news_ai_events',
     'news_ai_package_corrections', 'news_package_evidence', 'news_ai_summary_versions',
     'news_ai_grouping_versions', 'news_ai_summary_articles', 'news_ai_summaries',
-    'news_ai_article_analyses', 'risk_snapshots', 'risk_analyses', 'risk_events', 'news_signals',
+    'news_ai_article_analyses', 'risk_snapshots', 'risk_analyses', 'risk_events',
 )
 # These retired models were never included in the migration chain.
 OPTIONAL_AI_TABLES = ('news_ai_event_evidence', 'news_ai_event_corrections')
@@ -36,8 +36,7 @@ async def protected_records(connection):
     tables = list(await connection.scalars(text("""
         SELECT tablename FROM pg_tables WHERE schemaname='public' AND
         (tablename IN ('ai_providers','skill_nodes','skill_versions',
-         'chat_sessions','chat_messages','context_versions')
-         OR starts_with(tablename, 'trading_')) ORDER BY tablename
+         'chat_sessions','chat_messages','context_versions')) ORDER BY tablename
     """)))
     quote = connection.dialect.identifier_preparer.quote
     result = {}

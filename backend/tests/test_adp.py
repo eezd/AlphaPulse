@@ -92,7 +92,7 @@ def test_invalid_index_or_external_report_link_fails(body):
 
 @pytest.mark.parametrize("period,release_url,outcome", [("2026-09", "saved-report", "success"), ("2026-08", "saved-report", "error"),
                                                        ("2026-10", None, "pending"), ("2026-09", None, "success")])
-def test_worker_matches_actual_publication_and_statistical_month(trading, period, release_url, outcome):
+def test_worker_matches_actual_publication_and_statistical_month(app_env, period, release_url, outcome):
     from alphapulse.calendar.worker import CalendarWorker
 
     async def run():
@@ -115,7 +115,7 @@ def test_worker_matches_actual_publication_and_statistical_month(trading, period
     asyncio.run(run())
 
 
-def test_history_preview_parses_stored_monthly_evidence_without_writes(trading, monkeypatch):
+def test_history_preview_parses_stored_monthly_evidence_without_writes(app_env, monkeypatch):
     from alphapulse.calendar import backfill
 
     class Session:
@@ -143,7 +143,7 @@ def test_history_preview_parses_stored_monthly_evidence_without_writes(trading, 
     save.assert_not_awaited()
 
 
-def test_history_discovery_continues_past_newer_pages_without_matching_reports(trading, monkeypatch):
+def test_history_discovery_continues_past_newer_pages_without_matching_reports(app_env, monkeypatch):
     from alphapulse.calendar import backfill
 
     historical = '<ul class="wd_item_list"><li class="wd_item"><div class="wd_date">Jan 8, 2025</div><div class="wd_title"><a href="/2025-01-08-ADP-National-Employment-Report-Private-Sector-Employment-Increased-by-122,000-Jobs-in-December">ADP National Employment Report: Private Sector Employment Increased by 122,000 Jobs in December</a></div></li></ul>'

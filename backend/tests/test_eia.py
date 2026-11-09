@@ -70,7 +70,7 @@ def test_archive_discovery_follows_published_report_and_csv_links():
 
 
 @pytest.mark.parametrize("offset,received,expected", [(0, False, "page"), (7, False, "pending"), (-7, True, "pending"), (-7, False, "error")])
-def test_worker_does_not_apply_latest_values_to_another_week(trading, offset, received, expected):
+def test_worker_does_not_apply_latest_values_to_another_week(app_env, offset, received, expected):
     from alphapulse.calendar.worker import CalendarWorker
 
     async def run():
@@ -95,7 +95,7 @@ def test_worker_does_not_apply_latest_values_to_another_week(trading, offset, re
 
 
 @pytest.mark.parametrize("archive_date,valid", [("2026_10_28", True), ("2026_10_21", False)])
-def test_history_preview_requires_matching_archive_date_without_writes(trading, monkeypatch, archive_date, valid):
+def test_history_preview_requires_matching_archive_date_without_writes(app_env, monkeypatch, archive_date, valid):
     from alphapulse.calendar import backfill
 
     class Session:

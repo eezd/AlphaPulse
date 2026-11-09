@@ -98,7 +98,7 @@ async function submit() {
     <header><span class="brand-mark">α</span><strong>AlphaPulse</strong><small>RESEARCH TERMINAL</small></header><div class="login-content">
       <section class="login-intro">
         <span class="text-blue-600 text-xs">新闻 · 事件 · 市场</span><h1>机构级决策与量化研究工作台</h1><p>从原始信息到可追溯的事件判断，连接新闻、市场与研究。</p><div class="login-features">
-          <div><b>全球新闻采集</b><p>官方来源与实时新闻</p></div><div><b>事件持续研究</b><p>关键词、证据与主体时间线</p></div><div><b>行情与模拟盘</b><p>实时数据和策略验证</p></div>
+          <div><b>全球新闻采集</b><p>官方来源与实时新闻</p></div><div><b>事件持续研究</b><p>关键词、证据与主体时间线</p></div><div><b>实时行情</b><p>价格、盘口与 K 线分析</p></div>
         </div>
       </section>
       <el-card class="w-90" shadow="never" body-class="px-8 pb-8 pt-6">

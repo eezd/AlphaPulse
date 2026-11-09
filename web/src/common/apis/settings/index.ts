@@ -55,40 +55,5 @@ export function testProviderApi(id: number) {
   })
 }
 
-/** 读取当前模拟盘交易所设置 */
-export function getExchangeApi() {
-  return request<Settings.GetExchangeResponseData>({
-    url: "/settings/exchange",
-    method: "get"
-  })
-}
-
-/** 切换交易所或保存其凭证 */
-export function putExchangeApi(body: Settings.PutExchangeBodyRequestData) {
-  return request<Settings.PutExchangeResponseData>({
-    url: "/settings/exchange",
-    method: "put",
-    data: body
-  })
-}
-
-/** 删除当前交易所凭证 */
-export function deleteExchangeApi() {
-  return request<Settings.DeleteExchangeResponseData>({
-    url: "/settings/exchange",
-    method: "delete"
-  })
-}
-
-/** 测试当前模拟盘连接 */
-export function testExchangeApi() {
-  return request<Settings.TestExchangeResponseData>({
-    url: "/settings/exchange/test",
-    method: "post",
-    data: null,
-    timeout: 30000
-  })
-}
-
 export interface ProviderAvailability { provider_id: number, name: string, state: string, retry_at: string | null, level: number }
 export const listProviderAvailabilityApi = () => request<ProviderAvailability[]>({ url: "/settings/provider-availability", method: "get", notify: false })

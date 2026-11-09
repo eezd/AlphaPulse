@@ -29,10 +29,6 @@ services:
     container_name: AlphaPulse-dev-market
     command: [python, -m, alphapulse.market.worker]
 
-  trader:
-    <<: *backend
-    container_name: AlphaPulse-dev-trader
-    command: [python, -m, alphapulse.trading.engine]
 
   news-risk:
     <<: *backend

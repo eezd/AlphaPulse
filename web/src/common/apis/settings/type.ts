@@ -49,35 +49,3 @@ export type PatchProviderResponseData = Provider
 export type DeleteProviderResponseData = null
 
 export type TestProviderResponseData = TestResult
-
-export type ExchangeName = "binance" | "bybit"
-
-export interface Exchange {
-  exchange: ExchangeName
-  configured_exchanges: ExchangeName[]
-  configured: boolean
-  api_key_hint: string | null
-  /** 是否有币种在交易：交易中不能修改 key */
-  running: boolean
-  updated_at: string | null
-}
-
-export interface ExchangeTestResult {
-  ok: boolean
-  elapsed_ms: number
-  available_usdt: string | null
-  wallet_usdt: string | null
-  /** 双向持仓模式；引擎使用单向持仓，启动时会切换 */
-  dual_side_position: boolean | null
-  error: string | null
-}
-
-export type GetExchangeResponseData = Exchange
-
-export type PutExchangeResponseData = Exchange
-
-export interface PutExchangeBodyRequestData { exchange?: ExchangeName, api_key?: string, api_secret?: string }
-
-export type DeleteExchangeResponseData = Exchange
-
-export type TestExchangeResponseData = ExchangeTestResult

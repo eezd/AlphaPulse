@@ -4,7 +4,6 @@ from alphapulse.models.ai import AiProvider, ChatMessage, ChatSession, ContextVe
 from alphapulse.models.calendar import EconomicRelease, EconomicRevision, EconomicSeriesValue
 from alphapulse.models.market import Kline, KlineSyncState, MarketSymbol
 from alphapulse.models.news import CrawlLog, CrawlRun, NewsBookmark, NewsItem, NewsRevision, RawBody, RawResponse, Source
-from alphapulse.models.trading import NewsSignal, TradingAccount, TradingAnalysis, TradingCredential, TradingEvent, TradingFill, TradingOrder, TradingSymbol
 
 __all__ = [
     "Jin10Connection",
@@ -24,20 +23,12 @@ __all__ = [
     "MarketSymbol",
     "NewsItem",
     "NewsBookmark",
-    "NewsSignal",
     "NewsRevision",
     "RawBody",
     "RawResponse",
     "SkillNode",
     "SkillVersion",
     "Source",
-    "TradingAccount",
-    "TradingAnalysis",
-    "TradingCredential",
-    "TradingEvent",
-    "TradingFill",
-    "TradingOrder",
-    "TradingSymbol",
 ]
 
 # Register additive news research tables with Alembic metadata.

@@ -39,12 +39,16 @@ async def main():
         client.headers['Authorization'] = 'Bearer ' + token
         try:
             for path in ['/api/auth/me', '/api/news?q=CI', '/api/crawler/sources', '/api/market/symbols',
-                         '/api/skills/tree', '/api/trading/status', '/api/chat/session',
+                         '/api/skills/tree', '/api/chat/session',
                          '/api/risk/settings', '/api/risk/events', '/api/risk/packages',
                          '/api/calendar?start=' + now.strftime('%Y-%m-%d')]:
                 response = await client.get(path)
                 response.raise_for_status()
                 assert response.json()['code'] == 0, path
+            for method, path in [('GET', '/api/trading/status'), ('POST', '/api/trading/BTCUSDT/start'),
+                                 ('GET', '/api/settings/exchange'), ('PUT', '/api/settings/exchange'),
+                                 ('DELETE', '/api/settings/exchange'), ('POST', '/api/settings/exchange/test')]:
+                assert (await client.request(method, path)).status_code == 404, (method, path)
             assert 'CI synthetic news' in (await client.get('/api/news?q=CI')).text
             for endpoint in ('events', 'packages'):
                 assert (await client.get('/api/risk/'+endpoint, params={'page': 0})).status_code == 422
@@ -53,7 +57,7 @@ async def main():
             assert selected.status_code == 200 and [n['id'] for n in selected.json()['data']['items']] == [item['id']]
             assert (await client.get('/api/news', params=[('ids', n) for n in range(101)])).status_code == 422
             assert 'CI CPI' in (await client.get('/api/calendar?start=' + now.strftime('%Y-%m-%d'))).text
-            for path in ['/', '/home', '/news', '/calendar', '/crawler', '/market', '/trading', '/chat', '/skills', '/settings']:
+            for path in ['/', '/home', '/news', '/calendar', '/crawler', '/market', '/chat', '/skills', '/settings']:
                 response = await client.get(path)
                 assert response.status_code == 200 and '<html' in response.text.lower(), path
             assert (await client.get('/version.json')).json()['commit'] == os.environ['APP_COMMIT']

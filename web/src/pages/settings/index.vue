@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import ExchangeSettings from "./components/ExchangeSettings.vue"
 import Jin10Settings from "./components/Jin10Settings.vue"
 import ProviderSettings from "./components/ProviderSettings.vue"
 </script>
@@ -7,11 +6,10 @@ import ProviderSettings from "./components/ProviderSettings.vue"
 <template>
   <div class="settings-workspace">
     <div class="settings-heading">
-      <h1>环境变量配置</h1><p>模型接入、数据连接与模拟盘凭据 · 密钥加密存储，仅显示脱敏信息</p>
+      <h1>环境变量配置</h1><p>模型接入与数据连接 · 密钥加密存储，仅显示脱敏信息</p>
     </div><div class="settings-sections">
       <ProviderSettings />
       <Jin10Settings />
-      <ExchangeSettings />
     </div>
   </div>
 </template>

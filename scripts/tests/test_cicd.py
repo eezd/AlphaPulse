@@ -19,6 +19,13 @@ import mirror
 
 
 class BuildTests(unittest.TestCase):
+    def test_compose_contains_only_the_seven_supported_services(self):
+        import re
+        content = (ci.ROOT / 'deploy/docker-compose.yml').read_text()
+        self.assertEqual(set(re.findall(r'^  ([a-z][a-z0-9-]*):$', content, re.M)), set(deploy.SERVICES))
+        self.assertEqual(len(deploy.SERVICES), 7)
+        self.assertNotIn('alphapulse.trading', content)
+
     def test_search_health_checks_image_content_across_reference_styles(self):
         container = {'Name': '/search', 'Image': 'accepted-local-image', 'RestartCount': 0,
                      'Config': {'Image': 'historical@sha256:' + '1' * 64,
@@ -165,13 +172,13 @@ class RecoveryTests(unittest.TestCase):
                 self.assertEqual(health.call_args.args[2], services)
             self.assertFalse((directory / 'deployment.pending.json').exists())
 
-    def test_pending_write_failure_never_pauses_trader(self):
+    def test_pending_write_failure_never_stops_services(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             previous = {'version':'20261101-aaaaaaaa', 'images': {part: {'digest': 'synthetic'} for part in ci.IMAGES}}
             ci.save(directory / 'deployment.json', previous)
             (directory / 'compose.yml').write_text('synthetic')
-            running = [{'Config': {'Labels': {'com.docker.compose.service': 'trader'}}, 'State': {'Running': True}}]
+            running = [{'Config': {'Labels': {'com.docker.compose.service': 'market'}}, 'State': {'Running': True}}]
             with patch.object(deploy, 'INSTANCE', directory), patch.object(deploy, 'branch_head', return_value='a' * 40), \
                     patch.object(deploy, 'validate_images'), patch.object(deploy, 'inspect_services', return_value=running), \
                     patch.object(deploy, 'run', return_value='{"busy":0}') as run, patch.object(deploy, 'validate_search_image'), \
@@ -186,15 +193,11 @@ class RecoveryTests(unittest.TestCase):
             previous = {'version':'20261101-aaaaaaaa', 'images': {part: {'digest': 'synthetic'} for part in ci.IMAGES}}
             ci.save(directory / 'deployment.json', previous)
             (directory / 'compose.yml').write_text('synthetic')
-            running = [{'Config': {'Labels': {'com.docker.compose.service': 'trader'}}, 'State': {'Running': True}}]
+            running = [{'Config': {'Labels': {'com.docker.compose.service': 'market'}}, 'State': {'Running': True}}]
             idle = iter(['{"busy":0}', '{"busy":1}'])
             def command(*args, **kwargs):
                 if kwargs.get('input') == deploy.IDLE:
                     return next(idle)
-                if args[:2] == ('docker', 'inspect'):
-                    return '[{"State":{"Paused":true}}]'
-                if args[:2] == ('docker', 'ps'):
-                    return 'trader-id'
                 if args[:3] == ('docker', 'image', 'inspect'):
                     return json.dumps([{'RepoDigests': ['searxng/searxng@' + deploy.SEARXNG_DIGEST]}])
                 return '{}'
@@ -204,28 +207,58 @@ class RecoveryTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'Analysis became active'):
                     deploy.deploy({**previous, 'commit': 'a' * 40}, directory)
                 self.assertFalse(any('stop' in call.args for call in run.call_args_list))
-                self.assertTrue(any(call.args[:2] == ('docker', 'unpause') for call in run.call_args_list))
+                self.assertFalse(any(call.args[:2] in [('docker', 'pause'), ('docker', 'unpause')] for call in run.call_args_list))
             self.assertFalse((directory / 'deployment.pending.json').exists())
 
-    def test_preparation_recovery_unpauses_without_replacing_services(self):
+    def test_preparation_recovery_leaves_services_untouched(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             ci.save(directory / 'deployment.pending.json', {})
-            with patch.object(deploy, 'run', side_effect=['trader-id', '[{"State":{"Paused":true}}]', '']) as run, \
+            with patch.object(deploy, 'run') as run, \
                     patch.object(deploy, 'validate_images') as validate:
                 deploy.restore(directory, {'previous': {}, 'phase': 'preparing'})
-                run.assert_called_with('docker', 'unpause', 'trader-id')
+                run.assert_not_called()
                 validate.assert_not_called()
             self.assertFalse((directory / 'deployment.pending.json').exists())
 
-    def test_failed_unpause_preserves_pending(self):
+    def test_schema_mismatch_preserves_pending_without_changing_services(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             ci.save(directory / 'deployment.pending.json', {})
-            with patch.object(deploy, 'run', side_effect=['trader-id', '[{"State":{"Paused":true}}]', RuntimeError('unpause failed')]):
-                with self.assertRaisesRegex(RuntimeError, 'unpause failed'):
-                    deploy.restore(directory, {'previous': {}, 'phase': 'preparing'})
+            (directory / 'compose.yml').write_text('current')
+            with patch.object(deploy, 'validate_images'), \
+                    patch.object(deploy, 'validate_schema', side_effect=RuntimeError('incompatible schema')), \
+                    patch.object(deploy, 'run') as run:
+                with self.assertRaisesRegex(RuntimeError, 'incompatible schema'):
+                    deploy.restore(directory, {'previous': {}, 'previous_compose': 'old', 'previous_running': ['api']})
+                run.assert_not_called()
+            self.assertEqual((directory / 'compose.yml').read_text(), 'current')
             self.assertTrue((directory / 'deployment.pending.json').exists())
+
+    def test_trading_maintenance_never_restores_legacy_workers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            ci.save(directory / 'deployment.pending.json', {})
+            with patch.object(deploy, 'run') as run, patch.object(deploy, 'validate_images') as validate:
+                with self.assertRaisesRegex(RuntimeError, 'Trading maintenance is incomplete'):
+                    deploy.restore(directory, {'operation': 'remove-trading', 'phase': 'migration'})
+                run.assert_not_called()
+                validate.assert_not_called()
+            self.assertTrue((directory / 'deployment.pending.json').exists())
+
+    def test_rollback_checks_schema_before_stopping_current_services(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            ci.save(directory / 'deployment.previous.json', {})
+            (directory / 'compose.previous.yml').write_text('services:')
+            with patch.object(deploy, 'INSTANCE', directory), patch.object(sys, 'argv', ['deploy.py', 'rollback']), \
+                    patch.object(deploy, 'validate_images'), \
+                    patch.object(deploy, 'validate_schema', side_effect=RuntimeError('incompatible schema')), \
+                    patch.object(deploy, 'run') as run:
+                with self.assertRaisesRegex(RuntimeError, 'incompatible schema'):
+                    deploy.main()
+                run.assert_not_called()
+            self.assertFalse((directory / 'deployment.pending.json').exists())
 
     def test_missing_or_wrong_github_identity_never_synchronizes(self):
         for token, identity in [('', None), ('synthetic', {'login': 'other'})]:

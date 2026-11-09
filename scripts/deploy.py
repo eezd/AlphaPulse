@@ -15,7 +15,7 @@ SEARXNG_IMAGE = 'docker.io/searxng/searxng:2026.10.30-ffa88e3ba'
 SEARXNG_DIGEST = 'sha256:f4aa660c54d062dedb268be84e821ea24e39f48c7a496af8dd02cc9eedb93847'
 
 INSTANCE = Path('/docker/gitea/dev/AlphaPulse')
-SERVICES = ('api', 'web', 'market', 'crawler', 'calendar', 'trader', 'news-risk', 'jin10-calendar')
+SERVICES = ('api', 'web', 'market', 'crawler', 'calendar', 'news-risk', 'jin10-calendar')
 
 # Recognize the unmodified skill templates installed before entrypoint versioning.
 LEGACY_ENTRIES = {
@@ -62,24 +62,19 @@ asyncio.run(main())
 IDLE = '''
 import asyncio, json
 import httpx
-from sqlalchemy import text
 from alphapulse.core.auth import create_token, require_session, revoke_session
 from fastapi.security import HTTPAuthorizationCredentials
 from alphapulse.core.config import get_settings
-from alphapulse.core.db import engine
 async def main():
-    async with engine.connect() as connection:
-        busy = await connection.scalar(text("SELECT count(*) FROM trading_analyses WHERE status='running'"))
     token, _ = await create_token(get_settings().admin_username)
     principal = await require_session(HTTPAuthorizationCredentials(scheme="Bearer", credentials=token))
     try:
         async with httpx.AsyncClient(trust_env=False) as client:
             response = await client.get("http://localhost:8000/api/chat/session", headers={"Authorization":"Bearer "+token})
             response.raise_for_status()
-            busy += int(response.json()["data"]["generating"])
+            busy = int(response.json()["data"]["generating"])
     finally:
         await revoke_session(principal)
-        await engine.dispose()
     print(json.dumps({"busy": busy}))
 asyncio.run(main())
 '''
@@ -101,6 +96,12 @@ def validate_images(build):
         require(labels.get('org.opencontainers.image.revision') == build['commit'], 'Image revision mismatch')
         require(labels.get('org.opencontainers.image.version') == build['version'], 'Image version mismatch')
         require(info['Architecture'] == 'amd64' and info['Os'] == 'linux', 'Unexpected image architecture')
+
+
+def validate_schema(build, directory):
+    """Reject incompatible images before changing configuration or stopping services."""
+    print(run('docker', 'run', '--rm', '-i', '--network', 'dev_default', '--env-file', directory / '.env',
+              IMAGES['backend'] + ':' + build['version'], 'python', '-', input=SCHEMA), flush=True)
 
 
 def validate_search_image():
@@ -167,8 +168,7 @@ def deploy_locked(build, directory, maintenance=None):
         return
     validate_images(build)
     # Only this read-only schema guard receives the existing application environment.
-    print(run('docker', 'run', '--rm', '-i', '--network', 'dev_default', '--env-file', directory / '.env',
-              IMAGES['backend'] + ':' + build['version'], 'python', '-', input=SCHEMA), flush=True)
+    validate_schema(build, directory)
     previous_file = directory / 'deployment.json'
     previous = json.loads(previous_file.read_text()) if previous_file.exists() else None
     old_compose = (directory / 'compose.yml').read_text() if previous else None
@@ -184,7 +184,7 @@ def deploy_locked(build, directory, maintenance=None):
                 break
             time.sleep(5)
         else:
-            require(not previous_running, 'Chat or trading analysis did not become idle within five minutes')
+            require(not previous_running, 'Chat did not become idle within five minutes')
     # Recheck after pulls and waiting; only a current dev commit can mutate the instance.
     current_head = branch_head()
     if maintenance is not None:
@@ -196,25 +196,22 @@ def deploy_locked(build, directory, maintenance=None):
     pending = {'build': build, 'previous': previous, 'previous_compose': old_compose,
                'previous_running': previous_running, 'started_at': time.time(), 'phase': 'preparing'}
     if maintenance is not None:
-        pending.update(operation='remove-cls', phase='updating')
+        pending.update(operation=maintenance['operation'], phase='updating')
     save(directory / 'deployment.pending.json', pending)
     try:
-        if previous and 'trader' in previous_running:
-            run('docker', 'pause', 'AlphaPulse-dev-trader')
+        if previous_running:
             idle = json.loads(run('docker', 'exec', '-i', 'AlphaPulse-dev-api', 'python', '-', input=IDLE))
             require(not idle['busy'], 'Analysis became active during preparation; retry after it completes')
         # Persist the transition before stopping any existing service.
         save(directory / 'deployment.pending.json', {**pending, 'phase': 'updating'})
         pending['phase'] = 'updating'
         if previous:
-            # Docker unpauses a paused container before delivering the stop signal.
-            run(*old_command, 'stop', 'trader')
-            run(*old_command, 'stop', *[service for service in previous_running if service != 'trader'])
+            run(*old_command, 'stop')
         (directory / 'compose.yml').write_text((ROOT / 'deploy/docker-compose.yml').read_text())
         command = compose(directory, build)
         run(*command, 'config', '--quiet')
         run(*command, 'up', '-d', '--no-build', '--pull', 'never', '--remove-orphans', '--wait', '--wait-timeout', '120', 'api', 'web')
-        run(*command, 'up', '-d', '--no-build', '--pull', 'never', 'market', 'crawler', 'calendar', 'trader', 'news-risk', 'jin10-calendar')
+        run(*command, 'up', '-d', '--no-build', '--pull', 'never', 'market', 'crawler', 'calendar', 'news-risk', 'jin10-calendar')
         time.sleep(5)
         health(command, build)
         if previous:
@@ -236,15 +233,12 @@ def deploy_locked(build, directory, maintenance=None):
 
 
 def restore(directory, pending):
+    require(pending.get('operation') != 'remove-trading' or pending.get('phase') == 'preparing',
+            'Trading maintenance is incomplete; resume the accepted candidate; services must remain stopped')
     require(pending.get('operation') != 'remove-cls' or pending.get('phase') == 'preparing',
             'CLS maintenance is incomplete; retry remove-cls with a current accepted build; services must remain stopped')
     previous = pending['previous']
     require(previous is not None, 'No previous deployment exists; inspect the pending first-start failure')
-    trader = run('docker', 'ps', '-aq', '--filter', 'name=^/AlphaPulse-dev-trader$')
-    if trader:
-        state = json.loads(run('docker', 'inspect', trader))[0]['State']
-        if state['Paused']:
-            run('docker', 'unpause', trader)
     if pending.get('phase') == 'preparing':
         # No service has been stopped or replaced during preparation.
         (directory / 'deployment.pending.json').unlink()
@@ -256,6 +250,7 @@ def restore(directory, pending):
             'Previous Compose contains an unknown digest reference; verify its version tag before recovery')
     if re.search(r'^  searxng:$', previous_compose, re.M):
         validate_search_image()
+    validate_schema(previous, directory)
     (directory / 'compose.yml').write_text(previous_compose)
     command = compose(directory, previous)
     if pending['previous_running']:
@@ -295,7 +290,7 @@ def remove_cls(build, execute=False):
             pending['build'] = build
             save(marker, pending)
         if pending['phase'] == 'preparing':
-            # Preparation recovery only unpauses; destructive stages always remain stopped.
+            # Preparation leaves services intact; destructive stages always remain stopped.
             try:
                 running = any(container['State']['Running'] for container in inspect_services(old_command))
                 if running:
@@ -305,8 +300,7 @@ def remove_cls(build, execute=False):
                             break
                         time.sleep(5)
                     else:
-                        raise RuntimeError('Chat or trading analysis remained busy')
-                    run('docker', 'pause', 'AlphaPulse-dev-trader')
+                        raise RuntimeError('Chat remained busy')
                     idle = json.loads(run('docker', 'exec', '-i', 'AlphaPulse-dev-api', 'python', '-', input=IDLE))
                     require(not idle['busy'], 'Analysis became active; retry after it completes')
                 save(marker, {**pending, 'phase': 'stopping'})
@@ -354,6 +348,8 @@ def main():
                 pending = {'previous': previous, 'previous_compose': (INSTANCE / 'compose.previous.yml').read_text(),
                            'previous_running': [name for name in re.findall(r'^  ([a-z][a-z0-9-]*):$',
                                (INSTANCE / 'compose.previous.yml').read_text(), re.M) if name in SERVICES]}
+                validate_images(previous)
+                validate_schema(previous, INSTANCE)
                 save(INSTANCE / 'deployment.pending.json', pending)
                 run(*compose(INSTANCE, json.loads((INSTANCE / 'deployment.json').read_text())), 'stop')
                 restore(INSTANCE, pending)

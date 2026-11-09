@@ -6,7 +6,7 @@ import pytest
 
 
 @pytest.fixture
-def scenario(trading, monkeypatch):
+def scenario(app_env, monkeypatch):
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / 'scripts'))
     import accept_news_scenario
     return accept_news_scenario
@@ -82,7 +82,7 @@ def test_external_or_duplicate_versions_do_not_count_as_natural_revisions(scenar
     assert not next(c['passed'] for c in checks if c['name'] == 'three_natural_revisions')
 
 
-def test_published_skill_retains_base_instructions(trading, monkeypatch):
+def test_published_skill_retains_base_instructions(app_env, monkeypatch):
     import asyncio
     from types import SimpleNamespace
     from unittest.mock import AsyncMock

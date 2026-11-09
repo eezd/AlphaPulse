@@ -8,7 +8,7 @@ from scrapy.http import Request, TextResponse
 
 
 @pytest.fixture
-def wscn(trading):
+def wscn(app_env):
     from alphapulse.crawler.spiders.base import RunState
     from alphapulse.crawler.spiders.wscn import WscnNewsSpider
 

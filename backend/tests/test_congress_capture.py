@@ -12,7 +12,7 @@ import pytest
 SCRIPT = Path(__file__).resolve().parents[2] / 'scripts/capture_congress.py'
 
 
-def test_capture_redacts_and_reuses_successful_response(trading, tmp_path, monkeypatch):
+def test_capture_redacts_and_reuses_successful_response(app_env, tmp_path, monkeypatch):
     module = runpy.run_path(str(SCRIPT))
     monkeypatch.setattr(module['time'], 'sleep', lambda seconds: None)
     seen = []
@@ -32,7 +32,7 @@ def test_capture_redacts_and_reuses_successful_response(trading, tmp_path, monke
         assert 'X-Api-Key' not in seen[-1].headers
 
 
-def test_capture_stops_after_rate_limit_and_reports_incomplete(trading, tmp_path):
+def test_capture_stops_after_rate_limit_and_reports_incomplete(app_env, tmp_path):
     module = runpy.run_path(str(SCRIPT))
     calls = []
     def handle(request):
@@ -49,7 +49,7 @@ def test_capture_stops_after_rate_limit_and_reports_incomplete(trading, tmp_path
     assert 'private-test-secret' not in json.dumps(report)
 
 
-def test_capture_keeps_progress_on_budget_exhaustion(trading, tmp_path, monkeypatch):
+def test_capture_keeps_progress_on_budget_exhaustion(app_env, tmp_path, monkeypatch):
     module = runpy.run_path(str(SCRIPT))
     monkeypatch.setattr(module['time'], 'sleep', lambda seconds: None)
     path = tmp_path / 'cache.gz'
@@ -64,7 +64,7 @@ def test_capture_keeps_progress_on_budget_exhaustion(trading, tmp_path, monkeypa
         assert resumed.fetch('https://www.govinfo.gov/second.pdf') == b'body'
 
 
-def test_capture_replays_all_case_callbacks_without_external_io(trading, tmp_path, monkeypatch):
+def test_capture_replays_all_case_callbacks_without_external_io(app_env, tmp_path, monkeypatch):
     module = runpy.run_path(str(SCRIPT))
     monkeypatch.setattr(module['time'], 'sleep', lambda seconds: None)
     def handle(request):

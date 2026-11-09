@@ -9,7 +9,7 @@ import pytest
 
 
 @pytest.mark.parametrize('source', ['eia', 'dol'])
-def test_archive_resolution_uses_discovered_links(trading, source):
+def test_archive_resolution_uses_discovered_links(app_env, source):
     from alphapulse.calendar.worker import CalendarWorker
     async def run():
         worker = CalendarWorker()
@@ -32,7 +32,7 @@ def test_archive_resolution_uses_discovered_links(trading, source):
 
 
 @pytest.mark.parametrize('status', [403, 429, 503])
-def test_host_cooldown_blocks_network_but_not_other_hosts(trading, monkeypatch, status):
+def test_host_cooldown_blocks_network_but_not_other_hosts(app_env, monkeypatch, status):
     from alphapulse.calendar import worker as module
     async def run():
         worker = module.CalendarWorker()
@@ -55,7 +55,7 @@ def test_host_cooldown_blocks_network_but_not_other_hosts(trading, monkeypatch, 
     asyncio.run(run())
 
 
-def test_adp_follows_weekly_page_to_monthly_and_stops_cycles(trading):
+def test_adp_follows_weekly_page_to_monthly_and_stops_cycles(app_env):
     from alphapulse.calendar import worker as module, adp
     async def run():
         worker = module.CalendarWorker()
@@ -75,7 +75,7 @@ def test_adp_follows_weekly_page_to_monthly_and_stops_cycles(trading):
     asyncio.run(run())
 
 
-def test_same_poll_requests_are_coalesced_and_next_poll_refetches(trading):
+def test_same_poll_requests_are_coalesced_and_next_poll_refetches(app_env):
     from alphapulse.calendar.worker import CalendarWorker
     async def run():
         worker = CalendarWorker()
@@ -95,7 +95,7 @@ def test_same_poll_requests_are_coalesced_and_next_poll_refetches(trading):
 
 
 @pytest.mark.parametrize('source', ['dol', 'eia'])
-def test_historical_rows_with_rolling_url_resolve_archives(trading, monkeypatch, source):
+def test_historical_rows_with_rolling_url_resolve_archives(app_env, monkeypatch, source):
     from alphapulse.calendar import worker as module, dol, eia
     async def run():
         worker = module.CalendarWorker()
@@ -115,7 +115,7 @@ def test_historical_rows_with_rolling_url_resolve_archives(trading, monkeypatch,
     asyncio.run(run())
 
 
-def test_missing_retry_after_uses_bounded_exponential_delay(trading, monkeypatch):
+def test_missing_retry_after_uses_bounded_exponential_delay(app_env, monkeypatch):
     from alphapulse.calendar import worker as module
     clock = [datetime(2026, 11, 2, tzinfo=UTC)]
     class Clock(datetime):
@@ -142,7 +142,7 @@ def test_missing_retry_after_uses_bounded_exponential_delay(trading, monkeypatch
     asyncio.run(run())
 
 
-def test_adp_publication_is_visible_on_next_poll_even_with_old_cache(trading):
+def test_adp_publication_is_visible_on_next_poll_even_with_old_cache(app_env):
     from alphapulse.calendar import adp
     from alphapulse.calendar.worker import CalendarWorker
     async def run():
@@ -165,7 +165,7 @@ def test_adp_publication_is_visible_on_next_poll_even_with_old_cache(trading):
 
 @pytest.mark.parametrize('source', ['dol', 'eia'])
 @pytest.mark.parametrize('outcome', ['match', 'wrong_period', 'unavailable', 'invalid_archive'])
-def test_missing_archive_checks_latest_without_accepting_wrong_week(trading, monkeypatch, source, outcome):
+def test_missing_archive_checks_latest_without_accepting_wrong_week(app_env, monkeypatch, source, outcome):
     from alphapulse.calendar import worker as module, dol, eia
     from alphapulse.calendar.archives import ArchiveMissing
     from test_dol import REPORT
@@ -205,7 +205,7 @@ def test_missing_archive_checks_latest_without_accepting_wrong_week(trading, mon
     asyncio.run(run())
 
 
-def test_result_retirement_is_persistent_and_cooling_does_not_spend_budget(trading, monkeypatch):
+def test_result_retirement_is_persistent_and_cooling_does_not_spend_budget(app_env, monkeypatch):
     from alphapulse.calendar import worker as module
 
     async def run():
@@ -235,7 +235,7 @@ def test_result_retirement_is_persistent_and_cooling_does_not_spend_budget(tradi
     asyncio.run(run())
 
 
-def test_dol_lagging_index_uses_only_expected_official_archive(trading):
+def test_dol_lagging_index_uses_only_expected_official_archive(app_env):
     from alphapulse.calendar.worker import CalendarWorker
     async def run():
         worker = CalendarWorker()
@@ -251,7 +251,7 @@ def test_dol_lagging_index_uses_only_expected_official_archive(trading):
     asyncio.run(run())
 
 
-def test_restart_honors_persisted_source_pause(trading, monkeypatch):
+def test_restart_honors_persisted_source_pause(app_env, monkeypatch):
     from alphapulse.calendar import worker as module
     session = AsyncMock()
     session.__aenter__.return_value = session
@@ -269,7 +269,7 @@ def test_restart_honors_persisted_source_pause(trading, monkeypatch):
             await worker.bls.aclose()
     asyncio.run(run())
 
-def test_dol_release_day_prefers_dated_archive_without_rolling_request(trading, monkeypatch):
+def test_dol_release_day_prefers_dated_archive_without_rolling_request(app_env, monkeypatch):
     from alphapulse.calendar import worker as module, dol
     from test_dol import REPORT
     class ReleaseDay(datetime):

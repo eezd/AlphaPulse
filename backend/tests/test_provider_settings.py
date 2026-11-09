@@ -12,7 +12,7 @@ import pytest
 @pytest.mark.parametrize("initial,requested,status", [
     (True, False, 409), (False, False, 200), (False, True, 200), (True, True, 200),
 ])
-def test_patch_provider_default_contract(trading, monkeypatch, initial, requested, status):
+def test_patch_provider_default_contract(app_env, monkeypatch, initial, requested, status):
     from alphapulse.api import settings
     from alphapulse.api.main import app
     from alphapulse.core.auth import require_admin
@@ -56,7 +56,7 @@ def test_patch_provider_default_contract(trading, monkeypatch, initial, requeste
 
 
 @pytest.mark.parametrize('protocol,base_url', [('openai', 'https://example.invalid/v1/'), ('anthropic', 'https://example.invalid/')])
-def test_model_catalog_uses_selected_protocol_and_reads_all_pages(trading, monkeypatch, protocol, base_url):
+def test_model_catalog_uses_selected_protocol_and_reads_all_pages(app_env, monkeypatch, protocol, base_url):
     from alphapulse.ai import llm
     options = []
 
@@ -82,7 +82,7 @@ def test_model_catalog_uses_selected_protocol_and_reads_all_pages(trading, monke
 
 
 @pytest.mark.parametrize('failure', ['http', 'timeout', 'invalid_id'])
-def test_model_catalog_failures_remain_explicit_without_exposing_upstream_details(trading, monkeypatch, failure):
+def test_model_catalog_failures_remain_explicit_without_exposing_upstream_details(app_env, monkeypatch, failure):
     from alphapulse.ai import llm
 
     class Page:
@@ -109,7 +109,7 @@ def test_model_catalog_failures_remain_explicit_without_exposing_upstream_detail
 
 
 @pytest.mark.parametrize('failure', [None, 'unavailable', 'missing'])
-def test_provider_model_catalog_http_contract(trading, monkeypatch, failure):
+def test_provider_model_catalog_http_contract(app_env, monkeypatch, failure):
     from fastapi import FastAPI, HTTPException
     from alphapulse.api import settings
     provider = SimpleNamespace(id=1)
@@ -136,7 +136,7 @@ def test_provider_model_catalog_http_contract(trading, monkeypatch, failure):
     asyncio.run(check())
 
 
-def test_delete_provider_rejects_two_stage_binding_even_when_paused(trading, monkeypatch):
+def test_delete_provider_rejects_two_stage_binding_even_when_paused(app_env, monkeypatch):
     from fastapi import HTTPException
     from alphapulse.api import settings
     session=SimpleNamespace(scalar=AsyncMock(return_value=SimpleNamespace(enabled=False)),delete=AsyncMock())

@@ -5,7 +5,7 @@ import pytest
 
 
 @pytest.fixture
-def pipeline(trading):
+def pipeline(app_env):
     from alphapulse.news_research import pipeline
     return pipeline
 
@@ -176,7 +176,7 @@ def test_oversized_scope_fails_before_model_call_with_article_identity(pipeline,
     complete.assert_not_awaited()
 
 
-def test_alias_cleanup_preserves_tags_valid_aliases_and_raw_output(trading):
+def test_alias_cleanup_preserves_tags_valid_aliases_and_raw_output(app_env):
     from alphapulse.news_research.contracts import IndexResult
     from alphapulse.news_research.service import clean_aliases, validate_keywords
     raw = IndexResult(keywords=[dict(canonical='插件调用计费', aliases=['插件调用','插件调用收费'], quote='插件调用单独计费')])
@@ -207,7 +207,7 @@ def test_quote_alignment_only_recovers_unique_punctuation_whitespace(pipeline, s
         assert value['claims'][0]['evidence_refs'][0]['quote'] == quote
 
 
-def test_oversized_tool_response_is_not_delivered_or_registered(trading, monkeypatch):
+def test_oversized_tool_response_is_not_delivered_or_registered(app_env, monkeypatch):
     from alphapulse.news_research.tools import Research
     from alphapulse.news_research import model
     from alphapulse.ai.llm import Completion
@@ -240,7 +240,7 @@ def test_oversized_tool_response_is_not_delivered_or_registered(trading, monkeyp
     assert len(reader.records[0]['undelivered_result']['content']) == 20000
 
 
-def test_undelivered_source_is_not_restored_as_read(trading):
+def test_undelivered_source_is_not_restored_as_read(app_env):
     from alphapulse.news_research.tools import Research
     reader = Research()
     reader.restore([{'tool':'read_news','arguments':{'id':99},
@@ -249,7 +249,7 @@ def test_undelivered_source_is_not_restored_as_read(trading):
 
 
 @pytest.mark.parametrize('context_window,body_length', [(8000, 7310), (250000, 249310)])
-def test_parallel_tool_responses_leave_room_for_final_submission(trading, monkeypatch, context_window, body_length):
+def test_parallel_tool_responses_leave_room_for_final_submission(app_env, monkeypatch, context_window, body_length):
     from alphapulse.news_research.tools import Research
     from alphapulse.news_research import model
     from alphapulse.ai.llm import Completion

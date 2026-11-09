@@ -4,7 +4,7 @@ Gitea (`https://git.134333.xyz/eezd/AlphaPulse`) is the source repository; GitHu
 
 ## Checks and images
 
-Both branch workflows run Python 3.13/uv checks, Node 24/pnpm 12.11.2 checks, Linux amd64 image builds and acceptance against temporary PostgreSQL/Redis. Acceptance runs on an internal Docker network with synthetic data; no worker or external model/trading service starts there. Foreign PRs do not enter the shared Docker runner.
+Both branch workflows run Python 3.13/uv checks, Node 24/pnpm 12.11.2 checks, Linux amd64 image builds and acceptance against temporary PostgreSQL/Redis. Acceptance runs on an internal Docker network with synthetic data; no worker or external model service starts there. Foreign PRs do not enter the shared Docker runner.
 
 Only a `dev` push publishes the accepted images:
 
@@ -17,15 +17,15 @@ The date comes from the commit's committer timestamp in UTC, and the suffix is t
 
 ## Research workspace UI
 
-The Stitch workspace shares navigation across research, news, calendar, collection, market, trading, Chat, Skills and settings. News supports personal bookmarks and current-revision processing filters; research reports bind conclusions and original sources to an immutable successful version. Calendar and collector details adapt to the viewport. Market depth, aggregate trades and funding data use Redis cache/replay; futures depth retains the exchange event timestamp. Fullscreen includes popup menus. Trading configuration supports editing and saving at desktop and mobile widths.
+The Stitch workspace shares navigation across research, news, calendar, collection, market, Chat, Skills and settings. News supports personal bookmarks and current-revision processing filters; research reports bind conclusions and original sources to an immutable successful version. Calendar and collector details adapt to the viewport. Market depth, aggregate trades and funding data use Redis cache/replay; futures depth retains the exchange event timestamp. Fullscreen includes popup menus.
 
-The additive `de5678901234` migration follows `dd4567890123` and creates only `news_bookmarks` (username/news ID key, creation time and a cascading news foreign key). It does not rewrite original news, research results or model settings. Its production execution requires the independent schema authorization described below before the deployment schema guard can pass. CI browser acceptance covers full-screen menus and configuration editing/saving at 1600px, 390px and 320px.
+The additive `de5678901234` migration follows `dd4567890123` and creates only `news_bookmarks` (username/news ID key, creation time and a cascading news foreign key). It does not rewrite original news, research results or model settings. Its production execution requires the independent schema authorization described below before the deployment schema guard can pass. CI browser acceptance covers full-screen menus and responsive workspaces at desktop and mobile widths.
 
 ## The single data-bearing instance
 
-`/docker/gitea/dev/AlphaPulse` contains the runtime Compose configuration, `.env`, version-tag selection, deployment receipts (which retain accepted digests for identity checks) and `.deploy.lock`. The repository-root `.env` points to that sole private configuration. The Compose project is `alphapulse-dev`; `AlphaPulse-dev` is the web container, and the other application containers append their service name (`-api`, `-crawler`, `-market`, `-calendar`, `-trader`, or the new `-news-risk`).
+`/docker/gitea/dev/AlphaPulse` contains the runtime Compose configuration, `.env`, version-tag selection, deployment receipts (which retain accepted digests for identity checks) and `.deploy.lock`. The repository-root `.env` points to that sole private configuration. The Compose project is `alphapulse-dev`; `AlphaPulse-dev` is the web container, and the other application containers append their service name (`-api`, `-crawler`, `-market`, `-calendar`, `-news-risk`, `-jin10-calendar`).
 
-This project's DEV intentionally uses the existing database, Redis DB 14 (`ap:*` only), model credentials and Demo trading configuration. The user authorized restoring all six services. It is the only instance, served at `https://alpha.134333.xyz` through `127.0.0.1:21005`. CI never uses these data for testing. Do not start a second Compose project against this configuration.
+This project's DEV intentionally uses the existing database, Redis DB 14 (`ap:*` only), model credentials. The supported service set is API, web, market, crawler, calendar, news-risk and jin10-calendar. It is the only instance, served at `https://alpha.134333.xyz` through `127.0.0.1:21005`. CI never uses these data for testing. Do not start a second Compose project against this configuration.
 
 Automatic and manual updates use the same command and persistent lock:
 
@@ -33,7 +33,7 @@ Automatic and manual updates use the same command and persistent lock:
 python3 scripts/deploy.py update --build /path/to/accepted/build.json
 ```
 
-The command checks image identities, current dev SHA and database migration compatibility before updating. It waits for active Chat/trading analysis, records pending state, then starts API/web before the workers. An outdated dev build is skipped. A pending deployment blocks updates. Preparation is recorded before pausing the trader; recovery resumes a paused trader without restarting other services if updates have not begun. Do not invoke `docker compose up` directly to bypass the lock.
+The command checks image identities, current dev SHA and database migration compatibility before updating. It waits for active Chat requests, records pending state, then starts API/web before the workers. An outdated dev build is skipped. A pending deployment blocks updates. Preparation recovery retains existing services if updates have not begun. Do not invoke `docker compose up` directly to bypass the lock.
 
 A failed update with a previous deployment restores the prior images/configuration while retaining data. With no previous deployment, the pending marker remains for diagnosis. Recovery and rollback are explicit operator commands:
 
@@ -42,7 +42,7 @@ python3 scripts/deploy.py recover
 python3 scripts/deploy.py rollback
 ```
 
-Neither command restores database contents or resets trading orders. Schema migrations require separate authorization and are never part of CI auto-deployment. No scheduled backup is installed.
+Neither command restores database contents. Both reject an incompatible target schema before changing running services or Compose configuration; after a destructive schema change, failed recovery leaves the pending marker and services stopped. Schema migrations require separate authorization and are never part of CI auto-deployment. No scheduled backup is installed.
 
 ### Start and stop this instance
 
@@ -59,11 +59,11 @@ while pending. Both use the explicit `alphapulse-dev` identity and instance
 
 Start checks the verified `deployment.json` receipt, Compose image selection and all
 local image identities before changing containers. It never builds or pulls. It
-waits up to 120 seconds for services to run or become healthy, then checks the nine
-services and their running image IDs before reporting success. A failed start can
+waits up to 120 seconds for services to run or become healthy, then checks the seven application
+services (plus SearXNG only for a compatible legacy deployment) and their running image IDs before reporting success. A failed start can
 leave some services running; inspect the reported failure before retrying. Stop
 retains containers, networks, volumes and data. Neither operation changes stored AI
-or trading settings; starting resumes workers according to those settings.
+settings; starting resumes workers according to those settings.
 
 Deployment installs these three versioned files and executable Bash permissions.
 For an existing instance, install only the entrypoints without starting services:
@@ -87,7 +87,7 @@ Only resources labeled for the current CI attempt are cleaned; there is no globa
 
 ## Two-stage news research
 
-A news item has one stable package, identified by `news_items.id`. Reposts remain separate packages; a digest is never split into new packages. All original news, revisions and legacy AI tables are retained.
+A news item has one stable package, identified by `news_items.id`. Reposts remain separate packages; a digest is never split into new packages. Original news, revisions and archived news-research tables are retained; dedicated trading signals are removed by the retirement migration below.
 
 1. **Keyword indexing and event assignment:** read the complete news once to persist canonical TAGs, literal aliases and original supporting quotes. This stage generates no summaries or ratings. Assignment is a separate persisted subtask, so a classification retry reuses the keyword index. Packages and events have many-to-many membership; a digest can support several distinct events, and a single package may start an event. Event candidates cover all time, bounded to sixty lexical matches. Shared names or sectors alone do not establish a common occurrence. Source-content changes explicitly invalidate the index; oversized single-news input fails without truncation.
 2. **Event research:** read all current member packages and originals together, producing one event summary, claims, importance (1–5), independent risk (0–5), verification, factors, uncertainty, opinions, impacts, counter-evidence, watchpoints and timeline. Every successful result and failed attempt retains input, output, rules, usage and tool evidence. Long event inputs use evidence-preserving extraction/compaction across all originals or fail explicitly. Timeline nodes identify the corresponding member packages and their original news IDs; background nodes supported only by supplementary material have an empty package list. Literal quotes and source identities are validated before publication.
@@ -110,7 +110,7 @@ Facts, independent evidence and corrections aggregate per event; urgent developm
 
 The homepage provides event and package searches, pagination, membership details, timelines, evidence and version history. `GET /api/risk/settings` and `PUT /api/risk/settings` manage independent `index` and `research` model/effort/Skill bindings and concurrency; saving pauses admission. Clearing effort inherits provider settings. `POST /api/risk/enable` validates the two models with synthetic material, including separate index/assignment contracts. `POST /api/risk/packages` enrolls up to 500 explicit news IDs; while enabled the worker admits eligible news using the saved historical start and persistent realtime boundary. Failed assignment retries reuse indexing; event retries never repeat indexing. Earlier source revisions are not shown with current revision annotations.
 
-Create the two default Skill drafts in homepage settings, review and publish them in Skills, then bind them before enabling. Template generation never publishes or changes existing Chat/trading Skills. The additive `a71234567890` migration follows `f60123456789` and creates seven `news_research_*` tables; the historical `b81234567890` migration added vocabulary snapshots, retired by `ef6789012345`. There is no conversion, truncation or deletion of original/legacy tables. Production schema execution, code deployment, commits and pushes require the corresponding task authorization; preparing a migration alone does not grant it.
+Create the two default Skill drafts in homepage settings, review and publish them in Skills, then bind them before enabling. Template generation never publishes or changes existing shared Chat Skills. The additive `a71234567890` migration follows `f60123456789` and creates seven `news_research_*` tables; the historical `b81234567890` migration added vocabulary snapshots, retired by `ef6789012345`. There is no conversion, truncation or deletion of original/legacy tables. Production schema execution, code deployment, commits and pushes require the corresponding task authorization; preparing a migration alone does not grant it.
 
 ### First rollout of two-stage research
 
@@ -131,12 +131,12 @@ The following steps are prepared operator instructions, not an instruction to ru
    ```
 
    The updater takes the lock itself and restarts the existing nine services using their existing configuration. Verify the served frontend/API commit, all service states, restart counts and search health. A newer `dev` commit causes the update to skip; obtain its accepted receipt and reassess migrations before continuing.
-6. In homepage settings, create the two default drafts through `POST /api/risk/skill-templates`. Review and publish **新闻关键词索引与事件归属** and **新闻事件整体研究** in Skills. Record their returned node IDs, published version IDs and content hashes, and verify their scope is `news` and they are enabled. The first content must equal `INDEX_SKILL + "\n" + ASSIGN_SKILL`; the second must equal `RESEARCH_SKILL` in the deployed candidate. Do not copy the sample-specific official-URL hints from isolated acceptance Skills into these production defaults. Preserve all Chat/trading bindings.
+6. In homepage settings, create the two default drafts through `POST /api/risk/skill-templates`. Review and publish **新闻关键词索引与事件归属** and **新闻事件整体研究** in Skills. Record their returned node IDs, published version IDs and content hashes, and verify their scope is `news` and they are enabled. The first content must equal `INDEX_SKILL + "\n" + ASSIGN_SKILL`; the second must equal `RESEARCH_SKILL` in the deployed candidate. Do not copy the sample-specific official-URL hints from isolated acceptance Skills into these production defaults. Preserve all shared Skills and Chat bindings.
 7. Bind the returned Skill IDs to `index` and `research` with the reviewed provider/model/effort values and concurrency 3. Save settings, then read them back and confirm `enabled=false`. Published content is used together with the runtime base instructions; production has no fallback to an unbound default template. Configuration/publication does not call the models. Do not click test-and-enable, call `/api/risk/enable`, or import isolated acceptance outputs during this rollout.
 8. Verify homepage event/package lists, news details and authentication. Empty new event/package lists are expected before the fixed trial; originals and legacy history remain stored. Record the migration, served commit, Skill versions/bindings and paused state in the private rollout receipt.
 9. For the fixed trial, freeze exactly 50 distinct original news IDs and their content hashes before processing. In the absence of another selection, use the latest 50 and order them by publication time and ID for assignment. Keep the instance deployment lock throughout execution, stop only the existing `news-risk` service through the deployment controller's Compose command, and acquire the worker's PostgreSQL advisory lock `(20261030, 1)` before dispatch. Keep the research-settings row locked and `enabled=false`, and invalidate concurrent enable validation by advancing its control revision. Reject an existing research package outside the frozen selection; do not clear it. Validate the published model/Skill bindings without calling the normal enable endpoint. Index with concurrency 3, assign chronologically and serially, then research the resulting events with concurrency 3; each event reads all its member packages. Reuse completed stages instead of repeating successful TAG extraction. Abort if a frozen original changes. Preserve JSON checkpoints, attempts, versions, evidence, usage and failures; automated completion is not semantic quality approval. In a `finally` block, retain the paused setting, release the advisory lock and restore the previously running news worker under the deployment lock. Check the stored package IDs equal the frozen 50 and the automatic setting is still paused, then review TAGs, memberships, event conclusions, evidence and model usage. General production enablement remains a separate decision; neither this bounded trial nor historical samples prove long-running production quality.
 
-For a failure after replacement starts, `scripts/deploy.py` attempts restoration of the previous images/configuration. Use `python3 scripts/deploy.py recover` only when a pending deployment remains; use `python3 scripts/deploy.py rollback` for an explicitly authorized rollback after a successful deployment. Image rollback retains the eight new tables and their data and does not downgrade or stamp Alembic. Before rolling back an enabled system, pause news AI and check in-flight work; pause stops admission rather than cancelling requests already sent. Keep legacy news AI disabled so the old worker does not resume the three-stage flow. If new Skills have already been published, retain their versions for a later forward deployment. Do not restore the database backup over ongoing news/trading writes as a routine image rollback. The older image's Alembic CLI cannot resolve the new revision; run any subsequent schema inspection or migration using the candidate that owns it.
+For a failure after replacement starts, `scripts/deploy.py` attempts restoration of the previous images/configuration. Use `python3 scripts/deploy.py recover` only when a pending deployment remains; use `python3 scripts/deploy.py rollback` for an explicitly authorized rollback after a successful deployment. Image rollback never downgrades or stamps Alembic and requires the target image to match the current schema. Before rolling back an enabled system, pause news AI and check in-flight work; pause stops admission rather than cancelling requests already sent. Keep legacy news AI disabled so the old worker does not resume the three-stage flow. If new Skills have already been published, retain their versions for a later forward deployment. Do not restore the database backup over ongoing news writes as a routine image rollback. The older image's Alembic CLI cannot resolve the new revision; run any subsequent schema inspection or migration using the candidate that owns it.
 
 Uncommitted preflight images are local test artifacts, not deployable CI receipts. Build them under distinct local tags and run isolated smoke tests against those exact images. `scripts/ci.py check` identifies images by committed `HEAD` and may reuse its published images; running it on a dirty working tree cannot by itself establish that the uncommitted runtime was exercised. After committing, the normal clean-checkout CI must build and accept the committed version before rollout.
 
@@ -181,7 +181,7 @@ The crawler console accepts administrator-managed public RSS/Atom subscriptions,
 
 ### Isolated acceptance and original-data protection
 
-Use `scripts/smoke_news_research.py` only with disposable CI PostgreSQL credentials (`ci` / `ci-only`, database `ci`). It mocks model I/O and verifies one-news identity, multiple event memberships, indexing reuse, strict quote rejection and durable failed outputs. CI runs this after migration; all collectors and trading remain stopped.
+Use `scripts/smoke_news_research.py` only with disposable CI PostgreSQL credentials (`ci` / `ci-only`, database `ci`). It mocks model I/O and verifies one-news identity, multiple event memberships, indexing reuse, strict quote rejection and durable failed outputs. CI runs this after migration; all collectors remain stopped.
 
 Real-news acceptance requires explicit permission for the bounded sample and necessary model access. Export original records in a read-only repeatable-read transaction, copy only necessary provider fields to a private isolated configuration, and never copy the production `.env`. After processing, review keyword coverage, event boundaries, reposts, evidence, dates and ratings, retain a credential-free report, and remove temporary keys and test containers. The initial November 3 round used thirty news items and additive tables only; the subsequent chronological supplement uses twelve frozen originals and a separate additional request budget. Legacy sample replay/reset commands target a different schema and are not part of this workflow; do not run them for this transition. Legacy reports and task counts do not prove current quality or savings. Missing usage is not zero cost.
 
@@ -191,7 +191,7 @@ Chat emits additive `retry` SSE events and cancellation stops waiting. `GET /api
 
 ## Global economic calendar
 
-The independent `jin10-calendar` service runs Chromium and Jin10's official browser SDK. It collects the macroeconomic calendar only: economic data, important events and exchange holidays. The backend runtime image installs the matching Playwright headless Chromium and OS libraries; no browser is started in the API, official calendar, news, model or trading workers.
+The independent `jin10-calendar` service runs Chromium and Jin10's official browser SDK. It collects the macroeconomic calendar only: economic data, important events and exchange holidays. The backend runtime image installs the matching Playwright headless Chromium and OS libraries; no browser is started in the API, official calendar, news or model workers.
 
 After the separately authorized migrations through `a8b1cd465ef3` and deployment, an administrator connects Jin10 in Settings using the Jin10 App QR flow. The account token is encrypted with the existing server encryption key and never returned to the browser. Disconnect retains history and invalidates in-flight writes; reconnect starts a new connection generation. Browser or authentication failures stay visible instead of being recorded as empty days.
 
@@ -218,8 +218,7 @@ retained. News AI remains paused. No new archive is created. Transaction failure
 roll back database changes; image rollback cannot recover committed deletions.
 The lock is held through cleanup, migration and activation. A durable
 `deployment.pending.json` marker blocks ordinary start, update and rollback while
-maintenance is incomplete. Preparation failures unpause the trader without
-replacing services; `recover` can retry that unpause if it fails.
+maintenance is incomplete. Preparation failures retain the running services; `recover` can clear a preparation marker after the failure is resolved.
 Once stopping begins, cleanup, migration or activation failures retain the marker
 and do not restore old workers, which still contain automatic news labeling.
 With production authorization, retry `remove-cls --execute --build /path/to/build.json`
@@ -520,3 +519,42 @@ CI runs `scripts/smoke_dynamic_queue.py` and `scripts/smoke_priority_queue.py` i
 network with synthetic credentials and no model calls. It covers preemption,
 late historical ingestion, stable realtime eligibility, range changes,
 dependencies, aggregation, control revisions and interrupted-call recovery.
+
+
+## Simulated trading retirement
+
+The `/trading` page, `/api/trading/*`, `/api/settings/exchange` and its test endpoint
+are retired. The API returns 404; the old page address uses the standard not-found
+page. There is no exchange credential form or trading worker. Market/K-lines,
+news, research results, Chat, shared Skills and model providers remain supported.
+Historical migrations remain unchanged.
+
+Migration `f07890123456` follows `ef6789012345` and permanently drops only
+`trading_orders`, `trading_events`, `trading_fills`, `trading_symbols`,
+`trading_credentials`, `trading_account`, `trading_analyses` and `news_signals`.
+It drops children first without CASCADE. Downgrade explicitly fails; neither old
+data nor credentials can be recovered by image rollback. No backup is created.
+
+Production execution requires a separate deployment instruction. Before deletion,
+recheck both configured demo accounts using the previous accepted image's
+read-only clients: positions, regular orders and conditional orders must all be
+empty. If any account cannot be verified or has open exposure, stop the retirement;
+do not automatically place, close, cancel orders or revoke exchange keys.
+
+For the authorized maintenance window, hold `.deploy.lock` throughout, install the
+new entrypoints, record a durable `deployment.pending.json` with an operation
+specific to this maintenance, then stop all application writers before running
+`alembic upgrade head` in the accepted candidate image with the instance environment.
+Under that same lock, run `python -m alphapulse.core.remove_trading` to preview the
+Redis scope; append `--execute` to unlink only `ap:trader:*` and `ap:trading:*`.
+Never FLUSHDB: Redis DB 14 is shared. SCAN is bounded by page size and cleanup is
+idempotent. Execute refuses cleanup while the legacy account table exists.
+Activate only the seven-service candidate Compose, removing orphan containers.
+Keep the pending marker until health, API 404s, UI and retained data checks pass.
+
+If migration or activation fails after stopping begins, keep maintenance pending
+and services stopped, then repair and resume the candidate. Do not restore the
+pre-retirement image/Compose or stamp an older schema. Schema preflight in both
+rollback and recovery rejects incompatible images before any service or config
+change. CI exercises populated upgrade, fingerprints of every retained table,
+irreversible downgrade refusal and scoped Redis deletion in a disposable database.

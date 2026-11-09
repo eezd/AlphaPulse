@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 
-def test_private_and_mixed_dns_are_rejected(trading, monkeypatch):
+def test_private_and_mixed_dns_are_rejected(app_env, monkeypatch):
     from alphapulse.core.public_http import public_address
     async def check():
         loop = asyncio.get_running_loop()
@@ -20,7 +20,7 @@ def test_private_and_mixed_dns_are_rejected(trading, monkeypatch):
 
 
 
-def test_high_importance_positive_package_is_valid(trading):
+def test_high_importance_positive_package_is_valid(app_env):
     from alphapulse.news_research import pipeline
     from test_news_pipeline import event_result
     result = event_result(pipeline, [pipeline.Evidence(article_id=1, quote='突破')])
@@ -29,7 +29,7 @@ def test_high_importance_positive_package_is_valid(trading):
     assert result.importance_stars == 5 and result.risk_stars == 0
 
 
-def test_public_fetch_pins_address_and_rechecks_redirect(trading, monkeypatch):
+def test_public_fetch_pins_address_and_rechecks_redirect(app_env, monkeypatch):
     import httpx
     from alphapulse.core import public_http as research
     calls = []
@@ -52,7 +52,7 @@ def test_public_fetch_pins_address_and_rechecks_redirect(trading, monkeypatch):
 
 
 
-def test_restored_news_is_sent_before_reusing_its_reference(trading, monkeypatch):
+def test_restored_news_is_sent_before_reusing_its_reference(app_env, monkeypatch):
     import json
     from pydantic import BaseModel
     from alphapulse.news_research import tools as research
@@ -81,7 +81,7 @@ def test_restored_news_is_sent_before_reusing_its_reference(trading, monkeypatch
     assert review.counts['read'] == 0 and not review.records
 
 
-def test_current_input_takes_precedence_over_restored_news(trading, monkeypatch):
+def test_current_input_takes_precedence_over_restored_news(app_env, monkeypatch):
     from pydantic import BaseModel
     from alphapulse.news_research import tools as research
     class Result(BaseModel):
@@ -104,7 +104,7 @@ def test_current_input_takes_precedence_over_restored_news(trading, monkeypatch)
     assert review.counts['read'] == 0
 
 
-def test_research_stops_after_eight_tool_rounds_and_retains_failures(trading, monkeypatch):
+def test_research_stops_after_eight_tool_rounds_and_retains_failures(app_env, monkeypatch):
     from alphapulse.news_research import tools as research
     from pydantic import BaseModel
     class Result(BaseModel):
@@ -125,7 +125,7 @@ def test_research_stops_after_eight_tool_rounds_and_retains_failures(trading, mo
     assert all('error' in record['result'] for record in review.records)
 
 
-def test_provided_original_is_reused_without_io(trading, monkeypatch):
+def test_provided_original_is_reused_without_io(app_env, monkeypatch):
     from alphapulse.news_research import tools as research
     from pydantic import BaseModel
     class Result(BaseModel):
@@ -151,7 +151,7 @@ def test_provided_original_is_reused_without_io(trading, monkeypatch):
 
 
 @pytest.mark.parametrize('tool,args', [('search_web', {'query': 'test'}), ('read_web', {'url': 'https://example.invalid'})])
-def test_external_tools_are_removed_and_cannot_restore_sources(trading, tool, args):
+def test_external_tools_are_removed_and_cannot_restore_sources(app_env, tool, args):
     from alphapulse.news_research.service import Research
     reader = Research(event={'id': 1})
     assert tool not in [spec.name for spec in reader.tool_specs()]

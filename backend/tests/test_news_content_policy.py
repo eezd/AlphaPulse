@@ -12,7 +12,7 @@ from alphapulse.crawler.content_policy import clean_html, ignored_retry
 
 
 @pytest.fixture
-def guard(trading):
+def guard(app_env):
     from alphapulse.crawler.middlewares import NewsContentPolicyMiddleware
     return NewsContentPolicyMiddleware()
 
@@ -77,7 +77,7 @@ def test_legacy_attachment_request_is_rejected_even_without_file_extension(guard
     assert not ignored_retry('document_retries', {'document': {'url': 'https://official.example/news/1'}})
 
 
-def test_normalization_preserves_existing_hash_and_sends_only_real_updates(trading, monkeypatch):
+def test_normalization_preserves_existing_hash_and_sends_only_real_updates(app_env, monkeypatch):
     from alphapulse.crawler import pipelines
     html = '<p>Monetary policy.</p><a href="/cdn-cgi/l/email-protection#abc">Email</a>'
     fields = dict(url='https://official.example/news/1', title='Policy', summary='', content_html=html,

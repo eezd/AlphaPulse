@@ -19,7 +19,7 @@ import pytest
     ('spot', 'btcusdt@aggTrade', {'s': 'BTCUSDT', 'a': 8, 'p': '100.0001', 'q': '0.00002', 'T': 1000, 'm': True},
      {'id': 8, 'price': '100.0001', 'quantity': '0.00002', 'time': 1000, 'buyer_maker': True}),
 ])
-def test_quote_cache_and_publish(trading, monkeypatch, market, stream, data, expected):
+def test_quote_cache_and_publish(app_env, monkeypatch, market, stream, data, expected):
     from alphapulse.market import worker
 
     cache = AsyncMock()
@@ -43,7 +43,7 @@ def test_quote_cache_and_publish(trading, monkeypatch, market, stream, data, exp
 
 
 @pytest.mark.parametrize('depth_only', [False, True])
-def test_futures_depth_uses_public_route_without_requesting_kline_catchup(trading, monkeypatch, depth_only):
+def test_futures_depth_uses_public_route_without_requesting_kline_catchup(app_env, monkeypatch, depth_only):
     from alphapulse.market import worker
 
     urls = []

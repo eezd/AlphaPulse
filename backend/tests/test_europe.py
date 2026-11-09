@@ -176,7 +176,7 @@ def test_missing_values_fail_without_zero_fallback():
         feed_entries(b"<html>Access denied</html>", "boe")
 
 
-def test_history_capture_preserves_raw_bytes_time_language_and_news_identity(trading):
+def test_history_capture_preserves_raw_bytes_time_language_and_news_identity(app_env):
     import base64
 
     from alphapulse.calendar.backfill import Document

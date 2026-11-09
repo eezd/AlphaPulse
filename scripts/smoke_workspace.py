@@ -132,13 +132,17 @@ async def main():
                     page = await context.new_page()
                     errors = []
                     page.on('pageerror', lambda error: errors.append(str(error)))
-                    for route in ('home', 'news', 'calendar', 'crawler', 'market', 'trading', 'chat', 'skills', 'settings'):
+                    await page.goto(origin + '/trading')
+                    await page.get_by_role('heading', name='404', exact=True).wait_for()
+                    for route in ('home', 'news', 'calendar', 'crawler', 'market', 'chat', 'skills', 'settings'):
                         await page.goto(origin + '/' + route)
                         await page.locator('.terminal-shell').wait_for()
+                        assert await page.locator('a[href="/trading"]').count() == 0
                         await page.wait_for_timeout(600)
                         await page.screenshot(path=str(output / (route + '.png')), full_page=True)
                         assert await page.locator('.terminal-header .active').count() == 1, route
                         assert await page.evaluate('document.documentElement.scrollWidth <= innerWidth'), route
+                    assert await page.get_by_text('模拟盘', exact=False).count() == 0
                     await page.goto(origin + '/market')
                     await page.get_by_role('button', name='全屏', exact=True).click()
                     await page.wait_for_function('document.fullscreenElement === document.documentElement')
@@ -191,40 +195,12 @@ async def main():
                         await page.get_by_role('tab', name=name, exact=True).click()
                     await page.screenshot(path=str(output / 'event-detail.png'), full_page=True)
                     await page.set_viewport_size({'width': 390, 'height': 844})
-                    for route in ('news', 'market', 'skills', 'settings', 'calendar', 'trading', 'home', 'crawler', 'chat'):
+                    for route in ('news', 'market', 'skills', 'settings', 'calendar', 'home', 'crawler', 'chat'):
                         await page.goto(origin + '/' + route)
                         await page.locator('.terminal-shell').wait_for()
                         await page.wait_for_timeout(300)
                         assert await page.evaluate('document.documentElement.scrollWidth <= innerWidth'), 'mobile-' + route
                         await page.screenshot(path=str(output / ('mobile-' + route + '.png')), full_page=True)
-                    for width in (1600, 390, 320):
-                        await page.set_viewport_size({'width': width, 'height': 844})
-                        await page.goto(origin + '/trading')
-                        await page.get_by_role('button', name='分析配置', exact=True).click()
-                        dialog = page.get_by_role('dialog', name='模拟盘分析配置')
-                        await dialog.wait_for()
-                        limit = dialog.get_by_role('spinbutton')
-                        await limit.click()
-                        # 页面不溢出还不足以发现抽屉内部的裁切，直接核对每个控件的边界。
-                        assert await dialog.locator('.el-form').evaluate('''form => {
-                            const card = form.closest('.el-card').getBoundingClientRect();
-                            return [...form.querySelectorAll('.el-select, .el-input-number, button')].every(el => {
-                                const r = el.getBoundingClientRect();
-                                return r.width > 0 && r.left >= card.left && r.right <= Math.min(card.right, innerWidth);
-                            });
-                        }'''), f'trading-config-{width}'
-                        await dialog.locator('.el-select').first.click()
-                        await dialog.locator('.el-select').nth(1).click()
-                        await page.get_by_role('option', name='high', exact=True).click()
-                        next_limit = int(await limit.input_value()) + 1
-                        await limit.fill(str(next_limit))
-                        async with page.expect_response('**/api/trading/config') as saving:
-                            await dialog.get_by_role('button', name='保存配置', exact=True).click()
-                        response = await saving.value
-                        assert response.status == 200
-                        assert (await response.json())['data']['today']['limit'] == next_limit
-                        await dialog.locator('.el-drawer__close-btn').click()
-                        await dialog.wait_for(state='hidden')
                     await page.set_viewport_size({'width': 390, 'height': 844})
                     await page.goto(origin + '/market')
                     await page.get_by_role('button', name='盘口／成交').click()
@@ -242,7 +218,7 @@ async def main():
         finally:
             await client.post('/api/auth/logout')
     await redis.aclose()
-    print('Workspace bookmarks, filters, event details, 10 desktop pages and 9 mobile pages passed')
+    print('Workspace bookmarks, filters, event details, retired-page 404, login and eight desktop/mobile workspaces passed')
 
 
 asyncio.run(main())

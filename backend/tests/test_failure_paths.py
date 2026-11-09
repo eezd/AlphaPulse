@@ -21,7 +21,7 @@ def install_model_transport(llm, monkeypatch, protocol, handler):
 
 @pytest.mark.parametrize("protocol", ["openai", "anthropic"])
 @pytest.mark.parametrize("complete", [False, True])
-def test_model_requires_protocol_end_marker(trading, monkeypatch, protocol, complete):
+def test_model_requires_protocol_end_marker(app_env, monkeypatch, protocol, complete):
     from alphapulse.ai import llm
     if protocol == "openai":
         chunks = [{"id": "1", "object": "chat.completion.chunk", "created": 0, "model": "test", "choices": [{"index": 0, "delta": {"content": "部分回答"}, "finish_reason": None}]}]
@@ -58,7 +58,7 @@ def test_model_requires_protocol_end_marker(trading, monkeypatch, protocol, comp
     asyncio.run(check())
 
 
-def test_connection_failure_has_one_retry_owner(trading, monkeypatch):
+def test_connection_failure_has_one_retry_owner(app_env, monkeypatch):
     from alphapulse.ai import llm
     attempts = 0
     def handle(request):
@@ -76,7 +76,7 @@ def test_connection_failure_has_one_retry_owner(trading, monkeypatch):
     assert attempts == 3
 
 
-def test_pipeline_error_keeps_history_checkpoint_and_marks_run_failed(trading, monkeypatch):
+def test_pipeline_error_keeps_history_checkpoint_and_marks_run_failed(app_env, monkeypatch):
     from scrapy import signals
     from scrapy.crawler import Crawler
     from twisted.python.failure import Failure
@@ -116,7 +116,7 @@ def test_pipeline_error_keeps_history_checkpoint_and_marks_run_failed(trading, m
 
 
 @pytest.mark.parametrize("failure_at", ["usage", "second_tool"])
-def test_chat_completes_tool_results_on_disconnect_or_exception(trading, monkeypatch, failure_at):
+def test_chat_completes_tool_results_on_disconnect_or_exception(app_env, monkeypatch, failure_at):
     from alphapulse.api import chat
     provider = SimpleNamespace(id=1, context_window=10000, max_tokens=100, name="test", reasoning_effort=None)
     class Session:
@@ -168,7 +168,7 @@ def test_chat_completes_tool_results_on_disconnect_or_exception(trading, monkeyp
     asyncio.run(check())
 
 
-def test_skill_rename_rejects_whitespace_without_writing(trading):
+def test_skill_rename_rejects_whitespace_without_writing(app_env):
     from fastapi import HTTPException
     from alphapulse.api import skills
     node = SimpleNamespace(name="原名称")
@@ -183,7 +183,7 @@ def test_skill_rename_rejects_whitespace_without_writing(trading):
     asyncio.run(check())
 
 
-def test_chat_reset_blocks_new_generation_until_commit(trading, monkeypatch):
+def test_chat_reset_blocks_new_generation_until_commit(app_env, monkeypatch):
     from alphapulse.api import chat
 
     async def check():
@@ -215,7 +215,7 @@ def test_chat_reset_blocks_new_generation_until_commit(trading, monkeypatch):
     asyncio.run(check())
 
 
-def test_chat_reset_rejects_busy_generation_and_releases_lock_on_failure(trading, monkeypatch):
+def test_chat_reset_rejects_busy_generation_and_releases_lock_on_failure(app_env, monkeypatch):
     from fastapi import HTTPException
     from alphapulse.api import chat
 
@@ -235,7 +235,7 @@ def test_chat_reset_rejects_busy_generation_and_releases_lock_on_failure(trading
 
 
 @pytest.mark.parametrize("change", ["metadata", "content", "unchanged"])
-def test_news_updates_metadata_without_creating_content_revision(trading, monkeypatch, change):
+def test_news_updates_metadata_without_creating_content_revision(app_env, monkeypatch, change):
     from alphapulse.crawler import pipelines
     from alphapulse.models import NewsItem
 

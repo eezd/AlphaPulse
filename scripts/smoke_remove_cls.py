@@ -76,7 +76,7 @@ async def main():
                 assert await connection.scalar(text("SELECT count(*) FROM raw_bodies WHERE sha256=:digest"), {'digest':'a'*64}) == 1
                 assert await connection.scalar(text("SELECT count(*) FROM raw_bodies WHERE sha256=:digest"), {'digest':'b'*64}) == 0
                 assert (await cleanup(connection, True))['counts']['sources'] == 0
-                print('CLS removal: preview, rollback, shared bodies, retained originals, 29 AI tables and repeat execution passed')
+                print('CLS removal: preview, rollback, shared bodies, retained originals, retired AI tables and repeat execution passed')
             finally:
                 await transaction.rollback()
     finally:

@@ -6,7 +6,7 @@ import json
 import pytest
 
 
-def test_storage_is_additive_and_membership_is_many_to_many(trading):
+def test_storage_is_additive_and_membership_is_many_to_many(app_env):
     from alphapulse.news_research.models import TABLES, Package, Membership
 
     assert all(t.name.startswith("news_research_") for t in TABLES)
@@ -21,7 +21,7 @@ def test_storage_is_additive_and_membership_is_many_to_many(trading):
     )
 
 
-def test_keywords_require_original_aliases_and_literal_evidence(trading):
+def test_keywords_require_original_aliases_and_literal_evidence(app_env):
     from alphapulse.news_research.contracts import IndexResult
     from alphapulse.news_research.service import validate_keywords
 
@@ -46,7 +46,7 @@ def test_keywords_require_original_aliases_and_literal_evidence(trading):
 
 
 @pytest.mark.parametrize("canonical", ["币安", "Binance", "MI455X"])
-def test_chinese_assignment_preserves_indexed_names_and_english_evidence(trading, canonical):
+def test_chinese_assignment_preserves_indexed_names_and_english_evidence(app_env, canonical):
     from alphapulse.news_research.contracts import Assignment
     from alphapulse.news_research.service import validate_assignment
 
@@ -69,7 +69,7 @@ def test_chinese_assignment_preserves_indexed_names_and_english_evidence(trading
         validate_assignment(result, source, set(), keywords)
 
 
-def test_one_package_can_be_assigned_to_multiple_events_without_splitting(trading):
+def test_one_package_can_be_assigned_to_multiple_events_without_splitting(app_env):
     from alphapulse.news_research.contracts import Assignment
     from alphapulse.news_research.service import validate_assignment
 
@@ -91,7 +91,7 @@ def test_one_package_can_be_assigned_to_multiple_events_without_splitting(tradin
         Assignment(targets=[{**base, "event_id": 1}, {**base, "event_id": 1}])
 
 
-def test_event_refresh_keeps_hard_deadline_and_urgency(trading):
+def test_event_refresh_keeps_hard_deadline_and_urgency(app_env):
     from alphapulse.news_research.service import dirty
 
     now = datetime.now(UTC)
@@ -112,7 +112,7 @@ def test_event_refresh_keeps_hard_deadline_and_urgency(trading):
 
 
 @pytest.mark.parametrize("urgent", [False, True])
-def test_new_event_waits_for_aggregation_unless_urgent(trading, urgent):
+def test_new_event_waits_for_aggregation_unless_urgent(app_env, urgent):
     from alphapulse.news_research.service import dirty
 
     event = N(
@@ -126,7 +126,7 @@ def test_new_event_waits_for_aggregation_unless_urgent(trading, urgent):
 
 
 @pytest.mark.parametrize("state,deferred", [("failed", False), ("pending", False), ("pending", True), ("done", False)])
-def test_event_retry_preserves_content_revision_unless_done_or_deferred(trading, state, deferred):
+def test_event_retry_preserves_content_revision_unless_done_or_deferred(app_env, state, deferred):
     import asyncio
     from unittest.mock import AsyncMock
     from alphapulse.news_research.api import retry_event
@@ -147,7 +147,7 @@ def test_event_retry_preserves_content_revision_unless_done_or_deferred(trading,
 
 @pytest.mark.parametrize("revision", [None, 2])
 def test_news_detail_does_not_attach_old_keywords_to_updated_original(
-    trading, revision
+    app_env, revision
 ):
     import asyncio
     from unittest.mock import AsyncMock
@@ -162,7 +162,7 @@ def test_news_detail_does_not_attach_old_keywords_to_updated_original(
     assert result.data == []
 
 
-def test_two_stage_contract_rejects_package_summaries(trading):
+def test_two_stage_contract_rejects_package_summaries(app_env):
     from alphapulse.news_research.contracts import (
         IndexResult,
         Assignment,
@@ -175,7 +175,7 @@ def test_two_stage_contract_rejects_package_summaries(trading):
     assert "package_correction" not in ResearchResult.model_fields
 
 
-def test_timeline_distinguishes_member_progress_from_external_background(trading):
+def test_timeline_distinguishes_member_progress_from_external_background(app_env):
     from alphapulse.news_research.service import validate_timeline
 
     point = N(
@@ -193,7 +193,7 @@ def test_timeline_distinguishes_member_progress_from_external_background(trading
     validate_timeline(result, {17: 463205})
 
 
-def test_retry_reuses_original_snapshots_and_keeps_the_evidence_auditable(trading):
+def test_retry_reuses_original_snapshots_and_keeps_the_evidence_auditable(app_env):
     import asyncio
     from alphapulse.news_research.service import Research
 
@@ -212,7 +212,7 @@ def test_retry_reuses_original_snapshots_and_keeps_the_evidence_auditable(tradin
 @pytest.mark.parametrize("tool", ["search_packages", "search_events"])
 @pytest.mark.parametrize("cached", [[], [{"id": 1}]])
 def test_retry_refreshes_local_search_with_current_data(
-    trading, monkeypatch, tool, cached
+    app_env, monkeypatch, tool, cached
 ):
     import asyncio
     from unittest.mock import AsyncMock
@@ -238,7 +238,7 @@ def test_retry_refreshes_local_search_with_current_data(
 
 
 
-def test_settings_contract_rejects_third_stage_and_unknown_efforts(trading):
+def test_settings_contract_rejects_third_stage_and_unknown_efforts(app_env):
     from alphapulse.news_research.api import SettingsInput
 
     model = {
@@ -256,7 +256,7 @@ def test_settings_contract_rejects_third_stage_and_unknown_efforts(trading):
         )
 
 
-def test_backfill_start_requires_an_explicit_timezone(trading):
+def test_backfill_start_requires_an_explicit_timezone(app_env):
     from alphapulse.news_research.api import EnableInput
 
     selected = EnableInput(start_at="2026-10-01T00:00:00+08:00")
@@ -266,7 +266,7 @@ def test_backfill_start_requires_an_explicit_timezone(trading):
 
 
 @pytest.mark.parametrize("endpoint", ["coverage", "enable"])
-def test_future_backfill_is_rejected_before_model_calls(trading, monkeypatch, endpoint):
+def test_future_backfill_is_rejected_before_model_calls(app_env, monkeypatch, endpoint):
     import asyncio
     from unittest.mock import AsyncMock
     from fastapi import HTTPException
@@ -287,7 +287,7 @@ def test_future_backfill_is_rejected_before_model_calls(trading, monkeypatch, en
     session.commit.assert_not_called()
 
 
-def test_failed_enable_does_not_save_the_selected_backfill_start(trading, monkeypatch):
+def test_failed_enable_does_not_save_the_selected_backfill_start(app_env, monkeypatch):
     import asyncio
     from unittest.mock import AsyncMock
     from fastapi import HTTPException
@@ -306,7 +306,7 @@ def test_failed_enable_does_not_save_the_selected_backfill_start(trading, monkey
 
 @pytest.mark.parametrize("tool", ["read_news", "read_package"])
 def test_compressed_members_read_frozen_positive_sources_and_reject_old_cache(
-    trading, tool
+    app_env, tool
 ):
     import asyncio
     from alphapulse.news_research.service import Research, validate_timeline
@@ -349,7 +349,7 @@ def test_compressed_members_read_frozen_positive_sources_and_reject_old_cache(
 
 
 def test_assignment_gate_serializes_only_assignment_and_releases_after_failure(
-    trading, monkeypatch
+    app_env, monkeypatch
 ):
     import asyncio
     from alphapulse.news_research import service
@@ -390,7 +390,7 @@ def test_assignment_gate_serializes_only_assignment_and_releases_after_failure(
     asyncio.run(scenario())
 
 
-def test_digest_tags_are_selected_per_membership(trading):
+def test_digest_tags_are_selected_per_membership(app_env):
     from alphapulse.news_research.service import selected_tags
 
     keywords = [
@@ -407,7 +407,7 @@ def test_digest_tags_are_selected_per_membership(trading):
 
 
 @pytest.mark.parametrize("selection", [[], ["Invented"], ["AMD", "AMD"], ["amd"]])
-def test_assignment_rejects_empty_unknown_duplicate_or_rewritten_tags(trading, selection):
+def test_assignment_rejects_empty_unknown_duplicate_or_rewritten_tags(app_env, selection):
     from alphapulse.news_research.contracts import Assignment
     from alphapulse.news_research.service import validate_assignment
 
@@ -421,7 +421,7 @@ def test_assignment_rejects_empty_unknown_duplicate_or_rewritten_tags(trading, s
                             [{"canonical": "AMD", "aliases": ["AMD"]}])
 
 
-def test_assignment_keeps_entity_aliases_outside_scope_quote(trading):
+def test_assignment_keeps_entity_aliases_outside_scope_quote(app_env):
     from alphapulse.news_research.contracts import Assignment
     from alphapulse.news_research.service import selected_tags, validate_assignment
 
@@ -441,7 +441,7 @@ def test_assignment_keeps_entity_aliases_outside_scope_quote(trading):
     assert selected_tags(keywords, selected) == {"高盛", "鲍比·莫拉维", "bobby molavi"}
 
 
-def test_event_tags_are_rebuilt_instead_of_retaining_removed_noise(trading):
+def test_event_tags_are_rebuilt_instead_of_retaining_removed_noise(app_env):
     import asyncio
     from unittest.mock import AsyncMock
     from alphapulse.news_research.service import refresh_event_tags
@@ -458,7 +458,7 @@ def test_event_tags_are_rebuilt_instead_of_retaining_removed_noise(trading):
     assert event.tags == []
 
 
-def test_event_rebuild_uses_successful_snapshot_not_mutable_package_index(trading):
+def test_event_rebuild_uses_successful_snapshot_not_mutable_package_index(app_env):
     import asyncio
     from unittest.mock import AsyncMock
     from sqlalchemy.dialects import postgresql
@@ -478,7 +478,7 @@ def test_event_rebuild_uses_successful_snapshot_not_mutable_package_index(tradin
     assert "max(news_research_attempts.id)" in statement
 
 
-def test_legacy_assignment_retains_its_original_keyword_snapshot(trading):
+def test_legacy_assignment_retains_its_original_keyword_snapshot(app_env):
     import asyncio
     from unittest.mock import AsyncMock
     from alphapulse.news_research.service import refresh_event_tags
@@ -496,7 +496,7 @@ def test_legacy_assignment_retains_its_original_keyword_snapshot(trading):
 
 @pytest.mark.parametrize("snapshot", [None, N(rules={}, input={}),
                                       N(rules={"membership_tags": {"2": ["wrong"]}})])
-def test_event_rebuild_fails_without_owning_assignment_snapshot(trading, snapshot):
+def test_event_rebuild_fails_without_owning_assignment_snapshot(app_env, snapshot):
     import asyncio
     from unittest.mock import AsyncMock
     from alphapulse.news_research.service import refresh_event_tags
@@ -510,7 +510,7 @@ def test_event_rebuild_fails_without_owning_assignment_snapshot(trading, snapsho
 
 @pytest.mark.parametrize("offset", ["+03:30", "+08:00", "-05:00"])
 @pytest.mark.parametrize("precision,day", [("day", 4), ("month", 1)])
-def test_coarse_timeline_dates_are_consistent_calendar_markers(trading, offset, precision, day):
+def test_coarse_timeline_dates_are_consistent_calendar_markers(app_env, offset, precision, day):
     from alphapulse.news_research.contracts import Point
 
     p = Point(occurred_at=f"2026-11-04T13:25:00{offset}", time_precision=precision,
@@ -522,7 +522,7 @@ def test_coarse_timeline_dates_are_consistent_calendar_markers(trading, offset, 
     assert p.time_text == "4日"
 
 
-def test_minute_precision_retains_real_instant_and_unknown_stays_null(trading):
+def test_minute_precision_retains_real_instant_and_unknown_stays_null(app_env):
     from alphapulse.news_research.contracts import Point
 
     p = Point(occurred_at="2026-11-04T13:25:00+03:30", time_precision="minute",
@@ -533,7 +533,7 @@ def test_minute_precision_retains_real_instant_and_unknown_stays_null(trading):
     assert p.occurred_at is None
 
 
-def test_research_scope_uses_resolved_assignment_and_keeps_full_selected_records(trading):
+def test_research_scope_uses_resolved_assignment_and_keeps_full_selected_records(app_env):
     from copy import deepcopy
     from alphapulse.news_research.service import research_scope
 
@@ -559,7 +559,7 @@ def test_research_scope_uses_resolved_assignment_and_keeps_full_selected_records
 
 
 @pytest.mark.parametrize("existing", [False, True])
-def test_research_recovers_unambiguous_selected_tags_from_older_assignment(trading, existing):
+def test_research_recovers_unambiguous_selected_tags_from_older_assignment(app_env, existing):
     from alphapulse.news_research.service import research_scope
 
     keyword = {"canonical": "触雷", "aliases": ["水雷"]}
@@ -577,7 +577,7 @@ def test_research_recovers_unambiguous_selected_tags_from_older_assignment(tradi
     {"event_id": None, "quote": "同一引文", "reason": "同一理由", "keyword_canonicals": ["甲"]},
     {"event_id": None, "quote": "同一引文", "reason": "同一理由", "keyword_canonicals": ["乙"]},
 ]])
-def test_research_legacy_does_not_invent_a_selected_scope(trading, targets):
+def test_research_legacy_does_not_invent_a_selected_scope(app_env, targets):
     from alphapulse.news_research.service import research_scope
 
     keywords = [{"canonical": "甲", "aliases": ["甲"]}, {"canonical": "乙", "aliases": ["乙"]}]
@@ -588,7 +588,7 @@ def test_research_legacy_does_not_invent_a_selected_scope(trading, targets):
     assert scope["other_scopes"] == []
 
 
-def test_legacy_research_retains_known_sibling_boundaries_without_inventing_tags(trading):
+def test_legacy_research_retains_known_sibling_boundaries_without_inventing_tags(app_env):
     from alphapulse.news_research.service import research_scope
 
     keywords = [{"canonical": "甲", "aliases": ["甲"]}]
@@ -605,7 +605,7 @@ def test_legacy_research_retains_known_sibling_boundaries_without_inventing_tags
     input={"keywords": [{"canonical": "甲", "aliases": ["甲"]}]},
     rules={"membership_targets": {"2": {}}},
 )])
-def test_research_fails_without_owning_assignment_snapshot(trading, attempt):
+def test_research_fails_without_owning_assignment_snapshot(app_env, attempt):
     from alphapulse.news_research.service import research_scope
 
     with pytest.raises(ValueError, match="快照"):
@@ -613,7 +613,7 @@ def test_research_fails_without_owning_assignment_snapshot(trading, attempt):
 
 
 @pytest.mark.parametrize("tool,identifier", [("read_news", 101), ("read_package", 10)])
-def test_provided_member_reads_are_audited_without_reading_or_spending_budget(trading, tool, identifier):
+def test_provided_member_reads_are_audited_without_reading_or_spending_budget(app_env, tool, identifier):
     import asyncio
     from alphapulse.news_research.service import Research
 
@@ -636,7 +636,7 @@ def test_provided_member_reads_are_audited_without_reading_or_spending_budget(tr
 
 
 @pytest.mark.parametrize("needs_compaction", [False, True])
-def test_long_event_compaction_uses_final_research_context(trading, monkeypatch, needs_compaction):
+def test_long_event_compaction_uses_final_research_context(app_env, monkeypatch, needs_compaction):
     import asyncio
     from unittest.mock import AsyncMock
     from alphapulse.news_research import service
@@ -729,7 +729,7 @@ def test_long_event_compaction_uses_final_research_context(trading, monkeypatch,
 
 
 @pytest.mark.parametrize("failure_at", [None, "evidence", "timeline", "publication"])
-def test_quote_adjustment_audit_survives_validation_and_publication_failures(trading, monkeypatch, failure_at):
+def test_quote_adjustment_audit_survives_validation_and_publication_failures(app_env, monkeypatch, failure_at):
     import asyncio
     import copy
     from unittest.mock import AsyncMock
@@ -802,7 +802,7 @@ def test_quote_adjustment_audit_survives_validation_and_publication_failures(tra
 
 
 @pytest.mark.parametrize("failure_at", [None, "validation", "publication"])
-def test_alias_adjustment_audit_survives_index_failures(trading, monkeypatch, failure_at):
+def test_alias_adjustment_audit_survives_index_failures(app_env, monkeypatch, failure_at):
     import asyncio
     import copy
     from unittest.mock import AsyncMock
@@ -854,7 +854,7 @@ def test_alias_adjustment_audit_survives_index_failures(trading, monkeypatch, fa
 
 
 @pytest.mark.parametrize("task", ["index", "assign", "research"])
-def test_model_config_sends_only_selected_task_and_records_exact_prompt(trading, monkeypatch, task):
+def test_model_config_sends_only_selected_task_and_records_exact_prompt(app_env, monkeypatch, task):
     import asyncio
     from unittest.mock import AsyncMock
     from alphapulse.news_research import service
@@ -885,21 +885,21 @@ def test_model_config_sends_only_selected_task_and_records_exact_prompt(trading,
     "## 索引规则\nindex\n## 归属规则\nassign\n## 其他规则\nextra",
     "## 索引规则\nindex\n## 归属规则\nassign\n## 索引规则\nagain",
 ])
-def test_invalid_first_stage_skill_fails_instead_of_sending_full_text(trading, content):
+def test_invalid_first_stage_skill_fails_instead_of_sending_full_text(app_env, content):
     from alphapulse.news_research.contracts import task_skill, SkillFormatError
     for task in ("index", "assign"):
         with pytest.raises(SkillFormatError):
             task_skill(content, task)
 
 
-def test_task_skill_keeps_custom_rules_and_accepts_crlf(trading):
+def test_task_skill_keeps_custom_rules_and_accepts_crlf(app_env):
     from alphapulse.news_research.contracts import task_skill
     content = "## 归属规则\r\n自定义归属\r\n### 细则\r\n保留规则\r\n## 索引规则\r\n自定义索引"
     assert task_skill(content, "assign") == "自定义归属\n### 细则\n保留规则"
     assert task_skill(content, "index") == "自定义索引"
 
 
-def test_settings_save_atomically_pauses_and_preserves_model_contract(trading):
+def test_settings_save_atomically_pauses_and_preserves_model_contract(app_env):
     import asyncio
     from unittest.mock import AsyncMock
     from alphapulse.news_research import api
@@ -914,7 +914,7 @@ def test_settings_save_atomically_pauses_and_preserves_model_contract(trading):
     session.commit.assert_awaited_once()
 
 
-def test_settings_save_rejects_other_tabs_revision_without_changes(trading):
+def test_settings_save_rejects_other_tabs_revision_without_changes(app_env):
     import asyncio
     from unittest.mock import AsyncMock
     from fastapi import HTTPException
@@ -929,7 +929,7 @@ def test_settings_save_rejects_other_tabs_revision_without_changes(trading):
     session.commit.assert_not_awaited()
 
 
-def test_enable_cannot_apply_an_unsaved_backfill_time(trading):
+def test_enable_cannot_apply_an_unsaved_backfill_time(app_env):
     import asyncio
     from unittest.mock import AsyncMock
     from fastapi import HTTPException
@@ -943,7 +943,7 @@ def test_enable_cannot_apply_an_unsaved_backfill_time(trading):
     session.commit.assert_not_awaited()
 
 
-def test_worker_refills_on_completion_without_waiting_for_other_tasks(trading, monkeypatch):
+def test_worker_refills_on_completion_without_waiting_for_other_tasks(app_env, monkeypatch):
     """A slow peer must not turn the shared pool back into a batch barrier."""
     import asyncio
     from unittest.mock import AsyncMock

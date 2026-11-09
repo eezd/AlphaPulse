@@ -20,10 +20,10 @@ class RemoveClsTests(unittest.TestCase):
         self.previous = {'commit': 'b' * 40, 'version': '20261103-bbbbbbbb'}
         self.marker = self.directory / 'deployment.pending.json'
         deploy.save(self.directory / 'deployment.json', self.previous)
-        (self.directory / 'compose.yml').write_text('services:\n  api:\n  trader:\n  news-labeling:\n')
+        (self.directory / 'compose.yml').write_text('services:\n  api:\n  market:\n  news-labeling:\n')
         source = self.directory / 'source' / 'deploy'
         source.mkdir(parents=True)
-        (source / 'docker-compose.yml').write_text('services:\n  api:\n  trader:\n')
+        (source / 'docker-compose.yml').write_text('services:\n  api:\n  market:\n')
         (source / 'searxng.yml').write_text('secret: @SEARXNG_SECRET@\n')
         self.calls = []
         self.running = True
@@ -45,8 +45,8 @@ class RemoveClsTests(unittest.TestCase):
 
     def containers(self, command):
         return [{'Config': {'Labels': {'com.docker.compose.service': name}},
-                 'State': {'Running': self.running, 'Paused': self.paused if name == 'trader' else False}}
-                for name in ('api', 'trader')]
+                 'State': {'Running': self.running, 'Paused': self.paused if name == 'market' else False}}
+                for name in ('api', 'market')]
 
     def assert_locked(self):
         with (self.directory / '.deploy.lock').open('a') as stream:
@@ -65,7 +65,7 @@ class RemoveClsTests(unittest.TestCase):
             self.assertEqual(json.loads(self.marker.read_text())['phase'], 'preparing')
             self.paused = True
         if args[:2] == ('docker', 'ps'):
-            return 'trader-id' if self.running else ''
+            return 'market-id' if self.running else ''
         if args[:2] == ('docker', 'inspect'):
             return json.dumps([{'State': {'Paused': self.paused}}])
         if args[:2] == ('docker', 'unpause'):
@@ -170,7 +170,7 @@ class RemoveClsTests(unittest.TestCase):
         self.assertTrue(any('--execute' in args for args in self.calls))
         self.assertFalse(self.marker.exists())
 
-    def test_idle_recheck_exception_unpauses_without_stopping_services(self):
+    def test_idle_recheck_exception_recovers_without_stopping_services(self):
         checks = 0
 
         def fail(args, kwargs):
@@ -188,25 +188,34 @@ class RemoveClsTests(unittest.TestCase):
         self.assertFalse(any('stop' in args or '--execute' in args for args in self.calls))
 
     def test_failed_preparation_recovery_preserves_marker_for_explicit_recovery(self):
+        checks = 0
+
         def fail(args, kwargs):
-            if kwargs.get('input') == deploy.IDLE and self.paused:
-                raise RuntimeError('idle check failed')
-            if args[:2] == ('docker', 'unpause'):
-                raise RuntimeError('unpause failed')
+            nonlocal checks
+            if kwargs.get('input') == deploy.IDLE:
+                checks += 1
+                if checks == 2:
+                    raise RuntimeError('idle check failed')
         self.failure = fail
-        with self.assertRaisesRegex(RuntimeError, 'unpause failed'):
-            deploy.remove_cls(self.build, True)
-        self.assertTrue(self.paused)
+        # A filesystem error while clearing the preparation marker is recoverable.
+        original_unlink = Path.unlink
+        def unlink(path, *args, **kwargs):
+            if path == self.marker:
+                raise OSError('marker removal failed')
+            return original_unlink(path, *args, **kwargs)
+        with patch.object(Path, 'unlink', unlink):
+            with self.assertRaisesRegex(OSError, 'marker removal failed'):
+                deploy.remove_cls(self.build, True)
         pending = json.loads(self.marker.read_text())
         self.assertEqual(pending['phase'], 'preparing')
         self.failure = lambda args, kwargs: None
         with deploy.locked(self.directory / '.deploy.lock'):
             deploy.restore(self.directory, pending)
         self.assertFalse(self.marker.exists())
-        self.assertFalse(self.paused)
         self.assertTrue(self.running)
+        self.assertFalse(any('stop' in args for args in self.calls))
 
-    def test_failed_transition_write_unpauses_before_any_stop(self):
+    def test_failed_transition_write_recovers_before_any_stop(self):
         save = deploy.save
 
         def fail(path, value):

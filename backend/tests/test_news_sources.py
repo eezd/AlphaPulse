@@ -1,6 +1,5 @@
 import asyncio
 import json
-import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -34,7 +33,7 @@ ITEM = """<item><title>Bitcoin &amp; Ethereum</title>
 
 
 @pytest.mark.parametrize("source", ["CoinDeskSpider", "BeaSpider"])
-def test_rss_preserves_original_summary_time_and_provenance(trading, source):
+def test_rss_preserves_original_summary_time_and_provenance(app_env, source):
     from alphapulse.crawler.spiders import rss
     spider = make_spider(getattr(rss, source))
     requests = list(spider.first_requests())
@@ -52,7 +51,7 @@ def test_rss_preserves_original_summary_time_and_provenance(trading, source):
     assert item["raw_response_id"] == 12
 
 
-def test_rss_identity_survives_revisions_and_different_subfeeds(trading):
+def test_rss_identity_survives_revisions_and_different_subfeeds(app_env):
     from alphapulse.crawler.spiders.rss import CoinDeskSpider
     spider = make_spider(CoinDeskSpider)
     original, = spider.parse_feed(feed_response(ITEM))
@@ -73,7 +72,7 @@ def test_rss_identity_survives_revisions_and_different_subfeeds(trading):
     ITEM.replace("https://example.invalid/news/bitcoin", "javascript:alert(1)"),
     ITEM.replace("<pubDate>Tue, 20 Oct 2026 08:30:00 EDT</pubDate>", ""),
 ])
-def test_rss_isolates_bad_entries_and_records_visible_failure(trading, bad_item):
+def test_rss_isolates_bad_entries_and_records_visible_failure(app_env, bad_item):
     from alphapulse.crawler.spiders.rss import CoinDeskSpider
     spider = make_spider(CoinDeskSpider)
     items = list(spider.parse_feed(feed_response(bad_item + ITEM)))
@@ -81,7 +80,7 @@ def test_rss_isolates_bad_entries_and_records_visible_failure(trading, bad_item)
     assert len(spider.run.errors) == 1 and "RSS 条目解析失败" in spider.run.errors[0]
 
 
-def test_rss_rejects_html_instead_of_reporting_empty_success(trading):
+def test_rss_rejects_html_instead_of_reporting_empty_success(app_env):
     from alphapulse.crawler.spiders.rss import CoinDeskSpider
     response = XmlResponse(url="https://example.invalid/rss", body=b"<html><body>Access denied</body></html>")
     with pytest.raises(ValueError, match="不是 RSS/Atom"):
@@ -105,7 +104,7 @@ def test_rss_rejects_html_instead_of_reporting_empty_success(trading):
     ("50%_profit", None, [11]),
     ("比特币 ETF", None, []),
 ])
-def test_news_search_matches_topics_across_languages_and_keeps_literal_queries(trading, query, sources, expected):
+def test_news_search_matches_topics_across_languages_and_keeps_literal_queries(app_env, query, sources, expected):
     from alphapulse.api.news import news_filters
     from alphapulse.models import NewsItem
     engine = create_engine("sqlite://")
@@ -133,61 +132,7 @@ def test_news_search_matches_topics_across_languages_and_keeps_literal_queries(t
         engine.dispose()
 
 
-@pytest.mark.parametrize("headline,matched", [
-    ("Bitcoin ETF inflows", True), ("ethereum network update", True),
-    ("ETH rally", True), ("CRYPTO regulation", True), ("Stablecoins update", True),
-    ("Binance announcement", True), ("比特币消息", True), ("微策略增持", True),
-    ("New method for employment statistics", False), ("Ethernet hardware demand", False),
-    ("A hypothetical company", False),
-])
-def test_english_crypto_filter_uses_whole_words(trading, headline, matched):
-    from alphapulse.trading.news_signals import CRYPTO_PATTERN
-    assert bool(re.search(CRYPTO_PATTERN, headline, re.IGNORECASE)) is matched
-
-
-def test_macro_label_receives_summary_separately_from_truncated_title(trading, monkeypatch):
-    from alphapulse.ai import llm
-    from alphapulse.models import TradingAccount
-    from alphapulse.trading import news_signals
-
-    title = "GDP, Industries, Corporate Profits, State GDP, and State Personal Income; " * 4
-    summary = "Real gross domestic product increased at an annual rate of 2.2 percent."
-    provider = SimpleNamespace(model="test-only")
-    writes = []
-
-    class Session:
-        async def __aenter__(self):
-            return self
-        async def __aexit__(self, *args):
-            pass
-        async def execute(self, statement):
-            if statement.is_select:
-                return SimpleNamespace(all=lambda: [(123, title, summary)])
-            writes.append(statement.compile().params)
-        async def get(self, model, key):
-            return SimpleNamespace(provider_id=1) if model is TradingAccount else provider
-        def expunge(self, value):
-            assert value is provider
-        async def commit(self):
-            pass
-
-    async def stream(actual_provider, system, messages, tools, effort):
-        assert actual_provider is provider
-        item, = json.loads(messages[0]["text"])
-        assert item["id"] == 123 and item["summary"] == summary
-        assert len(item["title"]) == 200
-        assert "neutral" in system and "市场预期" in system
-        yield llm.Completion(tool_calls=[{"name": "label", "arguments": {
-            "items": [{"id": 123, "category": "event", "direction": "neutral"}],
-        }}])
-
-    monkeypatch.setattr(news_signals, "SessionLocal", Session)
-    monkeypatch.setattr(llm, "stream", stream)
-    assert asyncio.run(news_signals.label_new()) == 1
-    assert writes[0]["news_id_m0"] == 123 and writes[0]["direction_m0"] == "neutral"
-
-
-def test_news_tools_accept_foreign_sources_and_disclose_summary_scope(trading, monkeypatch):
+def test_news_tools_accept_foreign_sources_and_disclose_summary_scope(app_env, monkeypatch):
     from alphapulse.ai import tools
     args = tools.SearchNews(query="CPI", sources=["coindesk", "fed", "bls", "bea"])
     assert len(args.sources) == 4
@@ -210,7 +155,7 @@ def test_news_tools_accept_foreign_sources_and_disclose_summary_scope(trading, m
 
 
 @pytest.mark.parametrize("bad_date", [None, "2026-10-20T08:30:00", "invalid date", ""])
-def test_atom_uses_bls_published_time_and_isolates_invalid_dates(trading, bad_date):
+def test_atom_uses_bls_published_time_and_isolates_invalid_dates(app_env, bad_date):
     from alphapulse.crawler.spiders.rss import BlsSpider
     published = bad_date if bad_date is not None else "2026-10-20T08:30:00.2-04:00"
     entry = f"""<entry><id>cpi-release</id><title>Consumer Price Index</title>
@@ -240,9 +185,8 @@ def test_atom_uses_bls_published_time_and_isolates_invalid_dates(trading, bad_da
     ("empsit", "10022026", "2026-10-02T07:51:08.289-04:00", datetime(2026, 10, 2, 12, 30, tzinfo=UTC)),
     ("cpi", "01132026", "2026-01-13T07:50:31-05:00", datetime(2026, 1, 13, 13, 30, tzinfo=UTC)),
 ])
-def test_bls_uses_official_release_time_and_keeps_feed_timestamp(trading, program, date, feed_time, expected):
+def test_bls_uses_official_release_time_and_keeps_feed_timestamp(app_env, program, date, feed_time, expected):
     from alphapulse.crawler.spiders.rss import BlsSpider
-    from alphapulse.trading.news_signals import is_forward_sample
 
     url = f"https://www.bls.gov/feed/{program}.rss"
     response = XmlResponse(url=url, body=f'''<feed xmlns="http://www.w3.org/2005/Atom"><entry>
@@ -255,11 +199,9 @@ def test_bls_uses_official_release_time_and_keeps_feed_timestamp(trading, progra
     assert item["published_at"] == expected and not spider.run.errors
     assert datetime.fromisoformat(item["extra"]["feed_published_at"]) == datetime.fromisoformat(feed_time)
     assert item["extra"]["published_at_basis"] == "bls_release_schedule"
-    assert is_forward_sample(item["published_at"], expected + timedelta(minutes=1))
-    assert not is_forward_sample(item["published_at"], expected + timedelta(minutes=6))
 
 
-def test_bls_rejects_unrecognized_release_date_instead_of_guessing(trading):
+def test_bls_rejects_unrecognized_release_date_instead_of_guessing(app_env):
     from alphapulse.crawler.spiders.rss import BlsSpider
 
     spider = make_spider(BlsSpider)
@@ -267,7 +209,7 @@ def test_bls_rejects_unrecognized_release_date_instead_of_guessing(trading):
     assert len(spider.run.errors) == 1 and "公告日期" in spider.run.errors[0]
 
 
-def test_bea_repairs_only_its_observed_official_schemeless_link(trading):
+def test_bea_repairs_only_its_observed_official_schemeless_link(app_env):
     from alphapulse.crawler.spiders.rss import BeaSpider, CoinDeskSpider
     response = feed_response(ITEM.replace("https://example.invalid/news/bitcoin", "www.bea.gov/news/2026/gdp"))
     item, = make_spider(BeaSpider).parse_feed(response)
@@ -277,7 +219,7 @@ def test_bea_repairs_only_its_observed_official_schemeless_link(trading):
 
 
 @pytest.mark.parametrize("status", [200, 302, 403])
-def test_bls_downloader_preserves_compressed_body_status_and_redirect_for_scrapy(trading, monkeypatch, status):
+def test_bls_downloader_preserves_compressed_body_status_and_redirect_for_scrapy(app_env, monkeypatch, status):
     import gzip
     import ssl
 
@@ -305,7 +247,7 @@ def test_bls_downloader_preserves_compressed_body_status_and_redirect_for_scrapy
     assert response.request is request
 
 
-def test_bls_transport_error_reaches_existing_scrapy_retry_boundary(trading, monkeypatch):
+def test_bls_transport_error_reaches_existing_scrapy_retry_boundary(app_env, monkeypatch):
     import httpx
 
     from alphapulse.crawler.spiders import rss
@@ -319,7 +261,7 @@ def test_bls_transport_error_reaches_existing_scrapy_retry_boundary(trading, mon
 
 
 @pytest.mark.parametrize('kind', ['summary', 'content'])
-def test_custom_atom_uses_article_link_and_preserves_html_and_scope(trading, kind):
+def test_custom_atom_uses_article_link_and_preserves_html_and_scope(app_env, kind):
     from alphapulse.crawler.spiders.rss import CustomRssSpider
     from alphapulse.crawler.spiders.base import RunState
     spider = CustomRssSpider(source_code='rss_'+'a'*24)
@@ -337,7 +279,7 @@ def test_custom_atom_uses_article_link_and_preserves_html_and_scope(trading, kin
     assert item['extra']['content_scope'] == ('feed_content' if kind == 'content' else 'feed_summary')
 
 
-def test_new_rss_is_paused_and_discovered_without_manager_restart(trading, monkeypatch):
+def test_new_rss_is_paused_and_discovered_without_manager_restart(app_env, monkeypatch):
     from unittest.mock import AsyncMock
     from alphapulse.api.crawler import RssIn, create_rss
     from alphapulse.crawler import manager
@@ -370,7 +312,7 @@ def test_new_rss_is_paused_and_discovered_without_manager_restart(trading, monke
 
 @pytest.mark.parametrize('encoding,title', [('iso-8859-1', 'Café résumé'), ('utf-8', '中文说明 Café')])
 @pytest.mark.parametrize('compressed', [False, True])
-def test_custom_feed_preserves_declared_xml_encoding_through_public_downloader(trading, monkeypatch, encoding, title, compressed):
+def test_custom_feed_preserves_declared_xml_encoding_through_public_downloader(app_env, monkeypatch, encoding, title, compressed):
     import gzip
     from urllib.parse import urlsplit
     from unittest.mock import AsyncMock
@@ -396,7 +338,7 @@ def test_custom_feed_preserves_declared_xml_encoding_through_public_downloader(t
     assert item['title'] == title and not spider.run.errors
 
 
-def test_custom_feed_keeps_http_failure_status_for_scrapy_retry(trading, monkeypatch):
+def test_custom_feed_keeps_http_failure_status_for_scrapy_retry(app_env, monkeypatch):
     from urllib.parse import urlsplit
     from unittest.mock import AsyncMock
     import httpx

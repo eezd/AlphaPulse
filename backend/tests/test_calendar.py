@@ -87,7 +87,7 @@ def test_missing_release_value_is_not_zero():
         parse_values("cpi", '<div id="bodytext">Release pending</div>')
 
 
-def test_poll_cadence_is_fast_at_release_and_bounded_after_errors(trading):
+def test_poll_cadence_is_fast_at_release_and_bounded_after_errors(app_env):
     from alphapulse.calendar.service import next_poll
     at = datetime(2026, 10, 29, 12, 30, tzinfo=UTC)
     assert next_poll(at, at - timedelta(seconds=10), False) == at
@@ -97,7 +97,7 @@ def test_poll_cadence_is_fast_at_release_and_bounded_after_errors(trading):
     assert next_poll(at, at, True) == at + timedelta(seconds=60)
 
 
-def test_without_consensus_labels_reference_impact_without_claiming_surprise(trading):
+def test_without_consensus_labels_reference_impact_without_claiming_surprise(app_env):
     from alphapulse.calendar.service import impact
     direction, reason = impact("cpi_mom", "0.6", "0.4")
     assert direction == "bearish" and "上升" in reason and "未取得市场一致预期" in reason
@@ -113,7 +113,7 @@ def test_without_consensus_labels_reference_impact_without_claiming_surprise(tra
     ("payrolls", "2.9", "13.3", None, "uncertain"),
     ("core_cpi_yoy", "2.6", None, None, "uncertain"),
 ])
-def test_impact_uses_forecast_first_and_does_not_hide_ambiguous_channels(trading, key, actual, previous, forecast, direction):
+def test_impact_uses_forecast_first_and_does_not_hide_ambiguous_channels(app_env, key, actual, previous, forecast, direction):
     from alphapulse.calendar.service import impact
     actual_direction, explanation = impact(key, actual, previous, forecast)
     assert actual_direction == direction
@@ -121,7 +121,7 @@ def test_impact_uses_forecast_first_and_does_not_hide_ambiguous_channels(trading
         assert "市场预期" in explanation and "不是超预期" not in explanation
 
 
-def test_event_has_country_specific_importance_and_comparison_basis(trading):
+def test_event_has_country_specific_importance_and_comparison_basis(app_env):
     from alphapulse.calendar.service import release_rows
     now = datetime(2026, 10, 24, tzinfo=UTC)
     row = SimpleNamespace(id=1, period=None, stage=None, family="ppi", source="bls", title="PPI", scheduled_at=now,
@@ -134,7 +134,7 @@ def test_event_has_country_specific_importance_and_comparison_basis(trading):
     assert release_rows(row, now)[1]["importance"] == 5
 
 
-def test_result_records_first_arrival_and_revisions_without_overwriting_history(trading):
+def test_result_records_first_arrival_and_revisions_without_overwriting_history(app_env):
     from alphapulse.calendar.service import save_result
     row = SimpleNamespace(id=1, period=None, stage=None, title="CPI", scheduled_at=datetime(2026, 10, 14, 12, 30, tzinfo=UTC),
                           schedule_status="scheduled", values={}, release_url=None, first_received_at=None, revision_no=1)
@@ -149,7 +149,7 @@ def test_result_records_first_arrival_and_revisions_without_overwriting_history(
     assert len(captured) == 2 and captured[0].payload["values"] == first
 
 
-def test_result_date_mismatch_waits_without_using_stale_release(trading):
+def test_result_date_mismatch_waits_without_using_stale_release(app_env):
     import httpx
     from alphapulse.calendar.worker import CalendarWorker
     async def check():
@@ -171,7 +171,7 @@ def test_result_date_mismatch_waits_without_using_stale_release(trading):
 
 
 @pytest.mark.parametrize("source", ["bls", "umich"])
-def test_rolling_page_rollover_preserves_received_result_without_source_error(trading, monkeypatch, source):
+def test_rolling_page_rollover_preserves_received_result_without_source_error(app_env, monkeypatch, source):
     import httpx
     from alphapulse.calendar import worker as module
 
@@ -210,7 +210,7 @@ def test_rolling_page_rollover_preserves_received_result_without_source_error(tr
     asyncio.run(check())
 
 
-def test_schedule_reschedule_and_withdrawal_preserve_past_and_revisions(trading):
+def test_schedule_reschedule_and_withdrawal_preserve_past_and_revisions(app_env):
     from alphapulse.calendar.parsers import Scheduled
     from alphapulse.calendar.service import save_schedule
     now = datetime(2026, 10, 24, tzinfo=UTC)
@@ -234,7 +234,7 @@ def test_schedule_reschedule_and_withdrawal_preserve_past_and_revisions(trading)
     assert len(recorded) == 2
 
 
-def test_calendar_api_requires_auth_validates_range_and_exposes_unavailable_worker(trading, monkeypatch):
+def test_calendar_api_requires_auth_validates_range_and_exposes_unavailable_worker(app_env, monkeypatch):
     import httpx
     from fastapi import FastAPI
     from alphapulse.api import calendar
@@ -275,7 +275,7 @@ def test_calendar_api_requires_auth_validates_range_and_exposes_unavailable_work
     asyncio.run(check())
 
 
-def test_worker_initializes_all_sources_and_drops_expired_month_status(trading, schedule_session):
+def test_worker_initializes_all_sources_and_drops_expired_month_status(app_env, schedule_session):
     import httpx
     from alphapulse.calendar.worker import CalendarWorker
     async def check():
@@ -300,14 +300,14 @@ def test_worker_initializes_all_sources_and_drops_expired_month_status(trading, 
                                            ("Sun, 25 Oct 2026 11:00:00 GMT", -3600),
                                            (None, None), ("invalid", None), ("-1", None),
                                            ("25 Oct 2026 14:00:00", None), ("9" * 30, None)])
-def test_retry_after_accepts_seconds_and_http_date_without_guessing_invalid_headers(trading, value, seconds):
+def test_retry_after_accepts_seconds_and_http_date_without_guessing_invalid_headers(app_env, value, seconds):
     from alphapulse.calendar.worker import retry_after_at
     now = datetime(2026, 10, 25, 12, tzinfo=UTC)
     assert retry_after_at(value, now) == (now + timedelta(seconds=seconds) if seconds is not None else None)
 
 
 @pytest.mark.parametrize("status", [429, 503])
-def test_limited_result_preserves_response_and_defers_single_poll(trading, monkeypatch, status):
+def test_limited_result_preserves_response_and_defers_single_poll(app_env, monkeypatch, status):
     import httpx
     from alphapulse.calendar import worker as module
 
@@ -344,7 +344,7 @@ def test_limited_result_preserves_response_and_defers_single_poll(trading, monke
     asyncio.run(check())
 
 
-def test_schedule_honors_server_pause_without_blocking_other_sources(trading, schedule_session):
+def test_schedule_honors_server_pause_without_blocking_other_sources(app_env, schedule_session):
     import httpx
     from alphapulse.calendar.worker import CalendarWorker
     async def check():
@@ -370,7 +370,7 @@ def test_schedule_honors_server_pause_without_blocking_other_sources(trading, sc
 
 
 @pytest.fixture
-def schedule_session(trading, monkeypatch):
+def schedule_session(app_env, monkeypatch):
     from alphapulse.calendar import worker as module
     session = AsyncMock()
     session.scalars.return_value = []

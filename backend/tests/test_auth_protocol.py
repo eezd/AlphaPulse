@@ -60,7 +60,7 @@ class MemoryRedis:
 
 
 @pytest.fixture
-def auth_app(trading, monkeypatch):
+def auth_app(app_env, monkeypatch):
     from alphapulse.api import auth
     from alphapulse.api.main import app
     from alphapulse.core import auth as core
@@ -335,33 +335,3 @@ def test_websocket_tickets_single_use_active_session(auth_app, monkeypatch):
             with client.websocket_connect("/api/market/ws", subprotocols=[WS_PROTOCOL, f"ticket.{unused}"]):
                 pass
         assert revoked.value.status_code == 401
-
-
-def test_trading_config_returns_single_envelope_and_manual_request_keeps_202(auth_app, monkeypatch):
-    from alphapulse.api import trading
-    from alphapulse.core.auth import create_token
-    from alphapulse.core.db import get_session
-    from alphapulse.models import TradingAccount
-    app, memory = auth_app
-    account = SimpleNamespace(exchange="bybit", provider_id=None, reasoning_effort=None, daily_analysis_limit=60)
-    async def get(model, key):
-        return account if model is TradingAccount else None
-    db = SimpleNamespace(get=get, add=lambda row: None, commit=AsyncMock(),
-                         execute=AsyncMock(return_value=SimpleNamespace(one=lambda: (2, 10, 5))))
-    app.dependency_overrides[get_session] = lambda: db
-    monkeypatch.setattr(trading, "read_snapshot", AsyncMock(return_value=None))
-    monkeypatch.setattr(trading, "get_symbol", AsyncMock(return_value=SimpleNamespace(running=True)))
-    monkeypatch.setattr(trading, "fresh_snapshot", AsyncMock())
-    monkeypatch.setattr(trading, "active_exchange", AsyncMock(return_value="bybit"))
-    async def check():
-        token, _ = await create_token("test-admin")
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://test",
-                                     headers={"Authorization": f"Bearer {token}"}) as client:
-            result = await client.patch("/api/trading/config", json={"daily_analysis_limit": 120})
-            assert result.status_code == 200
-            assert result.json()["data"]["today"]["limit"] == 120
-            assert "code" not in result.json()["data"]
-            result = await client.post("/api/trading/symbols/BTCUSDT/manual/cancel")
-            assert result.status_code == 202
-            assert result.json() == {"code": 0, "data": None, "message": ""}
-    asyncio.run(check())

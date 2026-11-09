@@ -2,7 +2,7 @@
 import pytest
 
 
-def test_keyword_queries_match_independently_and_escape_literals(trading):
+def test_keyword_queries_match_independently_and_escape_literals(app_env):
     from sqlalchemy import select
     from sqlalchemy.dialects.postgresql import dialect
     from alphapulse.models import NewsItem
@@ -16,7 +16,7 @@ def test_keyword_queries_match_independently_and_escape_literals(trading):
     with pytest.raises(ValueError): terms_for('   ')
 
 
-def test_plan_time_is_distinct_from_occurrence(trading):
+def test_plan_time_is_distinct_from_occurrence(app_env):
     from alphapulse.news_research.time_contracts import PackageTimePoint
     point = dict(occurred_at=None,time_precision='unknown',time_text='明天',reported_at=None,
         description='拟发布',verification='partial',evidence_refs=[{'article_id':1,'quote':'明天'}])

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 
-def test_preview_and_repeated_execution_preserve_retry_evidence(trading, monkeypatch):
+def test_preview_and_repeated_execution_preserve_retry_evidence(app_env, monkeypatch):
     from alphapulse.crawler import repair_collection as module
     original = {'document_retries': {'https://example.invalid/doc': {
         'document': {'url': 'https://example.invalid/doc'}, 'attempts': 3,

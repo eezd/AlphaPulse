@@ -9,7 +9,7 @@ import pytest
 
 
 @pytest.fixture
-def qr_env(trading, monkeypatch):
+def qr_env(app_env, monkeypatch):
     from alphapulse.api import jin10
     from alphapulse.calendar import jin10_auth
     from alphapulse.core.auth import AuthSession

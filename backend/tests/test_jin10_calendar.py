@@ -93,7 +93,7 @@ def stored(entry, id=11, now=None):
                            schedule_checked_at=now, error=None, revision_no=1)
 
 
-def test_late_forecast_is_displayed_but_not_a_historical_surprise(trading):
+def test_late_forecast_is_displayed_but_not_a_historical_surprise(app_env):
     from alphapulse.calendar.jin10_view import jin10_item
     row = stored(entries("2026-11-04")[0])
     row.values["jin10_78"].update(actual="9", forecast_before_release=False, observed_at={"forecast": "2026-11-05T00:00:00+00:00"})
@@ -103,7 +103,7 @@ def test_late_forecast_is_displayed_but_not_a_historical_surprise(trading):
     assert item["impact_basis"] == "previous" and item["impact"] == "neutral"
 
 
-def test_exact_merge_prefers_official_fields_and_preserves_previous_revisions(trading):
+def test_exact_merge_prefers_official_fields_and_preserves_previous_revisions(app_env):
     from alphapulse.calendar.jin10_view import merge_items
     entry = next(e for e in entries("2026-10-29") if "jin10_79" in e.values)
     extra = stored(entry)
@@ -127,7 +127,7 @@ def test_exact_merge_prefers_official_fields_and_preserves_previous_revisions(tr
     assert len(merge_items([(official, original)], [extra], entry.at)) == 2
 
 
-def test_cushing_is_not_total_commercial_crude(trading):
+def test_cushing_is_not_total_commercial_crude(app_env):
     from alphapulse.calendar.jin10_view import definition
     crude = next(e for e in entries("2025-01-08") if "jin10_111" in e.values)
     cushing = next(e for e in entries("2025-01-08") if "jin10_953" in e.values)
@@ -135,7 +135,7 @@ def test_cushing_is_not_total_commercial_crude(trading):
     assert definition(cushing.values["_jin10"]) is None
 
 
-def test_repeated_storage_preserves_observation_and_first_received_time(trading):
+def test_repeated_storage_preserves_observation_and_first_received_time(app_env):
     from alphapulse.calendar.jin10_store import save_entry
     now = datetime(2026, 11, 3, tzinfo=UTC)
     entry = entries("2026-11-04")[0]
@@ -147,7 +147,7 @@ def test_repeated_storage_preserves_observation_and_first_received_time(trading)
     assert row.values == old and row.first_received_at is None
 
 
-def test_reconnect_rejects_obsolete_inflight_capture(trading, monkeypatch):
+def test_reconnect_rejects_obsolete_inflight_capture(app_env, monkeypatch):
     from alphapulse.calendar import jin10_worker as worker
     now = datetime.now(UTC)
     class Session:
@@ -165,7 +165,7 @@ def test_reconnect_rejects_obsolete_inflight_capture(trading, monkeypatch):
     session.commit.assert_not_awaited()
 
 
-def test_every_verified_mapping_has_a_public_fixture_with_the_exact_definition(trading):
+def test_every_verified_mapping_has_a_public_fixture_with_the_exact_definition(app_env):
     from alphapulse.calendar.jin10_view import MAPPINGS, definition
     seen = set()
     for day in (key for key in FIXTURE if ":" not in key):
@@ -184,7 +184,7 @@ def test_holidays_preserve_distinct_exchanges_within_the_same_country():
     assert len(us) > 1 and len({row.identity for row in us}) == len(us)
 
 
-def test_connection_status_never_accepts_a_previous_connection_heartbeat(trading):
+def test_connection_status_never_accepts_a_previous_connection_heartbeat(app_env):
     from alphapulse.api.jin10 import public_status
     now = datetime.now(UTC)
     row = SimpleNamespace(token_encrypted=b"synthetic", connected_at=now, error=None)
@@ -213,7 +213,7 @@ def test_account_login_does_not_prove_calendar_access():
     ("2026-11-04T15:59:59+00:00", False),
     ("2026-11-04T16:00:00+00:00", True),
 ])
-def test_history_completion_requires_a_snapshot_after_the_shanghai_day(trading, captured_at, completed):
+def test_history_completion_requires_a_snapshot_after_the_shanghai_day(app_env, captured_at, completed):
     from alphapulse.calendar.jin10_store import next_history_day
     day = date(2026, 11, 4)
     snapshot = SimpleNamespace(day=day, captured_at=datetime.fromisoformat(captured_at))
@@ -222,7 +222,7 @@ def test_history_completion_requires_a_snapshot_after_the_shanghai_day(trading, 
     assert asyncio.run(next_history_day(session, day, day, excluded={day})) is None
 
 
-def test_withdrawal_retains_values_and_records_evidence_and_restoration(trading):
+def test_withdrawal_retains_values_and_records_evidence_and_restoration(app_env):
     from alphapulse.calendar.jin10_store import save_entry, withdraw_missing
     from alphapulse.calendar.jin10_view import jin10_item
     entry = entries("2026-11-04")[0]
@@ -242,7 +242,7 @@ def test_withdrawal_retains_values_and_records_evidence_and_restoration(trading)
     assert revisions[-1].payload["schedule_status"] == "scheduled" and revisions[-1].raw_response_id == 43
 
 
-def test_withdrawn_provider_cannot_supply_official_fallback(trading):
+def test_withdrawn_provider_cannot_supply_official_fallback(app_env):
     from alphapulse.calendar.jin10_view import merge_items
     entry = next(e for e in entries("2026-10-29") if "jin10_79" in e.values)
     extra = stored(entry)
@@ -260,7 +260,7 @@ def test_withdrawn_provider_cannot_supply_official_fallback(trading):
 
 @pytest.mark.parametrize("failure_kind", ["contract", "browser", "missing_key"])
 @pytest.mark.parametrize("failure_stage", ["fetch", "persist"])
-def test_failed_days_do_not_starve_live_or_history_and_retry_after_backoff(trading, monkeypatch, failure_kind, failure_stage):
+def test_failed_days_do_not_starve_live_or_history_and_retry_after_backoff(app_env, monkeypatch, failure_kind, failure_stage):
     from alphapulse.calendar import jin10_worker as worker
     from alphapulse.calendar.jin10_auth import Jin10Error
     now = datetime(2026, 11, 4, tzinfo=UTC)
@@ -329,7 +329,7 @@ def test_cross_day_release_uses_actual_date_and_keeps_source_day():
         normalize(body, 'data', date(2026, 11, 4))
 
 
-def test_cross_day_membership_does_not_withdraw_until_all_buckets_remove_it(trading):
+def test_cross_day_membership_does_not_withdraw_until_all_buckets_remove_it(app_env):
     from alphapulse.calendar.jin10 import Entry
     from alphapulse.calendar.jin10_store import save_entry, withdraw_missing
     original = entries('2026-11-04')[0]

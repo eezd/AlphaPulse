@@ -4,7 +4,7 @@ import pytest
 
 
 @pytest.fixture
-def risk(trading):
+def risk(app_env):
     from alphapulse.news_research import model as service
     return service
 

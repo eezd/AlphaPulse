@@ -8,7 +8,7 @@ import pytest
 
 
 @pytest.mark.parametrize('mode', ['success', 'exhausted', 'partial', 'timeout', 'auth', 'long_wait', 'tool_fragment'])
-def test_news_transport_retry_budget_and_output_guard(trading, monkeypatch, mode):
+def test_news_transport_retry_budget_and_output_guard(app_env, monkeypatch, mode):
     from alphapulse.ai import llm
     from alphapulse.news_research.model import model_stream
     from alphapulse.news_research.progress import current
@@ -44,7 +44,7 @@ def test_news_transport_retry_budget_and_output_guard(trading, monkeypatch, mode
 
 
 
-def test_cancelling_backoff_releases_context_and_progress(trading, monkeypatch):
+def test_cancelling_backoff_releases_context_and_progress(app_env, monkeypatch):
     from alphapulse.ai import llm
     from alphapulse.news_research.model import model_stream
     from alphapulse.news_research import progress
@@ -73,7 +73,7 @@ def test_cancelling_backoff_releases_context_and_progress(trading, monkeypatch):
 
 @pytest.mark.parametrize('protocol', ['openai', 'anthropic'])
 @pytest.mark.parametrize('news', [True, False])
-def test_sdk_retry_is_disabled_for_every_request(trading, monkeypatch, protocol, news):
+def test_sdk_retry_is_disabled_for_every_request(app_env, monkeypatch, protocol, news):
     from alphapulse.ai import llm
     options=[]
     class Client:

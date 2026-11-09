@@ -32,7 +32,7 @@ def importer(module, tmp_path, data, source="coindesk"):
     return spider
 
 
-def test_archive_import_preserves_rss_identity_time_and_public_summary_provenance(trading):
+def test_archive_import_preserves_rss_identity_time_and_public_summary_provenance(app_env):
     from scrapy.http import Request, XmlResponse
 
     from alphapulse.crawler.import_history import ArchivedArticle, Capture, article_item
@@ -56,7 +56,7 @@ def test_archive_import_preserves_rss_identity_time_and_public_summary_provenanc
     assert item["raw_response_id"] == 42
 
 
-def test_archive_import_skips_existing_ids_links_and_out_of_range_articles(trading, monkeypatch, tmp_path):
+def test_archive_import_skips_existing_ids_links_and_out_of_range_articles(app_env, monkeypatch, tmp_path):
     from alphapulse.crawler import import_history
 
     class Session:
@@ -83,7 +83,7 @@ def test_archive_import_skips_existing_ids_links_and_out_of_range_articles(tradi
     assert not spider.run.errors
 
 
-def test_pdf_archive_import_passes_original_bytes_to_raw_storage(trading, monkeypatch, tmp_path):
+def test_pdf_archive_import_passes_original_bytes_to_raw_storage(app_env, monkeypatch, tmp_path):
     from alphapulse.crawler import import_history
 
     body = b"%PDF-1.7\n%\xff\x80\xfe\x00\r\n"
@@ -130,7 +130,7 @@ def test_pdf_archive_import_passes_original_bytes_to_raw_storage(trading, monkey
 
 
 @pytest.mark.parametrize("broken", ["different_source", "malformed_capture", "invalid_base64", "unknown_encoding"])
-def test_invalid_archive_input_fails_visibly_before_writing(trading, monkeypatch, tmp_path, broken):
+def test_invalid_archive_input_fails_visibly_before_writing(app_env, monkeypatch, tmp_path, broken):
     from alphapulse.crawler import import_history
 
     def unexpected_db_access():
@@ -161,7 +161,7 @@ def test_invalid_archive_input_fails_visibly_before_writing(trading, monkeypatch
     ("ons", "https://www.ons.gov.uk/releases/gdpquarterlynationalaccountsukapriltojune2026", "https://www.ons.gov.uk/economy/grossdomesticproductgdp/bulletins/quarterlynationalaccounts/apriltojune2026"),
     ("ons", "https://www.ons.gov.uk/releases/gdpfirstquarterlyestimateukapriltojune2026", "https://www.ons.gov.uk/economy/grossdomesticproductgdp/bulletins/gdpfirstquarterlyestimateuk/apriltojune2026"),
 ])
-def test_import_skips_feed_release_alias_without_losing_other_announcements(trading, monkeypatch, tmp_path, source, feed_url, bulletin_url):
+def test_import_skips_feed_release_alias_without_losing_other_announcements(app_env, monkeypatch, tmp_path, source, feed_url, bulletin_url):
     from alphapulse.crawler import import_history
 
     class Session:

@@ -175,6 +175,8 @@ def smoke(build, label):
                'SECRET_ENCRYPTION_KEY': 'MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=',
                'ADMIN_USERNAME': 'ci', 'ADMIN_PASSWORD_HASH': password_hash}
         env_args = [entry for key, value in env.items() for entry in ('-e', key + '=' + value)]
+        print(run('docker', 'run', '--rm', '-i', *common, *env_args, image, 'python', '-',
+                  input=(ROOT / 'scripts/smoke_remove_trading.py').read_text()), flush=True)
         run('docker', 'run', '-d', '--name', names['api'], '--network-alias', 'api', *common, *env_args,
             image, 'sh', '-ec', 'alembic upgrade head && exec uvicorn alphapulse.api.main:app --host 0.0.0.0')
         run('docker', 'run', '-d', '--name', names['web'], '--network-alias', 'web', *common, build['images']['web']['local'])
