@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import signal
+import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -64,9 +65,12 @@ class Manager:
 
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(sig, self.stopping.set)
+            try:
+                loop.add_signal_handler(sig, self.stopping.set)
+            except NotImplementedError:  # Windows event loops do not expose POSIX signal handlers.
+                signal.signal(sig, lambda *_: loop.call_soon_threadsafe(self.stopping.set))
 
-        # 各循环自行重试可恢复的错误；仍有异常逃出时 TaskGroup 让整个进程退出，由 docker 重启，
+        # 各循环自行重试可恢复的错误；仍有异常逃出时 TaskGroup 让整个进程退出，由进程管理器重启，
         # 避免出现"进程活着但调度或守护任务已经死掉"的状态
         async with asyncio.TaskGroup() as tg:
             self.supervisor_group = tg
@@ -85,7 +89,7 @@ class Manager:
     async def supervise(self, w: Worker) -> None:
         while not self.stopping.is_set():
             await self.cleanup_before_spawn(w)
-            arguments = ["scrapy", "crawl", "custom_rss", "-a", "source_code="+w.code] if w.adapter == "rss" else ["scrapy", "crawl", w.code]
+            arguments = [sys.executable, "-m", "scrapy", "crawl", "custom_rss", "-a", "source_code="+w.code] if w.adapter == "rss" else [sys.executable, "-m", "scrapy", "crawl", w.code]
             w.proc = await asyncio.create_subprocess_exec(*arguments)
             w.started_at = datetime.now(UTC)
             # 新进程的第一轮立即执行，并做全量回溯扫描

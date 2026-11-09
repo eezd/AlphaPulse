@@ -1,0 +1,27 @@
+FROM python:3.13-slim AS base
+COPY --from=ghcr.io/astral-sh/uv:0.13.6 /uv /usr/local/bin/uv
+ENV UV_LINK_MODE=copy UV_NO_CACHE=1 PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+ARG TARGETARCH
+WORKDIR /app
+COPY linux/${TARGETARCH}/ /app/
+# Playwright's Node driver is separated from other locked dependencies for the CDN budget.
+RUN cd backend && uv sync --locked --no-dev --no-install-project --no-install-package playwright
+RUN cd backend && uv sync --locked --no-dev --no-editable
+ENV PATH=/app/backend/.venv/bin:$PATH WEB_DIST_DIR=/app/web
+WORKDIR /app/backend
+
+FROM base AS browser-download
+RUN playwright install --only-shell chromium
+RUN python -c 'from pathlib import Path; root = Path("/opt/ms-playwright"); binary, = root.glob("chromium_headless_shell-*/chrome-headless-shell-linux*/chrome-headless-shell"); target = Path("/opt/browser-executable") / binary.relative_to(root); target.parent.mkdir(parents=True); binary.rename(target)'
+
+FROM base AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends libgbm1 && rm -rf /var/lib/apt/lists/*
+RUN playwright install-deps chromium && rm -rf /var/lib/apt/lists/*
+COPY --from=browser-download /opt/browser-executable/ /opt/ms-playwright/
+COPY --from=browser-download /opt/ms-playwright/ /opt/ms-playwright/
+RUN python -c 'import fastapi, scrapy; from playwright.sync_api import sync_playwright; p = sync_playwright().start(); b = p.chromium.launch(); page = b.new_page(); page.set_content("<title>AlphaPulse build check</title>"); assert page.title() == "AlphaPulse build check"; b.close(); p.stop()'
+ARG APP_VERSION
+ARG APP_COMMIT
+ENV APP_VERSION=$APP_VERSION APP_COMMIT=$APP_COMMIT
+LABEL org.opencontainers.image.source=https://git.134333.xyz/eezd/AlphaPulse
+CMD ["python", "-m", "uvicorn", "alphapulse.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

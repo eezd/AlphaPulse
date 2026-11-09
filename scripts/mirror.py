@@ -7,7 +7,7 @@ from pathlib import Path
 import tempfile
 import time
 
-from ci import SOURCE, locked, request_json, require, run, save
+from common import SOURCE, locked, request_json, require, run, save
 
 TARGET = 'https://github.com/eezd/AlphaPulse.git'
 DIRECTORY = Path('/docker/gitea/mirrors/AlphaPulse')
@@ -48,10 +48,13 @@ def main():
     parser.parse_args()
     token = os.environ.get('ALL_GITHUB_TOKEN')
     require(token, 'Missing account-level ALL_GITHUB_TOKEN')
-    identity = request_json('https://api.github.com/user', token=token)
+    headers = {}
+    identity = request_json('https://api.github.com/user', token=token, response_headers=headers)
     require(identity['login'] == 'eezd', 'GitHub token belongs to an unexpected account')
     repository = request_json('https://api.github.com/repos/eezd/AlphaPulse', token=token)
     require(repository.get('permissions', {}).get('push'), 'GitHub repository write permission is required')
+    scopes = {scope.strip() for key, value in headers.items() if key.lower() == 'x-oauth-scopes' for scope in value.split(',')}
+    print('Manual release GitHub scopes ready:', {'workflow', 'write:packages'} <= scopes)
     # The helper contains no credentials; Git reads the token from the task environment.
     with tempfile.TemporaryDirectory(prefix='ap-mirror-auth-') as temporary:
         helper = Path(temporary) / 'askpass'

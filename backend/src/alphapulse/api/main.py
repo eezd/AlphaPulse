@@ -47,3 +47,8 @@ async def openapi() -> dict:
 @app.get("/api/docs", include_in_schema=False)
 async def docs() -> RedirectResponse:
     return RedirectResponse("/docs")
+
+
+if os.environ.get('WEB_DIST_DIR'):
+    from alphapulse.api.frontend import WorkspaceFiles
+    app.mount('/', WorkspaceFiles(directory=os.environ['WEB_DIST_DIR'], html=True))

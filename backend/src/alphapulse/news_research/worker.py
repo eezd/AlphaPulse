@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import signal
 from sqlalchemy import text, update
 from alphapulse.core.db import SessionLocal, engine
 from alphapulse.news_research.models import (
@@ -42,6 +43,13 @@ async def recover_interrupted():
 
 
 async def run():
+    stopping = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stopping.set)
+        except NotImplementedError:
+            signal.signal(sig, lambda *_: loop.call_soon_threadsafe(stopping.set))
     async with engine.connect() as lock:
         if not await lock.scalar(text("SELECT pg_try_advisory_lock(20261030, 1)")):
             raise RuntimeError("新闻AI worker 已运行")
@@ -49,7 +57,7 @@ async def run():
         await recover_interrupted()
         tasks = {}
         try:
-            while True:
+            while not stopping.is_set():
                 for task in list(tasks):
                     if task.done():
                         tasks.pop(task)

@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    # 容器内由 compose 的 env_file 注入；只有一套配置，见仓库根目录 .env
+    # 由服务环境注入；本机私有配置位于 runtime/config/app.env。
     model_config = SettingsConfigDict(extra="ignore")
 
     congress_api_key: str = ""

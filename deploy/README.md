@@ -1,89 +1,47 @@
-# AlphaPulse CI/CD
+# AlphaPulse delivery and operations
 
-Gitea (`https://git.134333.xyz/eezd/AlphaPulse`) is the source repository; GitHub is a public, one-way mirror of all branches, tags and history. Develop on `dev`. `main` has independent checks and no deployed instance or release workflow.
+Gitea (`https://git.134333.xyz/eezd/AlphaPulse`) is the source. `main` is the default stable branch and `dev` is the development branch. GitHub is a public one-way mirror of all business branches, tags, history and existing LFS objects. Normal pushes and tags **only synchronize Git**; they do not test, build, deploy or release. Main was advanced once to the framework migration; future updates/releases do not merge branches.
 
-## Checks and images
+## Native development instance
 
-Both branch workflows run Python 3.13/uv checks, Node 24/pnpm 12.11.2 checks, Linux amd64 image builds and acceptance against temporary PostgreSQL/Redis. Acceptance runs on an internal Docker network with synthetic data; no worker or external model service starts there. Foreign PRs do not enter the shared Docker runner.
-
-Only a `dev` push publishes the accepted images:
-
-- `git.134333.xyz/eezd/dev/backend/alphapulse:YYYYMMDD-xxxxxxxx`
-- `git.134333.xyz/eezd/dev/web/alphapulse:YYYYMMDD-xxxxxxxx`
-
-Deployment, migration commands, Compose interpolation and CI outputs use these version tags. Accepted digests remain internal receipt metadata: pulls and startup verify the tag's content, full commit and version before use; an overwritten tag fails validation. Historical digest-only application receipts select the corresponding version tag without discarding their identity checks. Recovery converts the known historical SearXNG digest to its verified tag and rejects unknown digest references.
-
-The date comes from the commit's committer timestamp in UTC, and the suffix is the first eight characters of its full SHA. Existing versions are immutable. Images are public on Gitea only; private configuration and data are excluded. `/api/health` and `/version.json` identify the deployed API and web revision. `build.json` is the CI receipt, not a tracked source file.
-
-## Research workspace UI
-
-The Stitch workspace shares navigation across research, news, calendar, collection, market, Chat, Skills and settings. News supports personal bookmarks and current-revision processing filters; research reports bind conclusions and original sources to an immutable successful version. Calendar and collector details adapt to the viewport. Market depth, aggregate trades and funding data use Redis cache/replay; futures depth retains the exchange event timestamp. Fullscreen includes popup menus.
-
-The additive `de5678901234` migration follows `dd4567890123` and creates only `news_bookmarks` (username/news ID key, creation time and a cascading news foreign key). It does not rewrite original news, research results or model settings. Its production execution requires the independent schema authorization described below before the deployment schema guard can pass. CI browser acceptance covers full-screen menus and responsive workspaces at desktop and mobile widths.
-
-## The single data-bearing instance
-
-`/docker/gitea/dev/AlphaPulse` contains the runtime Compose configuration, `.env`, version-tag selection, deployment receipts (which retain accepted digests for identity checks) and `.deploy.lock`. The repository-root `.env` points to that sole private configuration. The Compose project is `alphapulse-dev`; `AlphaPulse-dev` is the web container, and the other application containers append their service name (`-api`, `-crawler`, `-market`, `-calendar`, `-news-risk`, `-jin10-calendar`).
-
-This project's DEV intentionally uses the existing database, Redis DB 14 (`ap:*` only), model credentials. The supported service set is API, web, market, crawler, calendar, news-risk and jin10-calendar. It is the only instance, served at `https://alpha.134333.xyz` through `127.0.0.1:21005`. CI never uses these data for testing. Do not start a second Compose project against this configuration.
-
-Automatic and manual updates use the same command and persistent lock:
+Run from any directory as root:
 
 ```sh
-python3 scripts/deploy.py update --build /path/to/accepted/build.json
+bash /srv/AlphaPulse/start.sh
+bash /srv/AlphaPulse/stop.sh
+bash /srv/AlphaPulse/status.sh
 ```
 
-The command checks image identities, current dev SHA and database migration compatibility before updating. It waits for active Chat requests, records pending state, then starts API/web before the workers. An outdated dev build is skipped. A pending deployment blocks updates. Preparation recovery retains existing services if updates have not begun. Do not invoke `docker compose up` directly to bypass the lock.
+`start.sh` builds the current workspace with Python 3.13 (`/usr/bin/python3.13`), uv 0.13.6, Node 24 and pnpm 12.11.2. It installs locked dependencies and runs backend pytest/ruff, frontend lint/typecheck/tests/build, and delivery-script tests. It prepares an isolated candidate before touching running services. The candidate records the full Git SHA, UTC commit-date version, build time and start/end dirty state; local dirty builds are not formal releases.
 
-A failed update with a previous deployment restores the prior images/configuration while retaining data. With no previous deployment, the pending marker remains for diagnosis. Recovery and rollback are explicit operator commands:
+Only these six foreground services are managed: `alphapulse-api.service`, `alphapulse-crawler.service`, `alphapulse-market.service`, `alphapulse-calendar.service`, `alphapulse-news-risk.service`, `alphapulse-jin10-calendar.service`. They run as the dedicated `alphapulse` system account, are enabled at boot and restart on failure. API and compiled frontend share **127.0.0.1:21005**. Existing nginx and `https://alpha.134333.xyz` remain unchanged; SSE and market WebSockets use the same API.
+
+Private environment configuration lives in `runtime/config/app.env` (root:alphapulse, 0640); the root `.env` points there. Immutable builds are `runtime/builds/<unique-id>`, selected by `runtime/current`. Persistent browser files and service HOME are under `runtime/data`. Logs are in `journalctl -u alphapulse-api` (or another exact unit name). None of these runtime files is tracked or packaged. PostgreSQL and Redis remain in their existing containers and retain all data; native configuration reaches their host ports. Redis DB 14 is shared: never FLUSHDB.
+
+Start/stop serialize on `runtime/.deploy.lock`. Stop retains units, builds, configuration and data. A deployment checks the current Alembic revision against both candidate and previous code; **no automatic database migrations or backups**. Before updates, AI new admissions pause and in-flight research/Chat drain (maximum one hour); success restores the prior enabled state only if the control revision and configuration still match. No provider validation or model request is made for deployment. Avoid initiating new Chat requests during maintenance. Research worker SIGTERM stops new admissions and drains active tasks.
+
+Activation verifies service state and both health/version endpoints. Failure restores the previous current link, unit contents and original active/enabled state; it never restores database contents. `runtime/deployment.pending.json` retains interrupted/failed maintenance evidence and blocks further starts. Inspect it and service health before manually recovering; do not delete it merely to bypass a failure. No deployment is safe across an independently executed incompatible schema migration.
+
+The old `/docker/gitea/dev/AlphaPulse` application instance is retired after the one-time authorized cutover. Its stopped containers and private files remain for diagnosis, with restart disabled; its old start entrypoint rejects startup. Do not run its Compose files against the live database. Gitea, runner and shared database infrastructure still use Docker.
+
+## Explicit formal release
 
 ```sh
-python3 scripts/deploy.py recover
-python3 scripts/deploy.py rollback
+GITEA_TOKEN=... bash /srv/AlphaPulse/release.sh dev
+# Any existing remote branch is allowed, including feature/example.
 ```
 
-Neither command restores database contents. Both reject an incompatible target schema before changing running services or Compose configuration; after a destructive schema change, failed recovery leaves the pending marker and services stopped. Schema migrations require separate authorization and are never part of CI auto-deployment. No scheduled backup is installed.
+The client requires Bash/Python 3 and only a Gitea token; it does not inspect local Git or local changes. It fixes the remote full SHA, dispatches `release.yml` from trusted main, and follows that unique run. It never commits, pushes local code, merges or deploys. An uncertain dispatch POST is not automatically repeated.
 
-### Start and stop this instance
+The workflow checks the fixed source and creates six Python **installation archives**: Linux/Darwin/Windows × amd64/arm64. These include original backend source/lock, compiled frontend and a platform-checking `install.py`. They require Python 3.13 and uv, network access to install dependencies/browser, external PostgreSQL/Redis, and configured environment variables. Linux also needs Chromium system libraries. Windows arm64 may need Rust, MSVC and OpenSSL to compile cryptography; macOS/Windows installation is not natively tested on this Linux runner. A locked dependency dry-run is reported separately from runtime acceptance; these are not self-contained executables.
 
-```sh
-bash /docker/gitea/dev/AlphaPulse/start.sh
-bash /docker/gitea/dev/AlphaPulse/stop.sh
-```
+Linux archives feed one Linux amd64/arm64 OCI image build using a project-isolated BuildKit builder (with bundled arm64 emulation). It verifies imports and browser launch on each architecture. Linux amd64 API, UI, SSE, WebSocket, schema and queue acceptance run against synthetic PostgreSQL/Redis on an internal network, without workers or model calls. No production configuration/data is supplied. Builders and temporary resources are scoped to this run, not global prune. Archives and compressed OCI blobs must each be below 90,000,000 bytes.
 
-These Bash entrypoints use the installed `instance.py` controller (host Python 3 and
-Docker Compose are required), share `.deploy.lock` with CD and fail immediately when
-the lock is occupied. Start rejects a pending deployment; stop remains available
-while pending. Both use the explicit `alphapulse-dev` identity and instance
-`images.env`, ignoring caller `COMPOSE_*` and `ALPHAPULSE_*` overrides.
+Version is the selected commit's UTC committer date plus its first eight SHA characters: `YYYYMMDD-xxxxxxxx`. A repository-wide persistent lock/record under `/docker/gitea/mirrors/AlphaPulse/releases` fixes source, baseline, notes and artifact hashes. First release on a branch has exact notes `init`; subsequent notes use the nearest successfully completed ancestor on the **same** branch. Existing historical auto-build tags lack completion records and are not baselines. Same-SHA requests reuse the original version. Conflicts fail; partial releases retain originals and drafts for retry, without rebuilding over published content.
 
-Start checks the verified `deployment.json` receipt, Compose image selection and all
-local image identities before changing containers. It never builds or pulls. It
-waits up to 120 seconds for services to run or become healthy, then checks the seven application
-services (plus SearXNG only for a compatible legacy deployment) and their running image IDs before reporting success. A failed start can
-leave some services running; inspect the reported failure before retrying. Stop
-retains containers, networks, volumes and data. Neither operation changes stored AI
-settings; starting resumes workers according to those settings.
+Original six archives, SHA256SUMS, packages.json and build.json are published identically to Gitea and GitHub Releases. Images use immutable `git.134333.xyz/eezd/alphapulse:<version>` and `ghcr.io/eezd/alphapulse:<version>` tags; digest-preserving multiarch copying and both endpoints are verified before the completion record is written. No latest channel is introduced.
 
-Deployment installs these three versioned files and executable Bash permissions.
-For an existing instance, install only the entrypoints without starting services:
-
-```sh
-python3 scripts/deploy.py install-entrypoints
-```
-
-`entrypoints.json` records installed checksums. Installation accepts unchanged
-managed files and the original skill templates, and refuses to overwrite local
-customizations. Review such customizations before updating; no other instance or
-global skill template is changed.
-
-## Credentials and mirroring
-
-Gitea secrets are `ALPHAPULSE_GITEA_TOKEN` (image publication) and `ALL_GITHUB_TOKEN` (the account-level GitHub PAT classic with repository write permission; no repository-level override). Ordinary checks and the deployment job do not receive publication secrets. The GitHub token is read from the task environment, never stored in Git URLs or credential files. The trusted mirror task verifies the GitHub identity and repository write permission before synchronization.
-
-Git mirroring is independent of build results. Push/create/delete events, hourly reconciliation and manual dispatch use the same `.mirror.lock` in `/docker/gitea/mirrors/AlphaPulse`. Only business heads/tags are managed; internal PR references are excluded. Missing or incomplete source reads fail rather than imply deletion. GitHub is not an independent development source. GitHub Actions is disabled on the mirror.
-
-Only resources labeled for the current CI attempt are cleaned; there is no global Docker prune. The existing runner registration, capacity and other projects' mount allowances are preserved.
+Gitea secret `ALPHAPULSE_GITEA_TOKEN` needs repository, Release and registry publication access. Account secret `ALL_GITHUB_TOKEN` needs identity `eezd`, repository write, workflow and write:packages scopes. No secret is read from the Gitea database. The release preflight verifies identity/scopes; missing permissions fail before publication. GitHub Actions on the mirror remains disabled. Ordinary Git mirror operations are independent of builds and share their own `.mirror.lock`; no release token is needed locally for native development.
 
 ## Two-stage news research
 
@@ -515,7 +473,7 @@ After a worker interruption, started calls become failed with an unknown-result
 message and need manual retry; unclaimed work resumes normally. Strict realtime
 priority can starve historical work under sustained overload.
 
-CI runs `scripts/smoke_dynamic_queue.py` and `scripts/smoke_priority_queue.py` in its disposable internal
+Release isolation runs `scripts/smoke_dynamic_queue.py` and `scripts/smoke_priority_queue.py` in its disposable internal
 network with synthetic credentials and no model calls. It covers preemption,
 late historical ingestion, stable realtime eligibility, range changes,
 dependencies, aggregation, control revisions and interrupted-call recovery.
@@ -535,26 +493,4 @@ Migration `f07890123456` follows `ef6789012345` and permanently drops only
 It drops children first without CASCADE. Downgrade explicitly fails; neither old
 data nor credentials can be recovered by image rollback. No backup is created.
 
-Production execution requires a separate deployment instruction. Before deletion,
-recheck both configured demo accounts using the previous accepted image's
-read-only clients: positions, regular orders and conditional orders must all be
-empty. If any account cannot be verified or has open exposure, stop the retirement;
-do not automatically place, close, cancel orders or revoke exchange keys.
-
-For the authorized maintenance window, hold `.deploy.lock` throughout, install the
-new entrypoints, record a durable `deployment.pending.json` with an operation
-specific to this maintenance, then stop all application writers before running
-`alembic upgrade head` in the accepted candidate image with the instance environment.
-Under that same lock, run `python -m alphapulse.core.remove_trading` to preview the
-Redis scope; append `--execute` to unlink only `ap:trader:*` and `ap:trading:*`.
-Never FLUSHDB: Redis DB 14 is shared. SCAN is bounded by page size and cleanup is
-idempotent. Execute refuses cleanup while the legacy account table exists.
-Activate only the seven-service candidate Compose, removing orphan containers.
-Keep the pending marker until health, API 404s, UI and retained data checks pass.
-
-If migration or activation fails after stopping begins, keep maintenance pending
-and services stopped, then repair and resume the candidate. Do not restore the
-pre-retirement image/Compose or stamp an older schema. Schema preflight in both
-rollback and recovery rejects incompatible images before any service or config
-change. CI exercises populated upgrade, fingerprints of every retained table,
-irreversible downgrade refusal and scoped Redis deletion in a disposable database.
+The retirement was executed before the native-service migration. Its current head is `f07890123456`. Historical schema execution procedures and automatic Compose controllers are retired. New schema changes require their own reviewed migration and explicit execution authorization; neither native start nor formal release migrates the live database.
