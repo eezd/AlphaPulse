@@ -12,22 +12,66 @@ manual=importlib.util.module_from_spec(spec)
 spec.loader.exec_module(manual)
 
 class SelectionTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.repository = Path(self.temporary.name)
+        self.git('init', '--initial-branch=main')
+        self.git('config', 'user.name', 'eezd')
+        self.git('config', 'user.email', 'eezd@outlook.com')
+        self.tree = self.git('mktree', input='')
+        self.nodes = {}
+        for name, parents in [('A', []), ('b1', ['A']), ('b2', ['b1']), ('B', ['b2']),
+                              ('m1', ['B']), ('M', ['m1']), ('F', ['A']), ('T', ['M', 'F']), ('X', [])]:
+            args = ['commit-tree', self.tree, '-m', name]
+            for parent in parents:
+                args.extend(['-p', self.nodes[parent]])
+            self.nodes[name] = self.git(*args)
+        self.patcher = patch.object(manual, 'run', side_effect=lambda command, *args: self.git(*args))
+        self.patcher.start()
+        self.addCleanup(self.patcher.stop)
+
+    def git(self, *args, **kwargs):
+        return subprocess.check_output(['git', '-C', str(self.repository), *args], text=True, **kwargs).strip()
+
+    def record(self, node, *, branch='dev', version=None, completed_at=1, complete=True):
+        return {'complete': complete, 'source_branch': branch, 'source_sha': self.nodes[node],
+                'completed_at': completed_at, 'version': version or node}
+
     def test_first_release_notes_are_exact_init(self):
-        self.assertEqual(manual.release_notes(None,'a'*40),'init')
-    def test_other_branch_is_not_used_as_baseline(self):
-        r={'complete':True,'source_branch':'main','source_sha':'a','completed_at':1,'version':'v'}
-        self.assertIsNone(manual.select_baseline([r],'dev','b'))
+        self.assertEqual(manual.release_notes(None, self.nodes['T']), 'init')
+
+    def test_other_branch_and_incomplete_records_are_not_baselines(self):
+        records = [self.record('T', branch='main'), self.record('T', complete=False)]
+        self.assertIsNone(manual.select_baseline(records, 'dev', self.nodes['T']))
+
     def test_rewritten_branch_cannot_look_like_first_release(self):
-        r={'complete':True,'source_branch':'dev','source_sha':'a','completed_at':1,'version':'v'}
-        with patch.object(manual,'ancestor',return_value=False):
-            with self.assertRaisesRegex(ValueError,'baseline'):manual.select_baseline([r],'dev','b')
-    def test_closest_ancestor_wins(self):
-        records=[{'complete':True,'source_branch':'dev','source_sha':c,'completed_at':1,'version':c} for c in ('a','b')]
-        with patch.object(manual,'ancestor',return_value=True),patch.object(manual,'run',side_effect=['5','1']):
-            self.assertEqual(manual.select_baseline(records,'dev','c')['source_sha'],'b')
+        with self.assertRaisesRegex(ValueError, 'baseline'):
+            manual.select_baseline([self.record('X')], 'dev', self.nodes['T'])
+
+    def test_merge_graph_uses_parent_distance_instead_of_commit_count(self):
+        selected = manual.select_baseline([self.record('A'), self.record('B'), self.record('X')], 'dev', self.nodes['T'])
+        self.assertEqual(selected['source_sha'], self.nodes['A'])
+        # This graph deliberately makes commit-set counting prefer the wrong baseline.
+        self.assertGreater(int(self.git('rev-list', '--count', self.nodes['A']+'..'+self.nodes['T'])),
+                           int(self.git('rev-list', '--count', self.nodes['B']+'..'+self.nodes['T'])))
+
+    def test_equal_distances_use_completion_time_then_tag(self):
+        records = [self.record('M', version='z', completed_at=2), self.record('F', version='a', completed_at=1)]
+        self.assertEqual(manual.select_baseline(records, 'dev', self.nodes['T'])['version'], 'z')
+        records[1]['completed_at'] = 2
+        self.assertEqual(manual.select_baseline(records, 'dev', self.nodes['T'])['version'], 'a')
 
 
 class ClientTests(unittest.TestCase):
+    def test_missing_account_secret_fails_before_network_access(self):
+        import os
+        import release
+        with patch.dict(os.environ, {'GITEA_RELEASE_TOKEN': ''}), patch.object(release, 'API') as api:
+            with self.assertRaisesRegex(ValueError, 'ALL_GITEA_TOKEN'):
+                release.clients()
+            api.assert_not_called()
+
     def test_release_outside_repo_requires_explicit_branch(self):
         client=Path(__file__).resolve().parents[2]/'release.sh'
         with tempfile.TemporaryDirectory() as d:

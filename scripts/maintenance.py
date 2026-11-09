@@ -74,13 +74,15 @@ async def execute(action, journal, base):
                         print('AI enabled state restored:', previous['enabled'])
                     else:
                         print('AI controls changed during maintenance; preserving newer user setting')
-        elif action == 'drain':
+        elif action in ('drain', 'drain-without-api'):
             import httpx
             from fastapi.security import HTTPAuthorizationCredentials
             from alphapulse.core.auth import create_token, require_session, revoke_session
             from alphapulse.core.config import get_settings
-            token, _ = await create_token(get_settings().admin_username)
-            principal = await require_session(HTTPAuthorizationCredentials(scheme='Bearer', credentials=token))
+            principal = None
+            if action == 'drain':
+                token, _ = await create_token(get_settings().admin_username)
+                principal = await require_session(HTTPAuthorizationCredentials(scheme='Bearer', credentials=token))
             try:
                 deadline = time.monotonic() + 3600
                 async with httpx.AsyncClient(timeout=15) as client:
@@ -88,9 +90,11 @@ async def execute(action, journal, base):
                         async with SessionLocal() as session:
                             attempts = await session.scalar(select(func.count()).select_from(Attempt).where(Attempt.state == 'processing'))
                             versions = await session.scalar(select(func.count()).select_from(Version).where(Version.state == 'processing'))
-                        response = await client.get(base + '/api/chat/session', headers={'Authorization': 'Bearer ' + token})
-                        response.raise_for_status()
-                        chat = response.json()['data']['generating']
+                        chat = False
+                        if principal is not None:
+                            response = await client.get(base + '/api/chat/session', headers={'Authorization': 'Bearer ' + token})
+                            response.raise_for_status()
+                            chat = response.json()['data']['generating']
                         print(f'Draining: attempts={attempts}, event_versions={versions}, chat={chat}', flush=True)
                         if not attempts and not versions and not chat:
                             return
@@ -98,7 +102,8 @@ async def execute(action, journal, base):
                             raise TimeoutError('AI/Chat drain exceeded one hour; running services were not stopped')
                         await asyncio.sleep(10)
             finally:
-                await revoke_session(principal)
+                if principal is not None:
+                    await revoke_session(principal)
         else:
             raise ValueError('Unknown maintenance action')
     finally:

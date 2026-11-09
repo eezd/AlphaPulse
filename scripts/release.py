@@ -151,6 +151,7 @@ class API:
 
 
 def clients():
+    require(os.environ.get('GITEA_RELEASE_TOKEN'), 'Configure the account-level ALL_GITEA_TOKEN Gitea secret before releasing')
     require(os.environ.get('GITHUB_RELEASE_TOKEN'), 'Configure the ALL_GITHUB_TOKEN Gitea secret before releasing')
     return (API(os.environ['GITEA_API_URL'], os.environ['GITEA_RELEASE_TOKEN']),
             API('https://api.github.com', os.environ['GITHUB_RELEASE_TOKEN'], github=True))

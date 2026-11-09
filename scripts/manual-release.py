@@ -1,5 +1,6 @@
 """Release fixed remote sources under a repository-wide persistent lock."""
 import datetime
+from collections import deque
 import fcntl
 import hashlib
 import json
@@ -25,9 +26,21 @@ def ancestor(a,b):
 
 def select_baseline(records, branch, commit):
     same = [r for r in records if r.get('complete') and r.get('source_branch') == branch]
-    candidates = [r for r in same if ancestor(r['source_sha'],commit)]
+    if not same:
+        return None
+    parents = {parts[0]: parts[1:] for line in run('git', 'rev-list', '--parents', commit).splitlines()
+               if (parts := line.split())}
+    distances = {commit: 0}
+    pending = deque([commit])
+    while pending:
+        child = pending.popleft()
+        for parent in parents[child]:
+            if parent not in distances:
+                distances[parent] = distances[child] + 1
+                pending.append(parent)
+    candidates = [r for r in same if r['source_sha'] in distances]
     require(not same or candidates, 'Branch history no longer contains its successful baseline')
-    return min(candidates,key=lambda r:(int(run('git','rev-list','--count',r['source_sha']+'..'+commit)), -r['completed_at'],r['version'])) if candidates else None
+    return min(candidates, key=lambda r: (distances[r['source_sha']], -r['completed_at'], r['version']))
 
 
 def release_notes(base, commit):
@@ -62,11 +75,121 @@ def build_oci(image, destination, commit, version, packages_digest):
         run('docker', 'buildx', 'create', '--name', builder, '--driver', 'docker-container',
             '--driver-opt', 'image=moby/buildkit@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe', '--bootstrap')
         run('docker','buildx','build','--builder',builder,'--platform=linux/amd64,linux/arm64','--provenance=false',
-            '--output=type=oci,dest='+str(destination), '--build-arg','APP_VERSION='+version,'--build-arg','APP_COMMIT='+commit,
+            '--output=type=oci,dest='+str(destination)+',name=alphapulse-release-check:'+version,
+            '--build-arg','APP_VERSION='+version,'--build-arg','APP_COMMIT='+commit,
             '--label','org.opencontainers.image.revision='+commit,'--label','org.opencontainers.image.version='+version,
             '--label','io.alphapulse.packages.sha256='+packages_digest,'-f',str(CONTROL/'deploy/Dockerfile.release'),str(image))
     finally:
         subprocess.run(['docker', 'buildx', 'rm', builder], check=False)
+
+def needs_recovery(record, records_dir, apis):
+    if record.get('complete'):
+        return False
+    # Missing phases are legacy records, not proof that no publication occurred.
+    if record.get('phase') != 'building' or record.get('assets') or record.get('image_digest'):
+        return True
+    cache = records_dir/record['version']
+    if any((cache/name).exists() for name in ('checkpoint.json', 'packages.json', 'build.json')):
+        return True
+    for api in apis:
+        release = api.release(record['version'])
+        if release and (not release['draft'] or api.assets(release)):
+            return True
+    for image, tag in ((GITEA_IMAGE, 'candidate-'+record['source_sha']),
+                       (GITEA_IMAGE, record['version']), (GITHUB_IMAGE, record['version'])):
+        if registry_digest(image, tag) is not None:
+            return True
+    return False
+
+
+def check_pending(records_dir, version, apis):
+    for path in records_dir.glob('*.json'):
+        if path.stem != version and needs_recovery(json.loads(path.read_text()), records_dir, apis):
+            raise ValueError('Resolve the pending release before starting another version: '+path.stem)
+
+
+def oci_manifest(path):
+    with tarfile.open(path) as archive:
+        require(all(m.size < UPLOAD_LIMIT for m in archive), 'OCI blob exceeds upload budget')
+        index = json.load(archive.extractfile('index.json'))
+        require(len(index['manifests']) == 1, 'Expected one OCI image index')
+        descriptor = index['manifests'][0]
+        raw = archive.extractfile('blobs/sha256/'+descriptor['digest'].removeprefix('sha256:')).read()
+        require('sha256:'+hashlib.sha256(raw).hexdigest() == descriptor['digest'], 'OCI index digest differs')
+        manifest = json.loads(raw)
+        require({(m['platform']['os'], m['platform']['architecture']) for m in manifest['manifests']}
+                == {('linux', 'amd64'), ('linux', 'arm64')}, 'Unexpected OCI image platforms')
+        return descriptor['digest'], manifest['manifests']
+
+
+def verify_checkpoint(cache, record):
+    checkpoint = json.loads((cache/'checkpoint.json').read_text())
+    require(checkpoint['source_sha'] == record['source_sha'] and checkpoint['version'] == record['version'],
+            'Artifact checkpoint identity differs')
+    assets = {*[archive_name(record['version'], p) for p in PLATFORMS], 'SHA256SUMS', 'packages.json', 'build.json'}
+    require(set(checkpoint['files']) == assets | {'candidate.oci'}, 'Artifact checkpoint is incomplete')
+    for name, expected in checkpoint['files'].items():
+        require((cache/name).is_file() and digest(cache/name) == expected, 'Original artifact corrupt or missing: '+name)
+    metadata = json.loads((cache/'build.json').read_text())
+    require(all(metadata[key] == record[key] for key in ('source_sha', 'version', 'source_branch', 'previous_tag')),
+            'Build metadata identity differs')
+    return checkpoint
+
+
+def prepare_artifacts(cache, record):
+    """Persist all tested originals before the first registry or asset upload."""
+    require(record.get('phase') == 'building', 'Original checkpoint is missing; restore it before retrying publication')
+    commit, version = record['source_sha'], record['version']
+    packages = cache/'packages.json'
+    if not packages.exists():
+        # Candidate subprocesses receive no publication tokens or Docker credentials.
+        source = Path('source').resolve()
+        env = {k:v for k,v in os.environ.items() if k in ('PATH', 'HOME', 'TMPDIR', 'HOSTNAME')}
+        env.update(ALPHAPULSE_BUILD_VERSION=version, ALPHAPULSE_BUILD_SHA=commit, CI_RUN_ID=os.environ['CI_RUN_ID'])
+        subprocess.run(['python3', str(CONTROL/'scripts/package.py')], cwd=source, env=env, check=True)
+        import shutil
+        # Copy only the expected originals; incomplete copies remain unconfirmed.
+        metadata = json.loads((source/'downloads/build.json').read_text())
+        expected = {archive_name(version, p) for p in PLATFORMS}
+        require(metadata['commit'] == commit and metadata['version'] == version, 'Package build identity differs')
+        require(set(metadata['files']) == expected, 'Expected all six platform archives')
+        for name in [*sorted(expected), 'SHA256SUMS']:
+            shutil.copy2(source/'downloads'/name, cache/name)
+        write_json(packages, metadata)
+    metadata = json.loads(packages.read_text())
+    require(metadata['commit'] == commit and metadata['version'] == version, 'Cached build identity differs')
+    require(set(metadata['files']) == {archive_name(version, p) for p in PLATFORMS}, 'Expected all six platform archives')
+    for name, info in metadata['files'].items():
+        require(digest(cache/name) == info['sha256'], 'Cached package corrupt or missing: '+name)
+    oci = cache/'candidate.oci'
+    if not oci.exists():
+        image = cache/'image'
+        for platform in ('linux/amd64', 'linux/arm64'):
+            target = image/platform
+            target.mkdir(parents=True, exist_ok=True)
+            with tarfile.open(cache/archive_name(version, platform)) as archive:
+                archive.extractall(target, filter='data')
+        temporary = cache/'candidate.next.oci'
+        build_oci(image, temporary, commit, version, digest(packages))
+        oci_manifest(temporary)
+        temporary.replace(oci)
+    value, manifests = oci_manifest(oci)
+    local = 'alphapulse-release-check:'+version
+    try:
+        run('docker', 'load', '--input', str(oci))
+        subprocess.run(['python3', str(CONTROL/'scripts/smoke-release.py'), local], check=True)
+    finally:
+        subprocess.run(['docker', 'image', 'rm', local], check=False)
+    metadata.update(schema=2, source_sha=commit, source_branch=record['source_branch'], previous_tag=record['previous_tag'],
+                    images={'gitea':GITEA_IMAGE+':'+version, 'ghcr':GITHUB_IMAGE+':'+version,
+                            'digest':value, 'manifests':manifests})
+    metadata['validation'].update(linux_images='amd64 native and arm64 emulated build, import and browser launch',
+                                 isolated_business='Linux amd64 API, browser UI, SSE, WebSocket, migration and queue tests; synthetic data, no model calls')
+    write_json(cache/'build.json', metadata)
+    files = [*metadata['files'], 'SHA256SUMS', 'packages.json', 'build.json', 'candidate.oci']
+    write_json(cache/'checkpoint.json', {'source_sha':commit, 'version':version,
+                                       'files':{name:digest(cache/name) for name in files}})
+
 
 def execute():
     branch=os.environ['SOURCE_BRANCH']; commit=os.environ['SOURCE_SHA']
@@ -90,11 +213,13 @@ def execute():
         require(record['source_sha']==commit,'Version collision')
         if record.get('complete'):
             registry_login(); verify_complete(apis,record); print('Reused complete release',version); return
-    else:
-        require(not any(not json.loads(p.read_text()).get('complete') for p in records_dir.glob('*.json')),'Resolve the pending release before starting another version')
+        require(record.get('phase') in ('building', 'publishing'), 'Legacy pending release has no phase; inspect its original artifacts before resuming')
+    registry_login()
+    check_pending(records_dir, version, apis)
+    if not record_path.exists():
         require(not gitea.release(version) and not github.release(version),'Existing legacy version must not be overwritten')
         previous=select_baseline([json.loads(p.read_text()) for p in records_dir.glob('*.json')],branch,commit)
-        record={'source_branch':branch,'source_sha':commit,'version':version,'previous_tag':previous['version'] if previous else None,'notes':release_notes(previous,commit),'complete':False}
+        record={'source_branch':branch,'source_sha':commit,'version':version,'previous_tag':previous['version'] if previous else None,'notes':release_notes(previous,commit),'complete':False,'phase':'building'}
         write_json(record_path,record)
     cache=records_dir/version; cache.mkdir(exist_ok=True)
     for api in apis:
@@ -111,71 +236,44 @@ def execute():
             r=api.repo('/releases',method='POST',data={'tag_name':version,'target_commitish':commit,'name':'AlphaPulse '+version,'body':record['notes'],'draft':True})
         require(r['body']==record['notes'],'Release notes conflict')
         releases.append(r)
-    packages=cache/'packages.json'
-    if not packages.exists():
-        require(not any(a['name']=='packages.json' for a in gitea.assets(releases[0])), 'Original cached build is missing; restore its original draft assets before retrying')
-        # Candidate subprocesses receive no publication tokens or Docker credentials.
-        source=Path('source').resolve()
-        env={k:v for k,v in os.environ.items() if k in ('PATH','HOME','TMPDIR','HOSTNAME')}
-        env.update(ALPHAPULSE_BUILD_VERSION=version, ALPHAPULSE_BUILD_SHA=commit, CI_RUN_ID=os.environ['CI_RUN_ID'])
-        subprocess.run(['python3', str(CONTROL/'scripts/package.py')], cwd=source, env=env, check=True)
-        import shutil
-        for p in (source/'downloads').iterdir(): shutil.copy2(p,cache/p.name)
-        metadata=json.loads((cache/'build.json').read_text())
-        (cache/'build.json').unlink()
-        write_json(packages,metadata)
-    metadata=json.loads(packages.read_text())
-    require(metadata['commit']==commit and metadata['version']==version,'Cached build identity differs')
-    require(set(metadata['files']) == {archive_name(version, p) for p in PLATFORMS}, 'Expected all six platform archives')
-    for name,info in metadata['files'].items():
-        require(digest(cache/name)==info['sha256'],'Cached package corrupt or missing')
-    for name in [*metadata['files'],'SHA256SUMS','packages.json']:
-        gitea.upload(releases[0],cache/name)
-    registry_login()
-    candidate=GITEA_IMAGE+':candidate-'+commit
-    if not record.get('image_digest'):
-        existing=registry_digest(GITEA_IMAGE,candidate.rsplit(':',1)[1])
-        if existing:
-            run('docker','pull',candidate)
-            labels=json.loads(run('docker','image','inspect',candidate))[0]['Config']['Labels']
-            require(labels.get('io.alphapulse.packages.sha256')==digest(packages),'Existing candidate belongs to another package build')
-            record['image_digest']=image_digest(candidate);write_json(record_path,record)
-    if not record.get('image_digest'):
-        image=cache/'image';image.mkdir(parents=True,exist_ok=True)
-        for platform in ('linux/amd64','linux/arm64'):
-            target=image/platform;target.mkdir(parents=True,exist_ok=True)
-            name='AlphaPulse_'+version+'_'+platform.replace('/','_')+'.tar.gz'
-            with tarfile.open(cache/name) as archive: archive.extractall(target,filter='data')
-        oci=cache/'candidate.oci'
-        build_oci(image, oci, commit, version, digest(packages))
-        with tarfile.open(oci) as archive: require(all(m.size<UPLOAD_LIMIT for m in archive),'OCI blob exceeds upload budget')
-        run('skopeo','copy','--all','--preserve-digests','--authfile',os.environ['DOCKER_CONFIG']+'/config.json','oci-archive:'+str(oci),'docker://'+candidate)
-        record['image_digest']=image_digest(candidate);write_json(record_path,record)
-    if not record.get('smoke_passed'):
-        subprocess.run(['python3', str(CONTROL/'scripts/smoke-release.py'), candidate], check=True)
-        record['smoke_passed'] = True
-        write_json(record_path, record)
-    value=record['image_digest']
-    require(image_digest(candidate)==value,'Candidate image differs')
-    manifest=json.loads(run('docker','buildx','imagetools','inspect',candidate,'--raw'))
-    metadata.update(schema=2,source_sha=commit,source_branch=record['source_branch'],previous_tag=record['previous_tag'],
-        images={'gitea':GITEA_IMAGE+':'+version,'ghcr':GITHUB_IMAGE+':'+version,'digest':value,'manifests':manifest['manifests']})
-    metadata['validation'].update(linux_images='amd64 native and arm64 emulated build, import and browser launch',
-                                  isolated_business='Linux amd64 API, browser UI, SSE, WebSocket, migration and queue tests; synthetic data, no model calls')
-    write_json(cache/'build.json',metadata)
-    for image in (GITEA_IMAGE,GITHUB_IMAGE):
-        existing=registry_digest(image,version);require(existing in (None,value),'Immutable image version conflict')
-        if not existing: run('skopeo','copy','--all','--preserve-digests','--authfile',os.environ['DOCKER_CONFIG']+'/config.json','docker://'+candidate,'docker://'+image+':'+version)
+    if not (cache/'checkpoint.json').exists():
+        require(record['phase'] == 'building', 'Original checkpoint is missing; restore it before retrying publication')
+        for api, release in zip(apis, releases, strict=True):
+            require(release['draft'] and not api.assets(release), 'Uploaded originals exist without a checkpoint; restore the original cache before retrying')
+        for image, tag in ((GITEA_IMAGE, 'candidate-'+commit), (GITEA_IMAGE, version), (GITHUB_IMAGE, version)):
+            require(registry_digest(image, tag) is None, 'Uploaded image exists without a checkpoint; restore the original cache before retrying')
+        prepare_artifacts(cache, record)
+    checkpoint = verify_checkpoint(cache, record)
+    metadata = json.loads((cache/'build.json').read_text())
+    value = metadata['images']['digest']
+    files = sorted(set(checkpoint['files']) - {'candidate.oci'})
+    assets = {name:checkpoint['files'][name] for name in files}
+    if record['phase'] == 'publishing':
+        require(record['assets'] == assets and record['image_digest'] == value, 'Publishing checkpoint differs from frozen record')
+    record.update(phase='publishing', image_digest=value,
+                  assets=assets)
+    # The complete checkpoint and publishing phase both precede upload side effects.
+    write_json(record_path, record)
+    candidate = GITEA_IMAGE+':candidate-'+commit
+    existing = registry_digest(GITEA_IMAGE, candidate.rsplit(':', 1)[1])
+    require(existing in (None, value), 'Candidate image conflicts with the original checkpoint')
+    if existing is None:
+        run('skopeo', 'copy', '--all', '--preserve-digests', '--authfile', os.environ['DOCKER_CONFIG']+'/config.json',
+            'oci-archive:'+str(cache/'candidate.oci'), 'docker://'+candidate)
+    require(image_digest(candidate) == value, 'Candidate image differs')
+    for image in (GITEA_IMAGE, GITHUB_IMAGE):
+        existing = registry_digest(image, version)
+        require(existing in (None, value), 'Immutable image version conflict')
+        if existing is None:
+            run('skopeo', 'copy', '--all', '--preserve-digests', '--authfile', os.environ['DOCKER_CONFIG']+'/config.json',
+                'docker://'+candidate, 'docker://'+image+':'+version)
     verify_anonymous(GITHUB_IMAGE+':'+version)
     verify_anonymous(GITEA_IMAGE+':'+version)
-    files=[*metadata['files'],'SHA256SUMS','packages.json','build.json']
-    record['assets']={name:digest(cache/name) for name in files}
-    write_json(record_path,record)
     for api,r in zip(apis,releases,strict=True):
         for name in files: api.upload(r,cache/name)
         if r['draft']:api.repo('/releases/'+str(r['id']),method='PATCH',data={'draft':False})
     verify_complete(apis,record)
-    record.update(complete=True,completed_at=int(__import__('time').time()))
+    record.update(complete=True,phase='complete',completed_at=int(__import__('time').time()))
     write_json(record_path,record)
     print('Published',version)
 

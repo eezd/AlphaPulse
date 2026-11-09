@@ -11,6 +11,74 @@ import native
 
 
 class NativeTests(unittest.TestCase):
+    def check_update(self, active, *, activation_error=None, drain_error=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            previous = root/'old'; previous.mkdir()
+            candidate = root/'new'; candidate.mkdir()
+            (root/'current').symlink_to(previous)
+            actions = []
+            def maintenance(build, action):
+                actions.append(action)
+                if action == 'pause':
+                    state = native.json.loads((root/'deployment.pending.json').read_text())
+                    native.save(root/'deployment.pending.json', {**state, 'ai': {'enabled': True}})
+                if action.startswith('drain') and drain_error:
+                    raise drain_error
+            with patch.object(native, 'RUNTIME', root), patch.object(native, 'active_roles', return_value=active), \
+                 patch.object(native, 'maintenance', side_effect=maintenance), patch.object(native, 'healthy') as healthy, \
+                 patch.object(native, 'activate', side_effect=activation_error) as activate:
+                if activation_error or drain_error:
+                    with self.assertRaisesRegex(RuntimeError, 'failure'):
+                        native.update(candidate)
+                    self.assertTrue((root/'deployment.pending.json').exists())
+                else:
+                    native.update(candidate)
+                    self.assertFalse((root/'deployment.pending.json').exists())
+                if activation_error or drain_error:
+                    if active:
+                        healthy.assert_called_once_with(previous, active)
+                    else:
+                        healthy.assert_not_called()
+                return actions, activate.call_count
+
+    def test_start_after_stop_skips_unavailable_api_and_activates(self):
+        actions, activations = self.check_update(())
+        self.assertEqual(actions, ['schema', 'schema', 'pause', 'assert-paused', 'restore'])
+        self.assertEqual(activations, 1)
+
+    def test_stopped_instance_activation_failure_restores_ai_without_api_health(self):
+        actions, _ = self.check_update((), activation_error=RuntimeError('activation failure'))
+        self.assertEqual(actions[-1], 'restore')
+
+    def test_worker_only_instance_drains_without_chat_api(self):
+        actions, _ = self.check_update(('news-risk',))
+        self.assertIn('drain-without-api', actions)
+        self.assertNotIn('drain', actions)
+
+    def test_failed_drain_restores_settings_and_checks_only_original_active_roles(self):
+        actions, activations = self.check_update(('api',), drain_error=RuntimeError('drain failure'))
+        self.assertEqual(actions[-1], 'restore')
+        self.assertEqual(activations, 0)
+
+    def test_start_rejects_transitional_services_before_pausing_ai(self):
+        with patch.object(native, 'run', return_value='deactivating'):
+            with self.assertRaisesRegex(RuntimeError, 'existing service operation'):
+                native.active_roles()
+
+    def test_failed_activation_with_unexpected_running_services_does_not_resume_ai(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            candidate = root/'new'; candidate.mkdir()
+            with patch.object(native, 'RUNTIME', root), \
+                 patch.object(native, 'active_roles', side_effect=[(), ('api',)]), \
+                 patch.object(native, 'maintenance') as maintenance, \
+                 patch.object(native, 'activate', side_effect=RuntimeError('failed rollback')):
+                with self.assertRaisesRegex(RuntimeError, 'left services running'):
+                    native.update(candidate)
+                self.assertNotIn('restore', [call.args[1] for call in maintenance.call_args_list])
+                self.assertTrue((root/'deployment.pending.json').exists())
+
     def test_build_failure_does_not_change_running_services(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

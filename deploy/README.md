@@ -20,14 +20,20 @@ Private environment configuration lives in `runtime/config/app.env` (root:alphap
 
 Start/stop serialize on `runtime/.deploy.lock`. Stop retains units, builds, configuration and data. A deployment checks the current Alembic revision against both candidate and previous code; **no automatic database migrations or backups**. Before updates, AI new admissions pause and in-flight research/Chat drain (maximum one hour); success restores the prior enabled state only if the control revision and configuration still match. No provider validation or model request is made for deployment. Avoid initiating new Chat requests during maintenance. Research worker SIGTERM stops new admissions and drains active tasks.
 
+Starting a fully stopped instance skips HTTP drain because its API is unavailable. If only the research worker remains active, drain checks its database tasks without calling Chat. Failed activation restores AI controls after checking the original active services, or confirming that the originally stopped instance remains stopped.
+
 Activation verifies service state and both health/version endpoints. Failure restores the previous current link, unit contents and original active/enabled state; it never restores database contents. `runtime/deployment.pending.json` retains interrupted/failed maintenance evidence and blocks further starts. Inspect it and service health before manually recovering; do not delete it merely to bypass a failure. No deployment is safe across an independently executed incompatible schema migration.
 
-The old `/docker/gitea/dev/AlphaPulse` application instance is retired after the one-time authorized cutover. Its stopped containers and private files remain for diagnosis, with restart disabled; its old start entrypoint rejects startup. Do not run its Compose files against the live database. Gitea, runner and shared database infrastructure still use Docker.
+The old `/docker/gitea/dev/AlphaPulse` application instance remains active until the one-time authorized cutover completes. The initial cutover stopped at the AI drain deadline; `runtime/deployment.pending.json` records its rolled-back state. Native deployment has not completed. After a successful cutover, old containers/private files are retained for diagnosis and restart is disabled. Gitea, runner and shared database infrastructure still use Docker.
 
 ## Explicit formal release
 
 ```sh
-GITEA_TOKEN=... bash /srv/AlphaPulse/release.sh dev
+# Explicitly load a private file containing GITEA_TOKEN; never commit it.
+set -a
+source ~/.config/gitea/token.env
+set +a
+bash /srv/AlphaPulse/release.sh dev
 # Any existing remote branch is allowed, including feature/example.
 ```
 
@@ -39,9 +45,11 @@ Linux archives feed one Linux amd64/arm64 OCI image build using a project-isolat
 
 Version is the selected commit's UTC committer date plus its first eight SHA characters: `YYYYMMDD-xxxxxxxx`. A repository-wide persistent lock/record under `/docker/gitea/mirrors/AlphaPulse/releases` fixes source, baseline, notes and artifact hashes. First release on a branch has exact notes `init`; subsequent notes use the nearest successfully completed ancestor on the **same** branch. Existing historical auto-build tags lack completion records and are not baselines. Same-SHA requests reuse the original version. Conflicts fail; partial releases retain originals and drafts for retry, without rebuilding over published content.
 
+Nearest means the shortest path through Git parent edges, with completion time descending and tag ascending as tie-breakers. Records distinguish `building`, `publishing` and `complete`. A failed build with only a reservation and empty drafts allows a fixed commit to proceed, preserving the failed version's original identity. Confirmed package originals, a complete checkpoint, remote uploads or a publishing/legacy record block other versions until recovery. Retrying an older reservation cannot bypass that guard. All tested originals and hashes are checkpointed before any upload; publication retries verify and reuse them, and fail on missing or changed originals.
+
 Original six archives, SHA256SUMS, packages.json and build.json are published identically to Gitea and GitHub Releases. Images use immutable `git.134333.xyz/eezd/alphapulse:<version>` and `ghcr.io/eezd/alphapulse:<version>` tags; digest-preserving multiarch copying and both endpoints are verified before the completion record is written. No latest channel is introduced.
 
-Gitea secret `ALPHAPULSE_GITEA_TOKEN` needs repository, Release and registry publication access. Account secret `ALL_GITHUB_TOKEN` needs identity `eezd`, repository write, workflow and write:packages scopes. No secret is read from the Gitea database. The release preflight verifies identity/scopes; missing permissions fail before publication. GitHub Actions on the mirror remains disabled. Ordinary Git mirror operations are independent of builds and share their own `.mirror.lock`; no release token is needed locally for native development.
+The workflow maps account secret `ALL_GITEA_TOKEN` to `GITEA_RELEASE_TOKEN`, requiring identity `eezd` and `read:user`, `write:repository`, `write:package`. The local client's explicitly loaded `GITEA_TOKEN` only needs `write:repository` and repository dispatch access. Account secret `ALL_GITHUB_TOKEN` maps to `GITHUB_RELEASE_TOKEN`, requiring identity `eezd`, repository write, workflow and write:packages scopes. Repository secret names were checked: there is no same-name override for either account secret. This Gitea version provides no account-secret listing API, so the existence/value of `ALL_GITEA_TOKEN` and actual publication permissions remain unverified until an authorized release. No secret is read from the Gitea database. GitHub Actions on the mirror remains disabled. Ordinary Git mirror operations are independent of builds and share their own `.mirror.lock`; no release token is needed locally for native development.
 
 On the first GHCR publication, GitHub defaults a personal package to private even when the repository is public ([GitHub documentation](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)). If `eezd/alphapulse` is not already public, set its package visibility to Public in GitHub Package settings after its first image upload, then rerun the same source SHA. Anonymous pull verification blocks release completion until both registries are publicly readable; retained images and original archives are reused. No first formal release or package-visibility change is part of this initialization.
 

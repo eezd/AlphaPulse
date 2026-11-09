@@ -160,29 +160,49 @@ def maintenance(candidate, action, base='http://127.0.0.1:21005'):
                    cwd=candidate/'backend', check=True)
 
 
+def active_roles():
+    active = []
+    for role in ROLES:
+        state = run('systemctl', 'show', '--property=ActiveState', '--value', 'alphapulse-'+role+'.service')
+        if state == 'active':
+            active.append(role)
+        elif state not in ('inactive', 'failed'):
+            raise RuntimeError(f'AlphaPulse {role} is {state}; wait for the existing service operation')
+    return tuple(active)
+
+
 def update(candidate):
     pending = RUNTIME/'deployment.pending.json'
     if pending.exists():
         raise RuntimeError('Pending maintenance exists; inspect runtime/deployment.pending.json before proceeding')
     maintenance(candidate, 'schema')
     previous = (RUNTIME/'current').resolve() if (RUNTIME/'current').exists() else None
+    original_active = active_roles()
+    if not previous and original_active:
+        raise RuntimeError('Active native services have no current build; inspect their state first')
     if previous:
         maintenance(previous, 'schema')
-    save(pending, {'operation': 'native-update', 'candidate': str(candidate), 'previous': str(previous), 'phase': 'draining'})
+    save(pending, {'operation': 'native-update', 'candidate': str(candidate), 'previous': str(previous),
+                   'previous_active': original_active, 'phase': 'draining'})
     try:
         maintenance(candidate, 'pause')
-        if previous:
+        if 'api' in original_active:
             maintenance(candidate, 'drain')
+        elif 'news-risk' in original_active:
+            maintenance(candidate, 'drain-without-api')
         maintenance(candidate, 'assert-paused')
         activate(candidate)
-        maintenance(candidate, 'restore')
-    except BaseException:
+    except BaseException as error:
         # activate restores the prior service state; never resume AI on an unhealthy version.
-        if previous:
-            healthy(previous)
-            maintenance(previous, 'restore')
+        if original_active:
+            healthy(previous, original_active)
+        elif active_roles():
+            raise RuntimeError('Failed activation left services running; inspect pending maintenance') from error
+        maintenance(previous or candidate, 'restore')
         raise
     else:
+        save(pending, {**json.loads(pending.read_text()), 'phase': 'activated'})
+        maintenance(candidate, 'restore')
         pending.unlink()
 
 
