@@ -43,6 +43,8 @@ Original six archives, SHA256SUMS, packages.json and build.json are published id
 
 Gitea secret `ALPHAPULSE_GITEA_TOKEN` needs repository, Release and registry publication access. Account secret `ALL_GITHUB_TOKEN` needs identity `eezd`, repository write, workflow and write:packages scopes. No secret is read from the Gitea database. The release preflight verifies identity/scopes; missing permissions fail before publication. GitHub Actions on the mirror remains disabled. Ordinary Git mirror operations are independent of builds and share their own `.mirror.lock`; no release token is needed locally for native development.
 
+On the first GHCR publication, GitHub defaults a personal package to private even when the repository is public ([GitHub documentation](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)). If `eezd/alphapulse` is not already public, set its package visibility to Public in GitHub Package settings after its first image upload, then rerun the same source SHA. Anonymous pull verification blocks release completion until both registries are publicly readable; retained images and original archives are reused. No first formal release or package-visibility change is part of this initialization.
+
 ## Two-stage news research
 
 A news item has one stable package, identified by `news_items.id`. Reposts remain separate packages; a digest is never split into new packages. Original news, revisions and archived news-research tables are retained; dedicated trading signals are removed by the retirement migration below.

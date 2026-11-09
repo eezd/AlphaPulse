@@ -167,6 +167,7 @@ def execute():
         existing=registry_digest(image,version);require(existing in (None,value),'Immutable image version conflict')
         if not existing: run('skopeo','copy','--all','--preserve-digests','--authfile',os.environ['DOCKER_CONFIG']+'/config.json','docker://'+candidate,'docker://'+image+':'+version)
     verify_anonymous(GITHUB_IMAGE+':'+version)
+    verify_anonymous(GITEA_IMAGE+':'+version)
     files=[*metadata['files'],'SHA256SUMS','packages.json','build.json']
     record['assets']={name:digest(cache/name) for name in files}
     write_json(record_path,record)

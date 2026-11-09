@@ -63,6 +63,8 @@ jobs:
           python3 scripts/manual-release.py
       - name: Clean only this run
         if: always()
+        env:
+          DOCKER_CONFIG: /tmp/alphapulse-release-auth
         run: |
           docker buildx rm "alphapulse-release-${{ gitea.run_id }}" || true
           rm -rf /tmp/alphapulse-release-auth
