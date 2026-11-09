@@ -20,7 +20,7 @@ RUN playwright install-deps chromium && rm -rf /var/lib/apt/lists/*
 COPY --from=browser-download /opt/browser-executable/ /opt/ms-playwright/
 COPY --from=browser-download /opt/ms-playwright/ /opt/ms-playwright/
 # Single-process flags apply only to this build probe, allowing Chromium under QEMU.
-RUN python -c 'import fastapi, scrapy; from playwright.sync_api import sync_playwright; p = sync_playwright().start(); b = p.chromium.launch(args=["--single-process", "--no-zygote", "--disable-gpu"]); page = b.new_page(); page.set_content("<title>AlphaPulse build check</title>"); assert page.title() == "AlphaPulse build check"; b.close(); p.stop()'
+RUN ulimit -c 0; PYTHONDONTWRITEBYTECODE=1 python -c 'import fastapi, scrapy; from playwright.sync_api import sync_playwright; p = sync_playwright().start(); b = p.chromium.launch(args=["--single-process", "--no-zygote", "--disable-gpu"]); page = b.new_page(); page.set_content("<title>AlphaPulse build check</title>"); assert page.title() == "AlphaPulse build check"; b.close(); p.stop()'
 ARG APP_VERSION
 ARG APP_COMMIT
 ENV APP_VERSION=$APP_VERSION APP_COMMIT=$APP_COMMIT
