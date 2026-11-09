@@ -51,6 +51,16 @@ async def execute(action, journal, base):
                     row.control_revision += 1
                     await session.commit()
             print('AI admissions paused; existing calls may finish', flush=True)
+        elif action == 'assert-paused':
+            async with SessionLocal() as session:
+                row = await session.get(ResearchSettings, 1)
+                previous = state.get('ai')
+                if previous:
+                    if not (row and not row.enabled and row.control_revision == previous['revision']
+                            and fingerprint(row) == previous['fingerprint']):
+                        raise RuntimeError('AI controls changed during maintenance; aborting before service stop')
+                elif row:
+                    raise RuntimeError('AI configuration was created during maintenance; aborting service stop')
         elif action == 'restore':
             previous = state.get('ai')
             if previous:

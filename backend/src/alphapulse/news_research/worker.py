@@ -72,6 +72,8 @@ async def run():
                         slots = max(0, settings.config.get('concurrency', 3) - len(tasks))
                         actions = await scheduling.actions(session, settings, active, slots)
                         await session.commit()
+                        if stopping.is_set():
+                            break
                         config = {**settings.config, '_control_revision': settings.control_revision}
                         for stage, identifier in actions:
                             call = (process_event(identifier, config)

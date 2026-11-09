@@ -81,7 +81,7 @@ Environment=PYTHONUNBUFFERED=1
 ExecStart={command}
 Restart=on-failure
 RestartSec=5
-TimeoutStopSec={3600 if role == 'news-risk' else 120}
+TimeoutStopSec={3600 if role in ('api', 'news-risk') else 120}
 KillMode=control-group
 UMask=0027
 [Install]
@@ -112,7 +112,7 @@ def link(target):
     temporary.replace(RUNTIME/'current')
 
 
-def activate(candidate):
+def activate(candidate, before_workers=None):
     unit_dir = Path('/etc/systemd/system')
     previous = (RUNTIME/'current').resolve() if (RUNTIME/'current').exists() else None
     originals = {u: (unit_dir/u).read_bytes() if (unit_dir/u).exists() else None for u in UNITS}
@@ -129,6 +129,8 @@ def activate(candidate):
         run('systemctl', 'enable', *UNITS)
         run('systemctl', 'restart', UNITS[0])
         healthy(candidate, ('api',))
+        if before_workers:
+            before_workers()
         run('systemctl', 'restart', *UNITS[1:])
         healthy(candidate)
     except BaseException:
@@ -171,6 +173,7 @@ def update(candidate):
         maintenance(candidate, 'pause')
         if previous:
             maintenance(candidate, 'drain')
+        maintenance(candidate, 'assert-paused')
         activate(candidate)
         maintenance(candidate, 'restore')
     except BaseException:
