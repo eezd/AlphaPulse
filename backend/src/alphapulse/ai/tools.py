@@ -22,6 +22,7 @@ from alphapulse.api.calendar import calendar_data
 from alphapulse.api.market import call_binance, client, tradable_symbols
 from alphapulse.api.news import news_filters
 from alphapulse.core.db import SessionLocal
+from alphapulse.core.research_sources import SOURCES as RESEARCH_SOURCES
 from alphapulse.core.us_news import SOURCES as US_SOURCES
 from alphapulse.models import ContextVersion, NewsItem, SkillVersion
 from alphapulse.models.market import INTERVALS
@@ -31,10 +32,11 @@ NEWS_BODY_LIMIT = 4000
 # 返回给模型的逐根 K 线数量；统计指标基于全部取到的 K 线计算
 BARS_IN_RESULT = 30
 SOURCE_NAMES = {
-    "wscn_live": "华尔街见闻快讯", "wscn_news": "华尔街见闻文章",
+    "wscn_news": "华尔街见闻文章",
     "coindesk": "CoinDesk", "fed": "美联储·政策与讲话", "bls": "美国劳工统计局·CPI/PPI/就业", "bea": "美国经济分析局",
 }
 
+SOURCE_NAMES.update({code: spec.name for code, spec in RESEARCH_SOURCES.items()})
 SOURCE_NAMES.update({code: spec.name for code, spec in US_SOURCES.items()})
 
 
@@ -62,7 +64,7 @@ def dump(data: Any) -> str:
 
 class SearchNews(BaseModel):
     query: Annotated[str, Field(description="关键字，按标题和正文字面匹配；比特币/Bitcoin、以太坊/Ethereum、美联储、CPI/PPI/非农/GDP/PCE 等完整主题词会同时匹配中英文；其他词请分别使用原文语言检索")]
-    sources: Annotated[list[Literal["wscn_live", "wscn_news", "coindesk", "fed", "bls", "bea", "sec", "cftc", "treasury", "ofac", "fincen", "whitehouse", "congress", "federal_register", "occ", "doj", "ecb", "boe", "eurostat", "ons", "destatis", "insee"]] | None, Field(description="限定来源，不填为全部")] = None
+    sources: Annotated[list[Literal["wscn_news", "coindesk", "fed", "bls", "bea", "sec", "cftc", "treasury", "ofac", "fincen", "whitehouse", "congress", "federal_register", "occ", "doj", "ecb", "boe", "eurostat", "ons", "destatis", "insee", "cls_depth", "citi_insights", "jpmorgan_research", "blackrock_insights", "goldman_insights", "bloomberg_articles"]] | None, Field(description="限定来源，不填为全部")] = None
     start: Annotated[datetime | None, Field(description="开始时间（ISO 8601，带时区），如 2026-10-01T00:00:00+08:00")] = None
     end: Annotated[datetime | None, Field(description="结束时间（ISO 8601，带时区）")] = None
     limit: Annotated[int, Field(ge=1, le=20)] = 10

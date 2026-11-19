@@ -88,6 +88,24 @@ async function cancelHistory() {
   emit("changed")
 }
 
+const policyBusy = ref(false)
+const supportsResearch = computed(() => ["citi_insights", "jpmorgan_research", "goldman_insights"].includes(props.source.code))
+async function toggleAnalysis(enabled: boolean | string | number) {
+  if (policyBusy.value) return
+  sessionScope.assertCurrent()
+  const code = props.source.code
+  policyBusy.value = true
+  try {
+    await patchSourceApi(code, { analysis_policy: enabled ? "automatic" : "collect_only" })
+    if (sessionScope.isCurrent() && props.source.code === code) {
+      ElMessage.success("分析策略已保存")
+      emit("changed")
+    }
+  } finally {
+    policyBusy.value = false
+  }
+}
+
 const statusTag = computed(() => sourceStatus(props.source, props.restarting))
 const gaps = computed(() => collectionGaps(props.source))
 
@@ -106,6 +124,9 @@ onMounted(loadLatest)
   >
     <div class="flex items-center gap-2">
       <span class="text-base text-slate-900 font-bold">{{ source.name }}</span>
+      <el-tag v-if="source.analysis_policy === 'collect_only'" size="small">
+        仅采集
+      </el-tag>
       <el-tag v-if="alert" type="danger" effect="dark" size="small">
         告警
       </el-tag>
@@ -118,6 +139,17 @@ onMounted(loadLatest)
       <span v-if="source.process?.pid" class="num text-slate-500">PID {{ source.process.pid }}</span>
     </div>
 
+    <div v-if="supportsResearch" class="flex flex-col gap-2 rounded bg-sky-50 p-3 text-xs">
+      <div class="flex items-center justify-between gap-2">
+        <span>机构研究分析</span>
+        <el-switch :model-value="source.analysis_policy === 'automatic'" :loading="policyBusy" :disabled="policyBusy" aria-label="机构研究分析" @change="toggleAnalysis" />
+      </div>
+      <p>历史全文用于研究资料库；接入后首次采集且同日发表的新文章参与报告。跨日、日期未知或异常的文章仅建库。</p>
+      <p>切换前请关闭分析工作流并等待在途任务完成；启用前需发布并绑定三份支持机构研究的 SKILL。</p>
+      <p v-if="source.research_enabled_at">
+        首次接入：{{ formatTime(source.research_enabled_at) }}（停用后保留）
+      </p>
+    </div>
     <div class="grid grid-cols-2 gap-x-4 gap-y-2 border border-slate-100 rounded-lg border-solid bg-slate-50 p-3 text-xs text-slate-500">
       <div>
         上次成功

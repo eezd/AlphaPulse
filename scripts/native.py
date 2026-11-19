@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = ROOT / 'runtime'
 ROLES = {'api': 'alphapulse.api.main:app', 'crawler': 'alphapulse.crawler.manager',
          'market': 'alphapulse.market.worker', 'calendar': 'alphapulse.calendar.worker',
-         'news-risk': 'alphapulse.news_research.worker', 'jin10-calendar': 'alphapulse.calendar.jin10_worker'}
+         'news-risk': 'alphapulse.briefings.worker', 'jin10-calendar': 'alphapulse.calendar.jin10_worker'}
 UNITS = ['alphapulse-'+role+'.service' for role in ROLES]
 
 
@@ -47,7 +47,8 @@ def build():
         subprocess.run(args, cwd=candidate/'web', check=True)
     subprocess.run(['python3', '-m', 'unittest', 'discover', '-s', str(candidate/'scripts/tests'), '-q'], cwd=candidate, check=True)
     checked_scripts = ['common.py', 'native.py', 'maintenance.py', 'release.py',
-                       'manual-release.py', 'package.py', 'install-package.py', 'smoke-release.py', 'tests']
+                       'manual-release.py', 'package.py', 'install-package.py', 'smoke-release.py',
+                       'smoke_briefings.py', 'smoke_analysis_parts.py', 'smoke_workspace.py', 'tests']
     subprocess.run(['uvx', 'ruff==0.14.14', 'check', '--select', 'F,E9,B',
                     *(str(candidate/'scripts'/name) for name in checked_scripts)], check=True)
     (candidate/'web/dist/version.json').write_text(json.dumps({'version': version, 'commit': before['source_sha']}))
@@ -179,7 +180,7 @@ def update(candidate):
     if not previous and original_active:
         raise RuntimeError('Active native services have no current build; inspect their state first')
     if previous:
-        maintenance(previous, 'schema')
+        maintenance(previous, 'schema-previous')
     save(pending, {'operation': 'native-update', 'candidate': str(candidate), 'previous': str(previous),
                    'previous_active': original_active, 'phase': 'draining'})
     try:
@@ -196,7 +197,7 @@ def update(candidate):
             healthy(previous, original_active)
         elif active_roles():
             raise RuntimeError('Failed activation left services running; inspect pending maintenance') from error
-        maintenance(previous or candidate, 'restore')
+        maintenance(previous or candidate, 'restore-rollback')
         raise
     else:
         save(pending, {**json.loads(pending.read_text()), 'phase': 'activated'})

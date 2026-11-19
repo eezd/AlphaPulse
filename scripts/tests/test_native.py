@@ -12,6 +12,21 @@ import native
 
 
 class NativeTests(unittest.TestCase):
+    def test_schema_compatibility_allows_only_explicit_predecessors(self):
+        import runpy
+        from types import SimpleNamespace
+        with patch.dict(sys.modules, {'dotenv': SimpleNamespace(dotenv_values=None)}):
+            compatible = runpy.run_path(str(Path(native.__file__).with_name('maintenance.py')))['schema_compatible']
+        revisions = ('f07890123456', 'a18901234567', 'b29012345678', 'c30123456789',
+                     'd41234567890', 'e52345678901', 'f63456789012')
+        allowed = set(zip(revisions[1:], revisions[:-1], strict=True))
+        for actual in (*revisions, 'unknown'):
+            for expected in (*revisions, 'unknown'):
+                self.assertEqual(compatible({actual}, {expected}), actual == expected)
+                self.assertEqual(compatible({actual}, {expected}, previous=True),
+                                 actual == expected or (actual, expected) in allowed)
+        self.assertFalse(compatible({'f63456789012', 'unexpected'}, {'e52345678901'}, previous=True))
+
     def check_update(self, active, *, activation_error=None, drain_error=None):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -45,12 +60,12 @@ class NativeTests(unittest.TestCase):
 
     def test_start_after_stop_skips_unavailable_api_and_activates(self):
         actions, activations = self.check_update(())
-        self.assertEqual(actions, ['schema', 'schema', 'pause', 'assert-paused', 'restore'])
+        self.assertEqual(actions, ['schema', 'schema-previous', 'pause', 'assert-paused', 'restore'])
         self.assertEqual(activations, 1)
 
     def test_stopped_instance_activation_failure_restores_ai_without_api_health(self):
         actions, _ = self.check_update((), activation_error=RuntimeError('activation failure'))
-        self.assertEqual(actions[-1], 'restore')
+        self.assertEqual(actions[-1], 'restore-rollback')
 
     def test_worker_only_instance_drains_without_chat_api(self):
         actions, _ = self.check_update(('news-risk',))
@@ -59,7 +74,7 @@ class NativeTests(unittest.TestCase):
 
     def test_failed_drain_restores_settings_and_checks_only_original_active_roles(self):
         actions, activations = self.check_update(('api',), drain_error=RuntimeError('drain failure'))
-        self.assertEqual(actions[-1], 'restore')
+        self.assertEqual(actions[-1], 'restore-rollback')
         self.assertEqual(activations, 0)
 
     def test_start_rejects_transitional_services_before_pausing_ai(self):
@@ -77,7 +92,8 @@ class NativeTests(unittest.TestCase):
                  patch.object(native, 'activate', side_effect=RuntimeError('failed rollback')):
                 with self.assertRaisesRegex(RuntimeError, 'left services running'):
                     native.update(candidate)
-                self.assertNotIn('restore', [call.args[1] for call in maintenance.call_args_list])
+                self.assertTrue({'restore', 'restore-rollback'}.isdisjoint(
+                    call.args[1] for call in maintenance.call_args_list))
                 self.assertTrue((root/'deployment.pending.json').exists())
 
     def test_build_failure_does_not_change_running_services(self):

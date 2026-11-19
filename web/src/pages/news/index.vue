@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import type { SourceInfo } from "@@/apis/crawler/type"
+import { listSourcesApi } from "@@/apis/crawler"
+import { useSessionScope } from "@@/composables/useSessionScope"
 import { formatTime } from "@@/utils/text"
 import { Refresh, Search } from "@element-plus/icons-vue"
 import NewsDetail from "./components/NewsDetail.vue"
@@ -7,11 +10,38 @@ import { useNewsFeed } from "./composables/useNewsFeed"
 const { sourceNames, filters, items, total, page, pageSize, loading, failed, riskFailed, pendingCount, openedId, listBox, connected, load, search, savingBookmarks, toggleBookmark } = useNewsFeed()
 const route = useRoute()
 const compact = ref(false)
+const sourceCounts = ref<Record<string, Pick<SourceInfo, "total_items" | "today_new">>>({})
+const sessionScope = useSessionScope()
+let countTimer: ReturnType<typeof setInterval> | undefined
+let countRequest = 0
+async function refreshSourceCounts() {
+  const request = ++countRequest
+  try {
+    const info = await listSourcesApi(false)
+    if (request !== countRequest || !sessionScope.isCurrent()) return
+    sourceCounts.value = Object.fromEntries(info.sources.map(source => [source.code, {
+      total_items: source.total_items,
+      today_new: source.today_new
+    }]))
+  } catch {
+    if (request === countRequest && sessionScope.isCurrent()) sourceCounts.value = {}
+  }
+}
+onMounted(() => {
+  void refreshSourceCounts()
+  countTimer = setInterval(() => {
+    if (!document.hidden) void refreshSourceCounts()
+  }, 60_000)
+})
+onBeforeUnmount(() => {
+  clearInterval(countTimer)
+  countRequest++
+})
 watch(() => route.query.news, (value) => {
   if (typeof value === "string" && /^\d+$/.test(value)) openedId.value = Number(value)
 }, { immediate: true })
 function resetFilters() {
-  Object.assign(filters, { source: [], q: "", range: null, processing_state: "", bookmarked: false, sort: "desc" })
+  Object.assign(filters, { source: [], research_only: false, author: "", content_status: "", q: "", range: null, processing_state: "", bookmarked: false, sort: "desc" })
   void search()
 }
 function recent(hours: number) {
@@ -50,7 +80,16 @@ onBeforeUnmount(() => media?.removeEventListener("change", updateMobile))
     <el-card shadow="never" body-class="flex flex-wrap items-center gap-3">
       <span class="text-xs text-slate-500">来源</span>
       <el-select v-model="filters.source" multiple collapse-tags collapse-tags-tooltip filterable clearable class="w-64" placeholder="全部来源" @change="search">
-        <el-option v-for="(name, code) in sourceNames" :key="code" :value="code" :label="name" />
+        <el-option v-for="(name, code) in sourceNames" :key="code" :value="code" :label="name" class="h-auto! py-1.5!">
+          <div class="min-w-0 leading-5">
+            <div class="truncate">
+              {{ name }}
+            </div>
+            <div class="text-xs text-slate-500">
+              累计 {{ sourceCounts[code]?.total_items.toLocaleString() ?? "—" }} · 今日 {{ sourceCounts[code] ? `+${sourceCounts[code].today_new.toLocaleString()}` : "—" }}
+            </div>
+          </div>
+        </el-option>
       </el-select>
       <el-input v-model="filters.q" :prefix-icon="Search" placeholder="关键字" clearable class="w-60" @keyup.enter="search" @clear="search" />
       <el-date-picker
@@ -63,8 +102,15 @@ onBeforeUnmount(() => media?.removeEventListener("change", updateMobile))
     </el-card>
 
     <div class="flex flex-wrap items-center gap-2">
+      <el-checkbox v-model="filters.research_only" @change="search">
+        研究来源文章
+      </el-checkbox>
+      <el-input v-model="filters.author" placeholder="原始署名" clearable class="w-48" @keyup.enter="search" @clear="search" />
+      <el-select v-model="filters.content_status" clearable placeholder="正文完整性" class="w-40" @change="search">
+        <el-option v-for="(label, value) in { full: '网页全文', excerpt: '公开摘要', metadata: '仅元数据', extraction_failed: '正文提取失败' }" :key="value" :label="label" :value="value" />
+      </el-select>
       <el-select v-model="filters.processing_state" clearable placeholder="全部处理状态" class="w-40" @change="search">
-        <el-option v-for="(label, value) in { unprocessed: '未建立索引', index_pending: '等待关键词提取', index_processing: '关键词提取中', assign_pending: '待归属', assign_processing: '事件归属中', done: '已归属事件', failed: '处理失败' }" :key="value" :label="label" :value="value" />
+        <el-option v-for="(label, value) in { unprocessed: '尚未分析', pending: '等待分析', processing: '分析中', done: '已分析', failed: '分析失败', interrupted: '已中断' }" :key="value" :label="label" :value="value" />
       </el-select>
       <el-checkbox v-model="filters.bookmarked" @change="search">
         只看收藏
@@ -101,7 +147,7 @@ onBeforeUnmount(() => media?.removeEventListener("change", updateMobile))
               <el-tag size="small">
                 {{ sourceNames[item.source_code] ?? item.source_code }}
               </el-tag>
-              <span class="num">{{ item.published_at_precision === "date" ? item.published_date : formatTime(item.published_at) }}</span>
+              <span class="num">{{ item.published_at_precision === "unknown" ? "发布时间未知" : item.published_at_precision === "date" ? item.published_date : formatTime(item.published_at) }}</span>
               <div class="flex-1" />
               <el-tag v-if="item.revision_no > 1" size="small" type="warning">
                 已修订 {{ item.revision_no - 1 }} 次
@@ -123,11 +169,9 @@ onBeforeUnmount(() => media?.removeEventListener("change", updateMobile))
                 {{ item.bookmarked ? '★ 已收藏' : '☆ 收藏' }}
               </el-button>
             </div>
-            <RouterLink v-for="event in item.events" :key="event.id" :to="{ path: '/home', query: { event: event.id } }" class="mr-2 text-xs text-blue-600" @click.stop>
-              {{ event.title }}
-            </RouterLink>
             <div class="mt-1 line-clamp-2 text-xs text-slate-500">
-              {{ item.risk?.state === 'done' ? '关键词与事件归属已完成，研判请查看关联事件' : item.risk?.state?.endsWith('_failed') ? '关键词索引或事件分类失败' : item.risk ? '关键词索引与事件分类处理中' : '尚未建立关键词索引' }}
+              <span v-if="item.analysis_admission" :title="item.analysis_admission.reason">{{ { collect_only: '仅采集', archive: '研究资料库', report: '参与报告' }[item.analysis_admission.mode] }} · </span>
+              {{ item.analysis_admission?.mode === 'collect_only' ? item.analysis_admission.reason : item.analysis?.result?.summary || (item.analysis ? `AI ${item.analysis.state}` : '尚未进行 AI 分析') }}
             </div>
           </div>
           <el-alert v-if="failed" type="error" :closable="false" title="新闻读取失败；已有内容保留">

@@ -32,4 +32,4 @@ __all__ = [
 ]
 
 # Register additive news research tables with Alembic metadata.
-from alphapulse.news_research import models as news_research_models  # noqa: F401,E402
+from alphapulse.briefings import models as briefing_models  # noqa: F401,E402

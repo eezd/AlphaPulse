@@ -16,12 +16,16 @@ from alphapulse.core.auth import AuthSession, require_admin
 from alphapulse.core.streams import session_events
 from alphapulse.core.db import get_session
 from alphapulse.core.redis import KEY_PREFIX, redis
+from alphapulse.core.research_sources import SOURCES as RESEARCH_SOURCES, configuration_error as research_configuration_error
 from alphapulse.core.official_sources import REGIONS
 from alphapulse.calendar.catalog import FAMILIES
 from alphapulse.crawler.content_policy import ignored_retry
 from alphapulse.crawler.events import CONTROL_CHANNEL, HISTORY_SOURCES, LOG_CHANNEL, STATUS_KEY
 from alphapulse.crawler.spiders.us_official import configuration_error
 from alphapulse.models import CrawlLog, CrawlRun, EconomicRelease, NewsItem, Source
+from alphapulse.briefings import config as briefing_config
+from alphapulse.briefings.admission import RESEARCH_CODES
+from alphapulse.briefings.models import Analysis, Report, ReportPart
 
 router = APIRouter(prefix="/api/crawler", tags=["crawler"], dependencies=[Depends(require_admin)])
 
@@ -48,6 +52,10 @@ class SourceOut(BaseModel):
     last_success_at: datetime | None
     last_error: str | None
     paused_until: datetime | None
+    analysis_policy: Literal['automatic', 'collect_only'] = 'automatic'
+    research_enabled_at: datetime | None = None
+    availability: Literal['ready', 'unverified', 'blocked'] | None = None
+    unavailable_reason: str | None = None
     configuration_error: str | None = None
     history_cursor: dict = Field(default_factory=dict)
     supports_history: bool
@@ -88,6 +96,7 @@ class SourcesOut(BaseModel):
 
 
 class SourcePatch(BaseModel):
+    analysis_policy: Literal['automatic', 'collect_only'] | None = None
     name: str | None = Field(default=None, min_length=1, max_length=64)
     enabled: bool | None = None
     interval_seconds: Annotated[int | None, Field(ge=5, le=86400)] = None
@@ -228,7 +237,9 @@ async def list_sources(session: Annotated[AsyncSession, Depends(get_session)]) -
                 **s.__dict__,
                 "region_code": REGIONS.get(s.code),
                 "supports_history": s.code in HISTORY_SOURCES,
-                "configuration_error": configuration_error(s.code),
+                "availability": RESEARCH_SOURCES[s.code].availability if s.code in RESEARCH_SOURCES else None,
+                "unavailable_reason": research_configuration_error(s.code),
+                "configuration_error": configuration_error(s.code) or research_configuration_error(s.code),
                 "collection_stats": {**run_stats.get(s.code, {}), **attachment_stats[s.code]},
                 "process": json.loads(statuses[s.code]) if s.code in statuses else None,
                 "today_new": today_counts.get(s.code, (0, 0))[0],
@@ -242,10 +253,27 @@ async def list_sources(session: Annotated[AsyncSession, Depends(get_session)]) -
 
 @router.patch("/sources/{code}")
 async def patch_source(code: str, body: SourcePatch, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[None]:
+    settings = await briefing_config.settings_row(session, lock=True) if body.analysis_policy is not None else None
     source = await session.get(Source, code)
     if source is None or source.collector != "news":
         raise HTTPException(status.HTTP_404_NOT_FOUND, "来源不存在")
-    if body.enabled and (error := configuration_error(code)):
+    if body.analysis_policy is not None:
+        if code not in RESEARCH_CODES:
+            raise HTTPException(422, '该来源不支持机构研究策略切换')
+        if body.analysis_policy != source.analysis_policy:
+            if settings.enabled:
+                raise HTTPException(409, '请先关闭分析工作流，再切换来源策略')
+            for cls in (Analysis, Report, ReportPart):
+                if await session.scalar(select(cls.id).where(cls.state == 'processing').limit(1)):
+                    raise HTTPException(409, '仍有在途分析或报告，请等待完成后切换来源策略')
+            if body.analysis_policy == 'automatic':
+                try:
+                    await briefing_config.validate_config(session, settings.config, require_research=True)
+                except (ValueError, KeyError) as error:
+                    raise HTTPException(409, f'机构研究配置未就绪：{error}') from error
+                if source.research_enabled_at is None:
+                    source.research_enabled_at = datetime.now(UTC)
+    if body.enabled and (error := configuration_error(code) or research_configuration_error(code)):
         raise HTTPException(status.HTTP_409_CONFLICT, error)
     for field, value in body.model_dump(exclude_none=True, exclude={"history_target"}).items():
         setattr(source, field, value)

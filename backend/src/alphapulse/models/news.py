@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, LargeBinary, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, LargeBinary, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -10,6 +10,10 @@ from alphapulse.core.db import Base
 
 class Source(Base):
     __tablename__ = "sources"
+    __table_args__ = (CheckConstraint("analysis_policy IN ('automatic', 'collect_only')", name='ck_sources_analysis_policy'),)
+
+    analysis_policy: Mapped[str] = mapped_column(String(16), default='automatic', server_default='automatic')
+    research_enabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     code: Mapped[str] = mapped_column(String(32), primary_key=True)
     name: Mapped[str] = mapped_column(String(64))

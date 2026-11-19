@@ -58,22 +58,28 @@ def test_model_requires_protocol_end_marker(app_env, monkeypatch, protocol, comp
     asyncio.run(check())
 
 
-def test_connection_failure_has_one_retry_owner(app_env, monkeypatch):
+@pytest.mark.parametrize("protocol", ["openai", "anthropic"])
+def test_connection_failure_has_one_retry_owner(app_env, monkeypatch, protocol):
     from alphapulse.ai import llm
     attempts = 0
     def handle(request):
         nonlocal attempts
         attempts += 1
-        raise httpx.ConnectError("测试连接失败", request=request)
-    provider = install_model_transport(llm, monkeypatch, "openai", handle)
+        http = httpx if protocol == "openai" else httpx2
+        if attempts <= 6:
+            raise http.ConnectError("测试连接失败", request=request)
+        return http.Response(401, json={"error": {"message": "synthetic permanent error", "type": "authentication_error"}})
+    provider = install_model_transport(llm, monkeypatch, protocol, handle)
     from unittest.mock import AsyncMock
-    monkeypatch.setattr(llm, "_wait_local", AsyncMock())
+    wait = AsyncMock()
+    monkeypatch.setattr(llm, "_wait_local", wait)
     async def check():
-        with pytest.raises(llm.LlmError, match="无法连接"):
+        with pytest.raises(llm.LlmError, match="401"):
             async for _ in llm.stream(provider, "system", [], []):
                 pass
     asyncio.run(check())
-    assert attempts == 3
+    assert attempts == 7
+    assert [call.args[0] for call in wait.await_args_list] == [5, 5, 5, 5, 5, 180]
 
 
 def test_pipeline_error_keeps_history_checkpoint_and_marks_run_failed(app_env, monkeypatch):
@@ -244,7 +250,7 @@ def test_news_updates_metadata_without_creating_content_revision(app_env, monkey
         "content_text": "正文", "author": "原作者", "tags": ["旧标签"], "is_paywalled": False,
         "published_at": datetime(2026, 10, 20, tzinfo=UTC), "source_updated_at": None, "extra": {},
     }
-    news = NewsItem(id=1, source_code="wscn_live", external_id="1", revision_no=1,
+    news = NewsItem(id=1, source_code="wscn_news", external_id="1", revision_no=1,
                     content_hash=pipelines.content_hash(original), **original)
     incoming = dict(original)
     if change != "unchanged":
@@ -274,7 +280,7 @@ def test_news_updates_metadata_without_creating_content_revision(app_env, monkey
 
     async def check():
         for _ in range(2):
-            await pipeline.process_item({**incoming, "source_code": "wscn_live", "external_id": "1", "raw_response_id": 10})
+            await pipeline.process_item({**incoming, "source_code": "wscn_news", "external_id": "1", "raw_response_id": 10})
         assert {key: getattr(news, key) for key in pipelines.UPDATABLE_FIELDS} == incoming
         assert news.content_hash == pipelines.content_hash(incoming)
         assert news.revision_no == (2 if change == "content" else 1)
@@ -282,7 +288,7 @@ def test_news_updates_metadata_without_creating_content_revision(app_env, monkey
         if change == "content":
             assert len(revisions) == run.items_revised == 1
             assert revisions[0].revision_no == 2 and revisions[0].content_html == incoming["content_html"]
-            assert events == [{"id": 1, "source_code": "wscn_live", "kind": "revised"}]
+            assert events == [{"id": 1, "source_code": "wscn_news", "kind": "revised"}]
         else:
             assert not revisions and not events and run.items_revised == 0
     asyncio.run(check())

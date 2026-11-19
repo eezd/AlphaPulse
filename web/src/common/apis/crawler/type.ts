@@ -18,6 +18,10 @@ export interface SourceInfo {
   last_error: string | null
   paused_until: string | null
   collection_stats?: Record<string, number>
+  analysis_policy?: "automatic" | "collect_only"
+  research_enabled_at?: string | null
+  availability?: "ready" | "unverified" | "blocked" | null
+  unavailable_reason?: string | null
   configuration_error?: string | null
   history_cursor?: {
     history?: { scanned?: boolean }
@@ -83,6 +87,7 @@ export interface CrawlLog {
 }
 
 export interface SourcePatch {
+  analysis_policy?: "automatic" | "collect_only"
   name?: string
   enabled?: boolean
   interval_seconds?: number

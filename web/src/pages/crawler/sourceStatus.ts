@@ -20,6 +20,16 @@ export function sourceStatus(source: SourceInfo, restarting = false, now = Date.
   return { type: "info", text: "等待调度" } as const
 }
 
+export function historyStatus(source: Pick<SourceInfo, "last_error" | "history_target" | "history_position" | "history_done">) {
+  if (source.last_error) return source.last_error
+  if (source.history_done) {
+    if (source.history_target && source.history_position && new Date(source.history_position) > new Date(source.history_target))
+      return "公开列表到底，未到目标日"
+    return "历史回补完成"
+  }
+  return source.history_position ? `回补至 ${source.history_position}` : "—"
+}
+
 function originalUrl(url: string) {
   const bill = /^https:\/\/api\.congress\.gov\/v3\/bill\/(\d+)\/([a-z]+)\/(\d+)\/?(?:\?[^#]*)?(?:#.*)?$/i.exec(url)
   const billTypes: Record<string, string> = {

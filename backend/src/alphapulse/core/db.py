@@ -10,7 +10,8 @@ class Base(DeclarativeBase):
     pass
 
 
-engine = create_async_engine(get_settings().database_url, pool_pre_ping=True)
+# 服务与各爬虫子进程各有独立池，只常驻一个连接，避免空闲连接累积耗尽共享数据库。
+engine = create_async_engine(get_settings().database_url, pool_pre_ping=True, pool_size=1, max_overflow=4)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 

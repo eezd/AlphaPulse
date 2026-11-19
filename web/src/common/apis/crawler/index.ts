@@ -3,10 +3,11 @@ import { request } from "@/http/axios"
 import { consumeStream } from "@/http/stream"
 
 /** 读取新闻与日历来源状态 */
-export function listSourcesApi() {
+export function listSourcesApi(notify = true) {
   return request<Crawler.ListSourcesResponseData>({
     url: "/crawler/sources",
-    method: "get"
+    method: "get",
+    notify
   })
 }
 

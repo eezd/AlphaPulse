@@ -9,7 +9,7 @@ if [[ ${1-} == --systemd ]] && (( $# == 2 )); then
         crawler) module=alphapulse.crawler.manager ;;
         market) module=alphapulse.market.worker ;;
         calendar) module=alphapulse.calendar.worker ;;
-        news-risk) module=alphapulse.news_research.worker ;;
+        news-risk) module=alphapulse.briefings.worker ;;
         jin10-calendar) module=alphapulse.calendar.jin10_worker ;;
         *) printf '未知的 AlphaPulse 服务：%s\n' "$2" >&2; exit 2 ;;
     esac

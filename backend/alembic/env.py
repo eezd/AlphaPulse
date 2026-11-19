@@ -25,7 +25,7 @@ target_metadata = Base.metadata
 
 def include_object(obj, name, type_, reflected, compare_to):
     # 分区表与退役新闻表不在运行模型中；自动生成迁移不能删除保留的历史表。
-    archived = name.startswith(('klines_', 'news_ai_', 'risk_')) or name == 'news_package_evidence'
+    archived = name.startswith(('klines_', 'news_ai_', 'risk_', 'news_research_')) or name == 'news_package_evidence'
     return not (type_ == "table" and reflected and compare_to is None and archived)
 
 # other values from the config, defined by the needs of env.py,

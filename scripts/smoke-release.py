@@ -49,6 +49,30 @@ def smoke(build, label):
                'SECRET_ENCRYPTION_KEY': 'MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=',
                'ADMIN_USERNAME': 'ci', 'ADMIN_PASSWORD_HASH': password_hash}
         env_args = [entry for key, value in env.items() for entry in ('-e', key + '=' + value)]
+        # 历史清理只在旧 schema 的独立数据库验证，不能触碰重新接入后的来源。
+        for database, revision, script in (('cls_history_ci', 'c91234567890', 'smoke_remove_cls.py'),
+                                           ('research_ci', 'head', 'smoke_research_sources.py')):
+            run('docker', 'exec', names['db'], 'createdb', '-U', 'ci', database)
+            run('docker', 'exec', names['db'], 'psql', '-U', 'ci', '-d', database,
+                '-v', 'ON_ERROR_STOP=1', '-c', 'CREATE EXTENSION pg_trgm')
+            database_url = env['DATABASE_URL'].rsplit('/', 1)[0] + '/' + database
+            isolated = [*env_args, '-e', 'DATABASE_URL=' + database_url]
+            run('docker', 'run', '--rm', *common, *isolated, image, 'alembic', 'upgrade', revision)
+            if database == 'research_ci':
+                name = network + '-research'
+                run('docker', 'create', '--name', name, *common, *isolated,
+                    '-e', 'RESEARCH_SOURCES_TEST_ISOLATED=1',
+                    '-e', 'RESEARCH_SOURCES_TEST_DATABASE_URL=' + database_url,
+                    '-e', 'RESEARCH_SOURCES_TEST_REDIS_URL=' + env['REDIS_URL'],
+                    '-e', 'RESEARCH_SOURCES_TEST_FIXTURES=/tmp/research-fixtures',
+                    image, 'python', '/tmp/smoke_research_sources.py')
+                # The daemon may not share the release runner's checkout path.
+                run('docker', 'cp', str(ROOT / 'backend/tests/fixtures/research'), name + ':/tmp/research-fixtures')
+                run('docker', 'cp', str(ROOT / 'scripts' / script), name + ':/tmp/smoke_research_sources.py')
+                print(run('docker', 'start', '-a', name), flush=True)
+            else:
+                print(run('docker', 'run', '--rm', '-i', *common, *isolated, image, 'python', '-',
+                          input=(ROOT / 'scripts' / script).read_text()), flush=True)
         print(run('docker', 'run', '--rm', '-i', *common, *env_args, image, 'python', '-',
                   input=(ROOT / 'scripts/smoke_remove_trading.py').read_text()), flush=True)
         run('docker', 'run', '-d', '--name', names['api'], '--network-alias', 'api', *common, *env_args,
@@ -58,11 +82,12 @@ def smoke(build, label):
         print(run('docker', 'exec', '-i', '-e', 'AI_RECOVERY_TEST_REDIS_URL=' + env['REDIS_URL'],
                   names['api'], 'python', '-', input=(ROOT / 'scripts/smoke_ai_recovery.py').read_text()), flush=True)
         print(run('docker', 'exec', '-i', names['api'], 'python', '-',
-                  input=(ROOT / 'scripts/smoke_dynamic_queue.py').read_text()), flush=True)
-        print(run('docker', 'exec', '-i', names['api'], 'python', '-',
-                  input=(ROOT / 'scripts/smoke_priority_queue.py').read_text()), flush=True)
-        print(run('docker', 'exec', '-i', names['api'], 'python', '-',
-                  input=(ROOT / 'scripts/smoke_news_research.py').read_text()), flush=True)
+                  input=(ROOT / 'scripts/smoke_remove_wscn_live.py').read_text()), flush=True)
+        run('docker', 'cp', str(ROOT / 'scripts/maintenance.py'), names['api'] + ':/tmp/maintenance.py')
+        run('docker', 'cp', str(ROOT / 'scripts/smoke_briefings.py'), names['api'] + ':/tmp/smoke_briefings.py')
+        print(run('docker', 'exec', '-e', 'BRIEFINGS_TEST_DATABASE_URL=' + env['DATABASE_URL'],
+                  '-e', 'BRIEFINGS_TEST_REDIS_URL=' + env['REDIS_URL'], '-e', 'BRIEFINGS_TEST_ISOLATED=1',
+                  names['api'], 'python', '/tmp/smoke_briefings.py'), flush=True)
         print(run('docker', 'exec', '-i', names['api'], 'python', '-',
                   input=(ROOT / 'scripts/smoke_calendar.py').read_text()), flush=True)
         print(run('docker', 'exec', '-i', names['api'], 'python', '-',

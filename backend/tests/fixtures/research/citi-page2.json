@@ -1,0 +1,345 @@
+{
+  "code": 200,
+  "data": {
+    "content": [
+      {
+        "attachment": "[{\"name\":\"Transcript\",\"link\":\"/rcs/citigpa/storage/public/Markets-Edition-Halloween-Pullback-Transcript.pdf\",\"isPromptPopup\":false}]",
+        "bcmaTags": [
+          "research",
+          "equity",
+          "ai"
+        ],
+        "campaign": false,
+        "clientBusinessType": "CitiResearch",
+        "defaultImage": "6aea225e08cfb979ef533177",
+        "destinationLink": null,
+        "href": "markets-edition-halloween-pullback-tactical-or-something-more-sinister",
+        "id": "6aea22131def776844b34a19",
+        "insightType": "Podcast",
+        "largeThumbnailImage": null,
+        "mainSeriesLink": [
+          {
+            "seriesName": "Research @ Citi Podcast",
+            "seriesLink": "https://www.citigroup.com/global/insights/research-citi-podcasts"
+          }
+        ],
+        "podCastDuration": null,
+        "publishGmt": "2026-11-03T00:00:00.000+00:00",
+        "relatedType": null,
+        "source": null,
+        "summary": "Dirk Willer and Alex Saunders discuss what's behind recent pullbacks for equities and which strategies investors should consider going forward. They're cautious given market signals, yet open-minded given that the AI bubble may not have peaked.",
+        "tag": null,
+        "thumbnailImage": "68d2ed709400c51f2a8d8fc8",
+        "title": "Markets Edition: Halloween Pullback — Tactical or Something More Sinister?",
+        "topic": "Global Markets and Economy",
+        "url": "https://www.citigroup.com/global/insights/markets-edition-halloween-pullback-tactical-or-something-more-sinister",
+        "videoLink": "https://youtu.be/xs6DBQ1-Pdc?si=N7ghXV5wIeelfrQ4",
+        "videoOnly": false
+      },
+      {
+        "attachment": null,
+        "bcmaTags": [
+          "fraud-prevention",
+          "cybersecurity"
+        ],
+        "campaign": false,
+        "clientBusinessType": "BCMA",
+        "defaultImage": "6aecf0301def776844b376d7",
+        "destinationLink": null,
+        "href": "citi-mexico-control-recommendations-company-fraud-prevention",
+        "id": "6aecf2051def776844b377cc",
+        "insightType": "Article",
+        "largeThumbnailImage": null,
+        "mainSeriesLink": [
+          {
+            "seriesName": "Citi México: Seguridad de la Información, Prevención de Fraudes y Ciberseguridad",
+            "seriesLink": "https://www.citigroup.com/global/insights/information-security-fraud-prevention-cybersecurity-citi-mexico"
+          }
+        ],
+        "podCastDuration": null,
+        "publishGmt": "2026-10-30T00:00:00.000+00:00",
+        "relatedType": null,
+        "source": null,
+        "summary": "Here are a series of practical recommendations to help you strengthen your company's internal controls and protect your business processes against different types of fraud.",
+        "tag": null,
+        "thumbnailImage": "6aecf0301def776844b376d7",
+        "title": "Citi México: recomendaciones de controles para prevenir el fraude dentro de tu empresa",
+        "topic": "Insights",
+        "url": "https://www.citigroup.com/global/insights/citi-mexico-control-recommendations-company-fraud-prevention",
+        "videoLink": null,
+        "videoOnly": false
+      },
+      {
+        "attachment": null,
+        "bcmaTags": [
+          "fraud-prevention",
+          "cybersecurity"
+        ],
+        "campaign": false,
+        "clientBusinessType": "BCMA",
+        "defaultImage": "6aecf0006e87a5fa1fb5ecbf",
+        "destinationLink": null,
+        "href": "citi-mexico-whatsapp-social-media-scams-protect-yourself-online",
+        "id": "6aecf4a908cfb979ef535dc6",
+        "insightType": "Article",
+        "largeThumbnailImage": null,
+        "mainSeriesLink": [
+          {
+            "seriesName": "Citi México: Seguridad de la Información, Prevención de Fraudes y Ciberseguridad",
+            "seriesLink": "https://www.citigroup.com/global/insights/information-security-fraud-prevention-cybersecurity-citi-mexico"
+          }
+        ],
+        "podCastDuration": null,
+        "publishGmt": "2026-10-30T00:00:00.000+00:00",
+        "relatedType": null,
+        "source": null,
+        "summary": "Read more about how social media and instant messaging services can be used by cybercriminals to defraud people.",
+        "tag": null,
+        "thumbnailImage": "6aecf0006e87a5fa1fb5ecbf",
+        "title": "Citi México: estafas en WhatsApp y redes sociales, protégete en línea",
+        "topic": "Insights",
+        "url": "https://www.citigroup.com/global/insights/citi-mexico-whatsapp-social-media-scams-protect-yourself-online",
+        "videoLink": null,
+        "videoOnly": false
+      },
+      {
+        "attachment": null,
+        "bcmaTags": [
+          "research",
+          "geopolitics",
+          "ai"
+        ],
+        "campaign": false,
+        "clientBusinessType": "CitiResearch",
+        "defaultImage": "693700ec8b594e2e05ed380d",
+        "destinationLink": null,
+        "href": "the-global-economys-tenuous-balance-resilience-amid-uncertainty",
+        "id": "6ae4b61b6b8c049b72c8b6ba",
+        "insightType": "Article",
+        "largeThumbnailImage": null,
+        "mainSeriesLink": [],
+        "podCastDuration": null,
+        "publishGmt": "2026-10-30T00:00:00.000+00:00",
+        "relatedType": null,
+        "source": null,
+        "summary": "The global economy is still powering ahead even as uncertainties — from the sustainability of the AI boom to geopolitics — continue to mount. We see global growth coming in at 2.7% this year and climbing to 2.8% next year, as pressures from the U.S.-Iran conflict eventually moderate. A new Citi Research report explores these uncertainties alongside the global economy’s sources of strength.",
+        "tag": null,
+        "thumbnailImage": "693700ec8b594e2e05ed380d",
+        "title": "The Global Economy’s Tenuous Balance: Resilience Amid Uncertainty",
+        "topic": "Global Markets and Economy",
+        "url": "https://www.citigroup.com/global/insights/the-global-economys-tenuous-balance-resilience-amid-uncertainty",
+        "videoLink": null,
+        "videoOnly": false
+      },
+      {
+        "attachment": "[{\"name\":\"Transcript\",\"link\":\"/rcs/citigpa/storage/public/citi-services-EP4-Industry-Perspectives-Podcast-Transcript.pdf\",\"isPromptPopup\":false}]",
+        "bcmaTags": [
+          "services",
+          "investor-services",
+          "regulations",
+          "geopolitics",
+          "government",
+          "international-markets",
+          "macroeconomics"
+        ],
+        "campaign": false,
+        "clientBusinessType": "SecuritiesServices",
+        "defaultImage": "6aec80536e87a5fa1fb5e927",
+        "destinationLink": null,
+        "href": "industry-perspectives-episode-4",
+        "id": "6ae0e347466178d0c2edeb11",
+        "insightType": "Podcast",
+        "largeThumbnailImage": null,
+        "mainSeriesLink": [
+          {
+            "seriesName": "Industry Perspectives",
+            "seriesLink": "https://www.citigroup.com/global/insights/industry-perspectives"
+          }
+        ],
+        "podCastDuration": null,
+        "publishGmt": "2026-10-29T00:00:00.000+00:00",
+        "relatedType": null,
+        "source": null,
+        "summary": "Episode 4: GROWTH – AI, Innovation and Power Demand",
+        "tag": null,
+        "thumbnailImage": "6ae0e0c85bc60e621d18826a",
+        "title": "Industry Perspectives Episode 4",
+        "topic": "Global Markets and Economy",
+        "url": "https://www.citigroup.com/global/insights/industry-perspectives-episode-4",
+        "videoLink": "https://youtu.be/e4O9kqaMtj8",
+        "videoOnly": false
+      },
+      {
+        "attachment": null,
+        "bcmaTags": [
+          "research",
+          "macroeconomics",
+          "supply-chain"
+        ],
+        "campaign": false,
+        "clientBusinessType": "CitiResearch",
+        "defaultImage": "6ae255cc0e175dbdf16ed36b",
+        "destinationLink": null,
+        "href": "e91-el-nino-rising-tides-and-prices",
+        "id": "6ae256965bc60e621d1890c8",
+        "insightType": "Podcast",
+        "largeThumbnailImage": null,
+        "mainSeriesLink": [
+          {
+            "seriesName": "Research @ Citi Podcast",
+            "seriesLink": "https://www.citigroup.com/global/insights/research-citi-podcasts"
+          }
+        ],
+        "podCastDuration": null,
+        "publishGmt": "2026-10-29T00:00:00.000+00:00",
+        "relatedType": null,
+        "source": null,
+        "summary": "Rob Rowe sits down with Arkady Gevorkyan to discuss all things El Niño: what it is, how a range of agricultural commodities could be affected, and what investors ought to watch for as events unfold.",
+        "tag": null,
+        "thumbnailImage": "68d2ed709400c51f2a8d8fc8",
+        "title": "E91: El Niño: Rising Tides and Prices",
+        "topic": "Global Markets and Economy",
+        "url": "https://www.citigroup.com/global/insights/e91-el-nino-rising-tides-and-prices",
+        "videoLink": "https://youtu.be/Eu8vaQlVlHM?si=EJyhFRZyXXHarYKZ",
+        "videoOnly": false
+      },
+      {
+        "attachment": "[{\"name\":\"Transcript\",\"link\":\"/rcs/citigpa/storage/public/Research-Citi-Markets-Edition-Transcript-10-26-26.pdf\",\"isPromptPopup\":false}]",
+        "bcmaTags": [
+          "research",
+          "government",
+          "markets",
+          "policy"
+        ],
+        "campaign": false,
+        "clientBusinessType": "CitiResearch",
+        "defaultImage": "6ae0b5d1466178d0c2edea29",
+        "destinationLink": null,
+        "href": "markets-edition-blue-wave-or-ripple-what-the-midterms-may-change",
+        "id": "6ae0b7c2adf2017b76ef3145",
+        "insightType": "Podcast",
+        "largeThumbnailImage": null,
+        "mainSeriesLink": [
+          {
+            "seriesName": "Research @ Citi Podcast",
+            "seriesLink": "https://www.citigroup.com/global/insights/research-citi-podcasts"
+          }
+        ],
+        "podCastDuration": null,
+        "publishGmt": "2026-10-27T00:00:00.000+00:00",
+        "relatedType": null,
+        "source": null,
+        "summary": "Scott Chronert and Daniel Tobon consider possible outcomes of the U.S. midterm elections, the potential effects on public policy and markets, and why a lot of today's uncertainties around key issues will likely be tomorrow's uncertainties as well.",
+        "tag": null,
+        "thumbnailImage": "68d2ed709400c51f2a8d8fc8",
+        "title": "Markets Edition: Blue Wave or Ripple? What the Midterms May Change",
+        "topic": "Global Markets and Economy",
+        "url": "https://www.citigroup.com/global/insights/markets-edition-blue-wave-or-ripple-what-the-midterms-may-change",
+        "videoLink": "https://youtu.be/GA1zTwEIVeM?si=vQ9J82ROWPRxkF1D",
+        "videoOnly": false
+      },
+      {
+        "attachment": "[{\"name\":\"Issue 10\",\"link\":\"https://www.citibank.com/icg/sa/flippingbook/2026/Global-Trustee-and-Fiduciary-Services-Bite-Sized-Issue-10-2026/\",\"isPromptPopup\":false},{\"name\":\"Transcript\",\"link\":\"/rcs/citigpa/storage/public/citi-services-bite-sized-issue-10-Podcast-Transcript.pdf\",\"isPromptPopup\":false}]",
+        "bcmaTags": [
+          "services",
+          "investor-services",
+          "regulations",
+          "government",
+          "international-markets"
+        ],
+        "campaign": false,
+        "clientBusinessType": "SecuritiesServices",
+        "defaultImage": "6adba349039bc8fffded708c",
+        "destinationLink": null,
+        "href": "global-trustee-and-fiduciary-services-bite-sized-issue-10-october-2026",
+        "id": "6adba6b5c21e291164b3aa7a",
+        "insightType": "Podcast",
+        "largeThumbnailImage": null,
+        "mainSeriesLink": [
+          {
+            "seriesName": "Global Trustee and Fiduciary Services Bite-Sized",
+            "seriesLink": "https://www.citigroup.com/global/insights/global-trustee-and-fiduciary-services-bite-sized"
+          }
+        ],
+        "podCastDuration": null,
+        "publishGmt": "2026-10-26T00:00:00.000+00:00",
+        "relatedType": null,
+        "source": null,
+        "summary": "Amanda Hale, Andrew Newson and Matthew Cherrill, of Citi’s Global Trustee & Fiduciary Services, sit down to discuss the latest regulatory highlights.",
+        "tag": null,
+        "thumbnailImage": "6adba349039bc8fffded708c",
+        "title": "Global Trustee and Fiduciary Services Bite-Sized Issue 10, October 2026",
+        "topic": "Business Strategies",
+        "url": "https://www.citigroup.com/global/insights/global-trustee-and-fiduciary-services-bite-sized-issue-10-october-2026",
+        "videoLink": "https://youtu.be/UKIXSf15PbI",
+        "videoOnly": false
+      },
+      {
+        "attachment": "[{\"name\":\"Transcript\",\"link\":\" /rcs/citigpa/storage/public/EP3-Industry-Perspectives-Podcast-Transcript.pdf\",\"isPromptPopup\":false}]",
+        "bcmaTags": [
+          "services",
+          "investor-services",
+          "regulations",
+          "geopolitics",
+          "government",
+          "international-markets",
+          "macroeconomics"
+        ],
+        "campaign": false,
+        "clientBusinessType": "SecuritiesServices",
+        "defaultImage": "6aec7f89829c5fe00b67ab39",
+        "destinationLink": null,
+        "href": "industry-perspectives-episode-3",
+        "id": "6ad8ce2b039bc8fffded56ea",
+        "insightType": "Podcast",
+        "largeThumbnailImage": null,
+        "mainSeriesLink": [
+          {
+            "seriesName": "Industry Perspectives",
+            "seriesLink": "https://www.citigroup.com/global/insights/industry-perspectives"
+          }
+        ],
+        "podCastDuration": null,
+        "publishGmt": "2026-10-22T00:00:00.000+00:00",
+        "relatedType": null,
+        "source": null,
+        "summary": "Episode 3: GROWTH – Conflicts, Supply Chains and Resilience",
+        "tag": null,
+        "thumbnailImage": "6ad8d83aac8cf5a20b5c14fc",
+        "title": "Industry Perspectives Episode 3",
+        "topic": "Global Markets and Economy",
+        "url": "https://www.citigroup.com/global/insights/industry-perspectives-episode-3",
+        "videoLink": "https://www.youtube.com/watch?v=NT2mZqP-gdM",
+        "videoOnly": false
+      }
+    ],
+    "empty": false,
+    "first": false,
+    "last": false,
+    "number": 1,
+    "numberOfElements": 9,
+    "pageable": {
+      "offset": 9,
+      "pageNumber": 1,
+      "pageSize": 9,
+      "paged": true,
+      "sort": {
+        "empty": true,
+        "sorted": false,
+        "unsorted": true
+      },
+      "unpaged": false
+    },
+    "size": 9,
+    "sort": {
+      "empty": true,
+      "sorted": false,
+      "unsorted": true
+    },
+    "totalElements": 19,
+    "totalPages": 3
+  },
+  "isShow": 0,
+  "msg": "success",
+  "success": 1
+}

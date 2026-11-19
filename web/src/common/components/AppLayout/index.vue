@@ -40,7 +40,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", focusSearch))
       </RouterLink>
       <nav class="terminal-tabs">
         <RouterLink v-for="item in menuRoutes" :key="item.path" :to="item.path" active-class="active">
-          {{ item.name === 'home' ? '事件研究' : item.meta.title }}
+          {{ item.name === 'home' ? '新闻分析' : item.meta.title }}
         </RouterLink>
       </nav>
       <div class="terminal-account">
@@ -53,7 +53,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", focusSearch))
     </header>
     <div class="terminal-body">
       <aside class="terminal-rail">
-        <RouterLink v-for="(item, i) in menuRoutes" :key="item.path" :to="item.path" :title="item.name === 'home' ? '新闻与事件研究' : item.meta.title" active-class="active">
+        <RouterLink v-for="(item, i) in menuRoutes" :key="item.path" :to="item.path" :title="item.name === 'home' ? '单篇新闻分析与报告配置' : item.meta.title" active-class="active">
           <el-icon><component :is="icons[i]" /></el-icon>
         </RouterLink><el-popover title="快捷键" trigger="click" width="220">
           <template #reference>
@@ -68,7 +68,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", focusSearch))
       </main>
     </div>
     <footer class="terminal-footer">
-      <span><i /> AlphaPulse · {{ route.name === 'home' ? '新闻与事件研究' : route.meta.title }}</span><span>原始信息 · 证据核验 · 持续研究</span>
+      <span><i /> AlphaPulse · {{ route.name === 'home' ? '单篇新闻分析' : route.meta.title }}</span><span>原始信息 · 证据核验 · 持续研究</span>
     </footer>
   </div>
 </template>

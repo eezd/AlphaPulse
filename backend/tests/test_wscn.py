@@ -4,7 +4,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from scrapy.http import Request, TextResponse
+from scrapy.http import TextResponse
 
 
 @pytest.fixture
@@ -63,20 +63,15 @@ def test_historical_paid_error_keeps_list_summary_and_both_raw_responses(wscn, m
     assert "50000" in caplog.text and "内部错误" in caplog.text and "仅保存列表公开摘要" in caplog.text
 
 
-@pytest.mark.parametrize("handler", ["article_list", "article_detail", "live_list"])
+@pytest.mark.parametrize("handler", ["article_list", "article_detail"])
 def test_http_200_business_error_reports_upstream_cause(wscn, monkeypatch, handler):
-    from alphapulse.crawler.spiders.wscn import WscnLiveSpider
-
     async def check():
         if handler == "article_detail":
             request = await detail_request(wscn, monkeypatch, history=False)
             callback = wscn.parse_detail
-        elif handler == "article_list":
+        else:
             request = wscn.list_request("", 1)
             callback = wscn.parse_list
-        else:
-            request = Request("https://example.invalid/live")
-            callback = WscnLiveSpider().parse_list
         response = json_response(request, {"code": 50000, "message": "内部错误, 请稍后重试", "data": {}}, 42)
         with pytest.raises(ValueError, match="code=50000.*内部错误"):
             _ = [item async for item in callback(response)]

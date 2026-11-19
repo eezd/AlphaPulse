@@ -13,7 +13,8 @@ CONTROL_CHANNEL = f"{KEY_PREFIX}ctl:crawler"
 STATUS_KEY = f"{KEY_PREFIX}crawler:status"
 # Sources whose list endpoints support historical pagination.
 from alphapulse.core.us_news import SOURCES as US_SOURCES
-HISTORY_SOURCES = ("wscn_live", "wscn_news", *US_SOURCES)
+from alphapulse.core.research_sources import HISTORY_SOURCES as RESEARCH_HISTORY_SOURCES
+HISTORY_SOURCES = ("wscn_news", *US_SOURCES, *RESEARCH_HISTORY_SOURCES)
 
 
 def start_urls_key(source_code: str) -> str:

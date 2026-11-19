@@ -553,8 +553,8 @@ class CalendarWorker:
                 EconomicRelease.source != "jin10",
                 EconomicRelease.schedule_status == "scheduled", EconomicRelease.scheduled_at <= now,
                 EconomicRelease.scheduled_at >= now - timedelta(days=HISTORY_DAYS), EconomicRelease.next_check_at <= now,
-            ).order_by(EconomicRelease.scheduled_at.desc()).limit(8)))
-        # 少量同时发布的不同报告独立获取，历史修订不阻塞当期公布。
+            ).order_by(EconomicRelease.scheduled_at.desc()).limit(2)))
+        # 结果事务持有连接时，原始响应还需独立连接；为采集和日程写入保留池容量。
         self.poll_cache = {}
         try:
             await asyncio.gather(*(self.poll_one(id_) for id_ in ids))

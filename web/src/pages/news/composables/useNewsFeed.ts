@@ -1,4 +1,4 @@
-import type { NewsBrief, NewsEvent, NewsQuery } from "@@/apis/news/type"
+import type { ContentStatus, NewsBrief, NewsEvent, NewsQuery } from "@@/apis/news/type"
 import { bookmarkNewsApi, listNewsApi, subscribeNewsApi } from "@@/apis/news"
 import { useSessionScope } from "@@/composables/useSessionScope"
 import { useSourceNames } from "@@/composables/useSourceNames"
@@ -10,6 +10,9 @@ export function useNewsFeed() {
   const sourceNames = useSourceNames()
   const filters = reactive({
     source: [] as string[],
+    research_only: false,
+    author: "",
+    content_status: "" as ContentStatus | "",
     q: "",
     processing_state: "",
     bookmarked: false,
@@ -35,6 +38,9 @@ export function useNewsFeed() {
 
   function query(): NewsQuery {
     return {
+      research_only: filters.research_only,
+      author: filters.author || undefined,
+      content_status: filters.content_status || undefined,
       source: filters.source.length ? filters.source : undefined,
       q: filters.q || undefined,
       processing_state: filters.processing_state || undefined,
@@ -111,9 +117,9 @@ export function useNewsFeed() {
       for (const item of items.value) {
         const current = latest.get(item.id)
         if (current?.revision_no === item.revision_no) {
-          item.risk = current.risk
+          item.analysis = current.analysis
+          item.analysis_admission = current.analysis_admission
           item.keywords = current.keywords
-          item.events = current.events
         }
       }
       riskFailed.value = false
@@ -141,7 +147,7 @@ export function useNewsFeed() {
   onMounted(load)
   onMounted(() => {
     timer = setInterval(() => {
-      if (!document.hidden && (filters.processing_state || items.value.some(item => item.risk?.state !== "done"))) void refreshRisk()
+      if (!document.hidden && (filters.processing_state || items.value.some(item => item.analysis_admission?.mode !== "collect_only" && item.analysis?.state !== "done"))) void refreshRisk()
     }, 15000)
   })
   onBeforeUnmount(() => {

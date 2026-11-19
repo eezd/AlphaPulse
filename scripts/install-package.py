@@ -14,7 +14,7 @@ if metadata['platform'] != system+'/'+arch:
     raise SystemExit('Package platform does not match this machine')
 roles = {'api': ['uvicorn', 'alphapulse.api.main:app', '--host', '127.0.0.1', '--port', '21005'],
          'crawler': ['alphapulse.crawler.manager'], 'market': ['alphapulse.market.worker'],
-         'calendar': ['alphapulse.calendar.worker'], 'news-risk': ['alphapulse.news_research.worker'],
+         'calendar': ['alphapulse.calendar.worker'], 'news-risk': ['alphapulse.briefings.worker'],
          'jin10-calendar': ['alphapulse.calendar.jin10_worker']}
 if sys.argv[1:] == ['install']:
     subprocess.run(['uv', 'sync', '--locked', '--no-dev', '--no-editable', '--python', '3.13'], cwd=root/'backend', check=True)

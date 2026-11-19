@@ -11,7 +11,6 @@ from alphapulse.core.db import SessionLocal, engine
 from alphapulse.core.redis import redis
 from alphapulse.core.remove_trading import cleanup
 from alphapulse.models import AiProvider, ChatMessage, ChatSession, ContextVersion, MarketSymbol, NewsItem, SkillNode, SkillVersion
-from alphapulse.news_research.models import Event, Membership, Package, Version
 
 TABLES = ('trading_orders', 'trading_events', 'trading_fills', 'trading_symbols',
           'trading_credentials', 'trading_account', 'trading_analyses', 'news_signals')
@@ -41,7 +40,7 @@ async def fingerprints(connection):
 
 async def main():
     assert os.environ['DATABASE_URL'].startswith('postgresql+asyncpg://ci:ci-only@ap-ci-')
-    assert os.environ['DATABASE_URL'].endswith('/ci')
+    assert os.environ['DATABASE_URL'].split('?', 1)[0].endswith('/ci')
     try:
         migrate('upgrade', 'ef6789012345')
         async with engine.connect() as connection:
@@ -60,11 +59,10 @@ async def main():
             await session.flush()
             session.add(ChatMessage(id=IDENTITY, session_id=IDENTITY, provider_id=IDENTITY, role='user', content={'text': '保留消息'}))
             session.add(SkillVersion(id=IDENTITY, skill_id=IDENTITY, version_no=1, source='user', content='保留规则'))
-            session.add(Package(id=IDENTITY, news_id=IDENTITY, content_hash='c' * 64, state='done', keywords=[{'canonical': '保留标签'}]))
-            session.add(Event(id=IDENTITY, title='保留事件', state='done', result={'summary': '保留结论'}))
-            await session.flush()
-            session.add(Membership(event_id=IDENTITY, package_id=IDENTITY, evidence='Original', reason='保留', change_kind='new_fact'))
-            session.add(Version(id=IDENTITY, event_id=IDENTITY, revision=1, state='done', input={}, output={'summary': '保留版本'}, rules={}))
+            await session.execute(text("INSERT INTO news_research_packages (id,news_id,content_hash,state,keywords) VALUES (:id,:id,:hash,'done','[]')"), {'id': IDENTITY, 'hash': 'c' * 64})
+            await session.execute(text("INSERT INTO news_research_events (id,title,tags,revision,state) VALUES (:id,'保留事件','[]',1,'done')"), {'id': IDENTITY})
+            await session.execute(text("INSERT INTO news_research_memberships (event_id,package_id,evidence,reason,change_kind) VALUES (:id,:id,'Original','保留','new_fact')"), {'id': IDENTITY})
+            await session.execute(text("INSERT INTO news_research_versions (id,event_id,revision,state,input,output,rules,evidence) VALUES (:id,:id,1,'done','{}','{}','{}','[]')"), {'id': IDENTITY})
             await session.commit()
         async with engine.begin() as connection:
             metadata = MetaData()
@@ -101,7 +99,7 @@ async def main():
                 await connection.execute(table.insert().values(**values))
                 assert await connection.scalar(text('SELECT count(*) FROM ' + table.name)) > 0
             before = await fingerprints(connection)
-        migrate('upgrade', 'head')
+        migrate('upgrade', 'f07890123456')
         async with engine.connect() as connection:
             for table in TABLES:
                 assert await connection.scalar(text('SELECT to_regclass(:name)'), {'name': table}) is None

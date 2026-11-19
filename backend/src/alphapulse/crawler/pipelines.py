@@ -6,6 +6,7 @@ from scrapy.crawler import Crawler
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from alphapulse.core.research_sources import SOURCES as RESEARCH_SOURCES
 from alphapulse.crawler.content_policy import clean_html
 from alphapulse.core.db import SessionLocal
 from alphapulse.crawler.spiders.base import html_to_text
@@ -58,6 +59,16 @@ class NewsPipeline:
                 )
                 # 插入成功取新行；冲突说明另一处刚写入，按已存在条目走比较/修订流程
                 news = await session.scalar(locked)
+            if (inserted_id is None and item['source_code'] in RESEARCH_SOURCES
+                    and news.extra.get('research', {}).get('content_status') == 'full'
+                    and item['extra'].get('research', {}).get('content_status') != 'full'):
+                # 保留已取得的全文与署名，只记录最近访问状态；不制造正文修订。
+                news.extra = {**news.extra, 'research': {**news.extra['research'],
+                    'access_status': item['extra']['research']['access_status']}}
+                news.last_seen_at = func.now()
+                await session.commit()
+                spider.run.items_seen += 1
+                return item
             if inserted_id is None and item["extra"].get("content_scope") == "partial" and news.extra.get("content_scope") == "article":
                 return item
             if inserted_id is not None:
