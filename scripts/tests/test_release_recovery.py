@@ -378,6 +378,8 @@ class ArtifactTests(unittest.TestCase):
                         archive.addfile(member, io.BytesIO(content))
             def process(command, **kwargs):
                 self.assertFalse((cache/'checkpoint.json').exists())
+                if command[1].endswith(('package.py', 'smoke-release.py')):
+                    self.assertEqual(command[0], sys.executable)
                 if command[1].endswith('package.py'):
                     self.assertNotIn('GITEA_RELEASE_TOKEN', kwargs['env'])
                     self.assertNotIn('GITHUB_RELEASE_TOKEN', kwargs['env'])

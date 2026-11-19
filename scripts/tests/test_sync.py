@@ -66,7 +66,8 @@ class SyncTests(unittest.TestCase):
         self.git('switch', 'main')
         self.git('tag', 'legacy-docs', self.first)
         self.git('tag', 'internal-docs', self.internal)
-        self.git('tag', '-a', '20261109-ffffffff', '-m', 'pending')
+        self.git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+                 'tag', '-a', '20261109-ffffffff', '-m', 'pending')
         self.git('tag', '20261109-eeeeeeee')
         self.git('tag', 'preview')
         self.git('tag', '20261109-dddddddd')

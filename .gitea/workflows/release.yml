@@ -46,6 +46,7 @@ jobs:
           apt-get install -y docker-ce-cli docker-buildx-plugin
           curl -LsSf https://astral.sh/uv/0.13.6/install.sh | sh
           cp /root/.local/bin/uv /usr/local/bin/uv
+          uv python install 3.13 --no-bin
           corepack enable
           corepack prepare pnpm@12.11.2 --activate
       - name: Build and publish fixed source once
@@ -59,7 +60,7 @@ jobs:
           DOCKER_CONFIG: /tmp/alphapulse-release-auth
         run: |
           mkdir -m 700 -p "$DOCKER_CONFIG"
-          python3 scripts/manual-release.py
+          uv run --no-project --managed-python --no-python-downloads --python 3.13 python scripts/manual-release.py
       - name: Clean only this run
         if: always()
         env:

@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tarfile
 import time
 import urllib.parse
@@ -156,7 +157,7 @@ def prepare_artifacts(cache, record):
         source = Path('source').resolve()
         env = {k:v for k,v in os.environ.items() if k in ('PATH', 'HOME', 'TMPDIR', 'HOSTNAME')}
         env.update(ALPHAPULSE_BUILD_VERSION=version, ALPHAPULSE_BUILD_SHA=commit, CI_RUN_ID=os.environ['CI_RUN_ID'])
-        subprocess.run(['python3', str(CONTROL/'scripts/package.py')], cwd=source, env=env, check=True)
+        subprocess.run([sys.executable, str(CONTROL/'scripts/package.py')], cwd=source, env=env, check=True)
         import shutil
         # Copy only the expected originals; incomplete copies remain unconfirmed.
         metadata = json.loads((source/'downloads/build.json').read_text())
@@ -187,7 +188,7 @@ def prepare_artifacts(cache, record):
     local = 'alphapulse-release-check:'+version
     try:
         run('docker', 'load', '--input', str(oci))
-        subprocess.run(['python3', str(CONTROL/'scripts/smoke-release.py'), local], check=True)
+        subprocess.run([sys.executable, str(CONTROL/'scripts/smoke-release.py'), local], check=True)
     finally:
         subprocess.run(['docker', 'image', 'rm', local], check=False)
     platforms = {f'{item["platform"]["os"]}/{item["platform"]["architecture"]}': item['digest']
