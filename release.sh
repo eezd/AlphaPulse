@@ -25,7 +25,7 @@ API_URL = 'https://git.134333.xyz/api/v1'  # 例如 https://git.example.com/api/
 OWNER = 'eezd'
 REPO = 'AlphaPulse'
 WORKFLOW = 'release.yml'  # 例如 release.yml
-GITEA_DOWNLOAD_HOSTS = ()  # 如有对象存储，填入已核实的 HTTPS authority；不发送令牌
+FORGEJO_DOWNLOAD_HOSTS = ()  # 如有对象存储，填入已核实的 HTTPS authority；不发送令牌
 WAIT_SECONDS = 7200
 POLL_SECONDS = 5
 
@@ -50,7 +50,7 @@ opener = urllib.request.build_opener(NoRedirect)
 def request(url, token, payload=None, *, phase, download_hosts=()):
     headers = {'Authorization': 'token ' + token,
                'Accept': 'application/octet-stream' if download_hosts else 'application/json',
-               'User-Agent': 'gitea-init-release-client'}
+               'User-Agent': 'git-init-release-client'}
     data = None
     if payload is not None:
         data = json.dumps(payload).encode()
@@ -95,8 +95,8 @@ def release_asset(release, name, origin, token):
     url = urllib.parse.urljoin(API_URL, matches[0]['browser_download_url'])
     target = urllib.parse.urlsplit(url)
     if (target.scheme, target.netloc) != (origin.scheme, origin.netloc):
-        fail(name + ' 下载地址不属于已配置 Gitea；拒绝向其他地址发送凭据')
-    return request(url, token, phase='下载 ' + name, download_hosts=(origin.netloc, *GITEA_DOWNLOAD_HOSTS))
+        fail(name + ' 下载地址不属于已配置 Forgejo；拒绝向其他地址发送凭据')
+    return request(url, token, phase='下载 ' + name, download_hosts=(origin.netloc, *FORGEJO_DOWNLOAD_HOSTS))
 
 
 def main():
@@ -104,10 +104,10 @@ def main():
         fail('发布模板尚未配置仓库和工作流')
     parsed = urllib.parse.urlsplit(API_URL)
     if parsed.scheme != 'https' or not parsed.netloc or parsed.username or parsed.password:
-        fail('Gitea API 地址必须为不含凭据的 HTTPS 地址')
-    token = os.environ.get('GITEA_TOKEN')
+        fail('Forgejo API 地址必须为不含凭据的 HTTPS 地址')
+    token = os.environ.get('FORGEJO_TOKEN')
     if not token:
-        fail('缺少 GITEA_TOKEN；请通过现有凭据机制或环境变量提供')
+        fail('缺少 FORGEJO_TOKEN；请通过现有凭据机制或环境变量提供')
     branch = sys.argv[1]
     if (branch.startswith(('-', '/')) or branch.endswith('/') or
             any(ord(c) < 32 for c in branch)):
@@ -125,17 +125,17 @@ def main():
     request_id = str(uuid.uuid4())
     print(f'来源分支：{branch}\n完整 SHA：{sha}\n版本：{version}\n请求 ID：{request_id}', flush=True)
     details = request(base + '/actions/workflows/' + quote(WORKFLOW) +
-                      '/dispatches?return_run_details=true', token,
-                      {'ref': 'refs/heads/main', 'inputs': {
+                      '/dispatches', token,
+                      {'ref': 'refs/heads/main', 'return_run_info': True, 'inputs': {
                           'source_branch': branch, 'source_sha': sha, 'request_id': request_id}},
                       phase='调度发布工作流')
-    if (not isinstance(details, dict) or type(details.get('workflow_run_id')) is not int or
-            details['workflow_run_id'] <= 0):
-        fail('未取得唯一 run ID；任务可能已启动，请按请求 ID 核查，不要直接重复触发')
-    run_id = details['workflow_run_id']
+    if (not isinstance(details, dict) or type(details.get('id')) is not int or details['id'] <= 0 or
+            type(details.get('run_number')) is not int or details['run_number'] <= 0):
+        fail('未取得唯一 run ID 和仓库内序号；任务可能已启动，请按请求 ID 核查，不要直接重复触发')
+    run_id = details['id']
     run_api = base + '/actions/runs/' + str(run_id)
     web_base = API_URL.rstrip('/').removesuffix('/api/v1')
-    run_url = web_base + '/' + quote(OWNER) + '/' + quote(REPO) + '/actions/runs/' + str(run_id)
+    run_url = web_base + '/' + quote(OWNER) + '/' + quote(REPO) + '/actions/runs/' + str(details['run_number'])
     print('工作流：' + run_url, flush=True)
     deadline = time.monotonic() + WAIT_SECONDS
     while True:
@@ -145,7 +145,7 @@ def main():
             break
         if status in ('failure', 'cancelled', 'canceled', 'skipped', 'timed_out', 'action_required'):
             fail(f'发布未成功：{status}；查看 {run_url}')
-        if status not in ('queued', 'waiting', 'pending', 'running', 'in_progress', 'completed'):
+        if status not in ('queued', 'waiting', 'pending', 'running', 'in_progress', 'completed', 'blocked', 'unknown'):
             fail(f'工作流返回无法识别的状态，请查看 {run_url}')
         if time.monotonic() >= deadline:
             fail('等待超时，未取消远端发布；请查询已有任务：' + run_url)
@@ -161,9 +161,9 @@ def main():
         if not isinstance(metadata, dict) or metadata.get('source_sha') != sha or metadata.get('version') != version:
             fail('发布元数据的版本或 SHA 不匹配')
     if completion.get('build_sha256') != hashlib.sha256(build_bytes).hexdigest():
-        fail('Gitea 发布完成记录中的 build.json SHA256 不匹配')
-    print('Gitea Release：' + web_base + '/' + quote(OWNER) + '/' + quote(REPO) + '/releases/tag/' + version)
-    print('Gitea 发布成功；GitHub 尚未由本命令同步；本地 systemd 服务未更新')
+        fail('Forgejo 发布完成记录中的 build.json SHA256 不匹配')
+    print('Forgejo Release：' + web_base + '/' + quote(OWNER) + '/' + quote(REPO) + '/releases/tag/' + version)
+    print('Forgejo 发布成功；GitHub 尚未由本命令同步；未执行本机部署')
 
 
 try:

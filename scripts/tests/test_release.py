@@ -67,8 +67,8 @@ class ClientTests(unittest.TestCase):
     def test_missing_account_secret_fails_before_network_access(self):
         import os
         import release
-        with patch.dict(os.environ, {'GITEA_RELEASE_TOKEN': ''}), patch.object(release, 'API') as api:
-            with self.assertRaisesRegex(ValueError, 'ALL_GITEA_TOKEN'):
+        with patch.dict(os.environ, {'FORGEJO_RELEASE_TOKEN': ''}), patch.object(release, 'API') as api:
+            with self.assertRaisesRegex(ValueError, 'FORGEJO_RELEASE_TOKEN'):
                 release.client()
             api.assert_not_called()
 
@@ -81,13 +81,13 @@ class ClientTests(unittest.TestCase):
         import os
         client=Path(__file__).resolve().parents[2]/'release.sh'
         with tempfile.TemporaryDirectory() as d:
-            env=dict(os.environ);env.pop('GITEA_TOKEN',None)
+            env=dict(os.environ);env.pop('FORGEJO_TOKEN',None)
             result=subprocess.run(['bash',str(client),'feature/example'],cwd=d,env=env,capture_output=True,text=True)
             self.assertEqual(result.returncode,1)
-            self.assertIn('GITEA_TOKEN',result.stderr)
+            self.assertIn('FORGEJO_TOKEN',result.stderr)
 
 class RemoteClientTests(unittest.TestCase):
-    def invoke_client(self, *, bad_sha=False, bad_hash=False, draft=False, dispatch_error=False):
+    def invoke_client(self, *, bad_sha=False, bad_hash=False, draft=False, dispatch_error=False, statuses=None):
         import contextlib,hashlib,io,json,os,urllib.error,urllib.request
         client=(Path(__file__).resolve().parents[2]/'release.sh').read_text().split("<<'PY'\n",1)[1].rsplit('\nPY',1)[0]
         sha='a'*40;version='20261109-'+sha[:8];calls=[]
@@ -99,14 +99,15 @@ class RemoteClientTests(unittest.TestCase):
             def __enter__(self):return self
             def __exit__(self,*args):return False
             def read(self):return json.dumps(self.value).encode()
+        pending = iter(statuses or ['success'])
         def open_request(request,**kw):
             url=request.full_url;calls.append(request)
             if '/branches/' in url:return Response({'commit':{'id':sha}})
             if '/git/commits/' in url:return Response({'commit':{'committer':{'date':'2026-11-09T10:00:00Z'}}})
-            if '/dispatches?' in url:
+            if '/dispatches' in url:
                 if dispatch_error:raise urllib.error.URLError('uncertain post')
-                return Response({'workflow_run_id':123})
-            if '/actions/runs/' in url:return Response({'status':'completed','conclusion':'success'})
+                return Response({'id':123, 'run_number':7})
+            if '/actions/runs/' in url:return Response({'status': next(pending)})
             if '/releases/tags/' in url:
                 return Response({'tag_name': version, 'draft': draft, 'prerelease': False, 'assets': [
                     {'name': name, 'browser_download_url': 'https://git.134333.xyz/download/'+name}
@@ -117,7 +118,7 @@ class RemoteClientTests(unittest.TestCase):
         from unittest.mock import Mock
         opener=Mock();opener.open.side_effect=open_request
         output=io.StringIO();code=0
-        with patch.object(sys,'argv',['release.sh','feature/demo']),patch.dict(os.environ,{'GITEA_TOKEN':'fixture-only'}),patch.object(urllib.request,'build_opener',return_value=opener),contextlib.redirect_stdout(output),contextlib.redirect_stderr(output):
+        with patch.object(sys,'argv',['release.sh','feature/demo']),patch.dict(os.environ,{'FORGEJO_TOKEN':'fixture-only'}),patch.object(urllib.request,'build_opener',return_value=opener),patch('time.sleep'),contextlib.redirect_stdout(output),contextlib.redirect_stderr(output):
             try:exec(compile(client,'release-client','exec'),{})
             except SystemExit as error:code=error.code
         return code,calls,output.getvalue()
@@ -129,8 +130,16 @@ class RemoteClientTests(unittest.TestCase):
         self.assertEqual(len(posts),1)
         body=json.loads(posts[0].data)
         self.assertEqual(body['ref'],'refs/heads/main')
+        self.assertTrue(body['return_run_info'])
+        self.assertTrue(any('/actions/runs/123' in r.full_url for r in calls))
+        self.assertIn('/actions/runs/7', output)
         self.assertEqual(body['inputs']['source_branch'],'feature/demo')
         self.assertEqual(body['inputs']['source_sha'],'a'*40)
+    def test_forgejo_pending_statuses_are_polled_until_success(self):
+        code, calls, output = self.invoke_client(statuses=['unknown', 'waiting', 'blocked', 'running', 'success'])
+        self.assertEqual(code, 0, output)
+        self.assertEqual(sum('/actions/runs/' in r.full_url for r in calls), 5)
+
     def test_draft_release_cannot_succeed(self):self.assertEqual(self.invoke_client(draft=True)[0],1)
     def test_wrong_metadata_sha_cannot_succeed(self):self.assertEqual(self.invoke_client(bad_sha=True)[0],1)
     def test_wrong_completion_hash_cannot_succeed(self):self.assertEqual(self.invoke_client(bad_hash=True)[0],1)

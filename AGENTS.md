@@ -88,4 +88,4 @@
 - Redis DB 14 与其他应用共用，只操作 `ap:*`，禁止 FLUSHDB/FLUSHALL。测试隔离数据库、Redis、模型和交易 I/O，不读取生产凭据，不 Reset 用户 Chat 或改真实 Skills；不自动启动采集或交易。
 - 生产部署、重启、数据迁移执行、提交和推送均需本任务单独授权；不新增项目定时备份。本文件是唯一规范来源，目前没有其他工具规则入口；以后新增入口应链接本文件。
 
-- CI/CD：Gitea 为唯一源，`main` 为默认分支，`dev` 为开发分支。普通 push/TAG 不构建、不部署、不发版、不镜像；原生维护由操作者显式执行 `start.sh`/`stop.sh`，共用 `runtime/.deploy.lock`，数据库迁移独立授权。`release.sh <branch>` 固定 Gitea 分支的提交并仅手动发布到 Gitea；`sysnc-github.sh` 由操作者另行运行，只同步获准的 `main`/`dev` 及通过验收的产物。详见 `deploy/README.md`。
+- CI/CD：Forgejo 为唯一源，`main` 为默认分支，`dev` 为开发分支。普通 push/TAG 不构建、不部署、不发版、不镜像；工作流仅允许 `workflow_dispatch`。原生维护由操作者显式执行 `start.sh`/`stop.sh`，共用 `runtime/.deploy.lock`，数据库迁移独立授权。`release.sh <branch>` 固定 Forgejo 分支的提交，从可信 main 调度，仅手动发布到 Forgejo；构建和原件均为任务临时文件，不使用宿主挂载、Generic Package 或恢复检查点。完成版只校验复用，失败版只有证明同一 SHA/分支及原任务已终止后才能精确清理重建。`sysnc-github.sh` 由操作者另行运行，只同步获准的 `main`/`dev` 及通过验收的产物。共享 Runner 的注册及配置、本机部署、真实发布和 GitHub 写入仍需分别授权。详见 `deploy/README.md`。

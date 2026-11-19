@@ -17,17 +17,15 @@ concurrency:
   cancel-in-progress: false
 jobs:
   release:
-    if: gitea.ref == 'refs/heads/main'
+    if: forgejo.ref == 'refs/heads/main'
     runs-on: docker
     timeout-minutes: 115
     container:
       image: node:24-bookworm
-      volumes:
-        - /docker/gitea/mirrors/AlphaPulse:/docker/gitea/mirrors/AlphaPulse
     steps:
       - uses: https://github.com/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: main
+          ref: ${{ forgejo.sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: https://github.com/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -53,10 +51,12 @@ jobs:
         env:
           SOURCE_BRANCH: ${{ inputs.source_branch }}
           SOURCE_SHA: ${{ inputs.source_sha }}
-          GITEA_API_URL: ${{ gitea.server_url }}/api/v1
-          GITEA_RELEASE_TOKEN: ${{ secrets.ALL_GITEA_TOKEN }}
-          CI_RUN_ID: ${{ gitea.run_id }}
-          CI_RESOURCE_LABEL: io.alphapulse.ci.run=release-${{ gitea.run_id }}-${{ gitea.run_attempt }}
+          CONTROL_REF: ${{ forgejo.ref }}
+          REQUEST_ID: ${{ inputs.request_id }}
+          FORGEJO_API_URL: ${{ forgejo.server_url }}/api/v1
+          FORGEJO_RELEASE_TOKEN: ${{ secrets.FORGEJO_RELEASE_TOKEN }}
+          CI_RUN_ID: ${{ forgejo.run_id }}
+          CI_RESOURCE_LABEL: io.alphapulse.ci.run=release-${{ forgejo.run_id }}-${{ forgejo.run_attempt }}
           DOCKER_CONFIG: /tmp/alphapulse-release-auth
         run: |
           mkdir -m 700 -p "$DOCKER_CONFIG"
@@ -66,5 +66,5 @@ jobs:
         env:
           DOCKER_CONFIG: /tmp/alphapulse-release-auth
         run: |
-          docker buildx rm "alphapulse-release-${{ gitea.run_id }}" || true
+          docker buildx rm "alphapulse-release-${{ forgejo.run_id }}" || true
           rm -rf /tmp/alphapulse-release-auth

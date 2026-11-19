@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 仅在操作者显式运行时，从 Gitea 向 GitHub 同步。
+# 仅在操作者显式运行时，从 Forgejo 向 GitHub 同步。
 set -euo pipefail
 (( $# == 0 )) || { printf '用法：bash %s\n' "$0" >&2; exit 2; }
 command -v python3 >/dev/null || { printf '缺少命令：python3\n' >&2; exit 1; }
@@ -21,19 +21,19 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-GITEA_API = 'https://git.134333.xyz/api/v1'
-GITEA_OWNER = 'eezd'
-GITEA_REPO = 'AlphaPulse'
-GITEA_GIT = 'https://git.134333.xyz/eezd/AlphaPulse.git'
-GITEA_IMAGE = 'git.134333.xyz/eezd/alphapulse'  # 仓库路径，无 docker://、版本或摘要
+FORGEJO_API = 'https://git.134333.xyz/api/v1'
+FORGEJO_OWNER = 'eezd'
+FORGEJO_REPO = 'AlphaPulse'
+FORGEJO_GIT = 'https://git.134333.xyz/eezd/AlphaPulse.git'
+FORGEJO_IMAGE = 'git.134333.xyz/eezd/alphapulse'  # 仓库路径，无 docker://、版本或摘要
 GITHUB_OWNER = 'eezd'
 GITHUB_REPO = 'AlphaPulse'
 GITHUB_GIT = 'https://github.com/eezd/AlphaPulse.git'
 GITHUB_PRIVATE = 'false'  # true / false
-BRANCHES_JSON = r'''["main","dev"]'''
+BRANCHES_JSON = r'''["main", "dev"]'''
 BRANCHES = None  # 在 main 中解析已确认的分支范围
 USE_LFS = 'false'  # true / false，接入时检查整个纳入同步的历史
-GITEA_DOWNLOAD_HOSTS = ()  # 如有对象存储，填入已核实的 HTTPS authority；不发送令牌
+FORGEJO_DOWNLOAD_HOSTS = ()  # 如有对象存储，填入已核实的 HTTPS authority；不发送令牌
 GITHUB_DOWNLOAD_HOSTS = ('release-assets.githubusercontent.com', 'objects.githubusercontent.com')
 
 VERSION = re.compile(r'[0-9]{8}-[0-9a-f]{8}')
@@ -75,7 +75,7 @@ class API:
         self.opener = urllib.request.build_opener(NoRedirect)
 
     def open(self, url, phase, *, method='GET', data=None, headers=None, download=False):
-        headers = {'Authorization': self.auth, 'User-Agent': 'gitea-init-manual-sync',
+        headers = {'Authorization': self.auth, 'User-Agent': 'git-init-manual-sync',
                    'Accept': 'application/json', **(headers or {})}
         require(authority(url) == self.host or (method == 'POST' and
                 self.host == 'api.github.com' and authority(url) == 'uploads.github.com'),
@@ -137,9 +137,9 @@ class API:
                     return items
             page += 1
 
-    def gitea_asset(self, asset, path):
+    def forgejo_asset(self, asset, path):
         url = urllib.parse.urljoin(self.root + '/', asset['browser_download_url'])
-        return self.download(url, path, '下载 Gitea 附件')
+        return self.download(url, path, '下载 Forgejo 附件')
 
     def github_asset(self, asset, path):
         return self.download(f'{self.root}/releases/assets/{asset["id"]}', path, '下载 GitHub 附件')
@@ -181,7 +181,7 @@ def index(items, key, phase):
 
 def run(args, phase, *, cwd=None, allowed=(0,)):
     environment = {name: value for name, value in os.environ.items() if name not in
-                   ('GITEA_TOKEN', 'GITHUB_TOKEN', 'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR',
+                   ('FORGEJO_TOKEN', 'GITHUB_TOKEN', 'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR',
                     'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE')}
     environment.update(GIT_TERMINAL_PROMPT='0', LC_ALL='C')
     result = subprocess.run(args, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment)
@@ -193,15 +193,15 @@ class Snapshot:
     def __init__(self, directory):
         self.directory = directory
         self.git('init', '--bare', str(directory), phase='创建临时仓库')
-        self.git('remote', 'add', 'source', GITEA_GIT)
+        self.git('remote', 'add', 'source', FORGEJO_GIT)
         self.git('remote', 'add', 'destination', GITHUB_GIT)
         self.git('fetch', '--no-tags', 'source', 'refs/heads/*:refs/heads/*', 'refs/tags/*:refs/tags/*',
-                 phase='读取 Gitea 引用')
+                 phase='读取 Forgejo 引用')
         self.refs = self.parse(self.git('for-each-ref', '--format=%(objectname)%09%(refname)',
                                        'refs/heads', 'refs/tags').stdout)
         self.heads = {r: sha for r, sha in self.refs.items() if r.startswith('refs/heads/') and
                       (BRANCHES == ['*'] or r.removeprefix('refs/heads/') in BRANCHES)}
-        require('refs/heads/main' in self.heads, '同步范围或 Gitea 快照缺少 main')
+        require('refs/heads/main' in self.heads, '同步范围或 Forgejo 快照缺少 main')
 
     def git(self, *args, phase='读取 Git 快照', allowed=(0,)):
         # 不执行宿主全局钩子；所有 GitHub 写入均在显式同步阶段执行。
@@ -252,13 +252,14 @@ class Snapshot:
 
     def lfs(self, refs):
         require(shutil.which('git-lfs'), '缺少命令：git-lfs')
-        self.git('lfs', 'fetch', '--all', 'source', *refs, phase='下载 Gitea LFS 对象')
+        self.git('lfs', 'fetch', '--all', 'source', *refs, phase='下载 Forgejo LFS 对象')
         self.git('lfs', 'push', '--all', 'destination', *refs, phase='补齐 GitHub LFS 对象')
 
 
 def read_manifest(ref, authfile, *, allow_missing=False):
+    # Skopeo 1.18 can return 2 for a missing destination; classify the Registry error.
     result = run(['skopeo', 'inspect', '--raw', '--authfile', authfile, 'docker://' + ref],
-                 '读取 OCI 清单', allowed=(0, 1))
+                 '读取 OCI 清单', allowed=(0, 1, 2))
     if result.returncode != 0:
         # 首次复制时版本清单或整个包尚不存在；认证、限流等错误不视为缺失。
         if allow_missing and any(code in result.stderr.lower() for code in (b'manifest unknown', b'name unknown')):
@@ -286,7 +287,7 @@ def verify_image(ref, image, authfile, *, allow_missing=False):
 
 
 def package_names(tag):
-    return {f'{GITEA_REPO}_{tag}_{system}_{arch}.{extension}'
+    return {f'{FORGEJO_REPO}_{tag}_{system}_{arch}.{extension}'
             for system, extension in (('linux', 'tar.gz'), ('darwin', 'tar.gz'), ('windows', 'zip'))
             for arch in ('amd64', 'arm64')}
 
@@ -311,11 +312,11 @@ class Version:
         self.target_path = None
         self.title = release['name']
         self.body = release['body']
-        require(isinstance(self.title, str) and isinstance(self.body, str), 'Gitea Release 标题或正文无效')
-        assets = index(release['assets'], 'name', 'Gitea 附件')
+        require(isinstance(self.title, str) and isinstance(self.body, str), 'Forgejo Release 标题或正文无效')
+        assets = index(release['assets'], 'name', 'Forgejo 附件')
         require({BUILD, COMPLETE, SUMS} <= assets.keys(), '正式版本缺少发布元数据或验收证明')
-        build_hash = source.gitea_asset(assets[BUILD], self.path / BUILD)
-        source.gitea_asset(assets[COMPLETE], self.path / COMPLETE)
+        build_hash = source.forgejo_asset(assets[BUILD], self.path / BUILD)
+        source.forgejo_asset(assets[COMPLETE], self.path / COMPLETE)
         build = json.loads((self.path / BUILD).read_bytes())
         completion = json.loads((self.path / COMPLETE).read_bytes())
         self.sha = build['source_sha']
@@ -328,7 +329,7 @@ class Version:
         require(hashes.keys() == package_names(tag) and hashes.keys() <= assets.keys(), '六平台附件清单不匹配')
         self.hashes = {name: package['sha256'] for name, package in hashes.items()}
         require(all(HASH.fullmatch(value) for value in self.hashes.values()), '附件 SHA256 格式无效')
-        self.hashes[SUMS] = source.gitea_asset(assets[SUMS], self.path / SUMS)
+        self.hashes[SUMS] = source.forgejo_asset(assets[SUMS], self.path / SUMS)
         sums = {}
         for line in (self.path / SUMS).read_text().splitlines():
             match = re.fullmatch(r'([0-9a-f]{64}) [ *](.+)', line)
@@ -337,13 +338,13 @@ class Version:
         require(sums == {name: self.hashes[name] for name in hashes}, 'SHA256SUMS 与 build.json 不一致')
         self.hashes[BUILD] = build_hash
         self.image = build['image']
-        require(self.image['ref'] == GITEA_IMAGE + ':' + tag and
+        require(self.image['ref'] == FORGEJO_IMAGE + ':' + tag and
                 self.image['platforms'].keys() == set(PLATFORMS) and all(
                     digest.startswith('sha256:') and HASH.fullmatch(digest[7:])
                     for digest in [self.image['digest'], *self.image['platforms'].values()]),
                 'OCI 仓库、架构或摘要不符合固定发布契约')
         self.authfile = auth_file()
-        self.source_image = GITEA_IMAGE + '@' + self.image['digest']
+        self.source_image = FORGEJO_IMAGE + '@' + self.image['digest']
         self.target_image = f'ghcr.io/{GITHUB_OWNER.lower()}/{GITHUB_REPO.lower()}:{tag}'
         verify_image(self.image['ref'], self.image, self.authfile)
         self.image_exists = verify_image(self.target_image, self.image, self.authfile, allow_missing=True)
@@ -360,7 +361,7 @@ class Version:
                 self.missing.remove(name)
         for name in sorted(hashes):
             file = self.path / name if name in self.missing else None
-            require(source.gitea_asset(assets[name], file) == self.hashes[name], 'Gitea 附件 SHA256 不匹配：' + name)
+            require(source.forgejo_asset(assets[name], file) == self.hashes[name], 'Forgejo 附件 SHA256 不匹配：' + name)
 
     def check_release(self, release):
         require(release.get('tag_name') == self.tag and release.get('name') == self.title and
@@ -400,12 +401,12 @@ def sync(directory, source, target):
             settings.get('permissions', {}).get('push') is True, 'GitHub 目标、可见性或写权限与接入配置不符')
     require(target.json('/actions/permissions', '核对 GitHub Actions').get('enabled') is False,
             'GitHub Actions 尚未关闭，拒绝任何 GitHub 写入')
-    # Gitea 只向有 Release 写权限的令牌显示草稿；同时要求保留版本形状的裸 TAG 不外推。
-    require(source.json('', '读取 Gitea 仓库').get('permissions', {}).get('push') is True,
-            '请使用可查看 Gitea 草稿的仓库写权限令牌')
+    # Forgejo 只向有 Release 写权限的令牌显示草稿；同时要求保留版本形状的裸 TAG 不外推。
+    require(source.json('', '读取 Forgejo 仓库').get('permissions', {}).get('push') is True,
+            '请使用可查看 Forgejo 草稿的仓库写权限令牌')
     snapshot = Snapshot(directory / 'git')
     dest_refs = snapshot.target()
-    releases = index(source.pages('/releases', '读取 Gitea Release', size_key='limit'), 'tag_name', 'Gitea Release')
+    releases = index(source.pages('/releases', '读取 Forgejo Release', size_key='limit'), 'tag_name', 'Forgejo Release')
     target_releases = index(target.pages('/releases', '读取 GitHub Release', size_key='per_page'),
                             'tag_name', 'GitHub Release')
     refs = dict(snapshot.heads)
@@ -420,13 +421,13 @@ def sync(directory, source, target):
         if ref in snapshot.refs and not snapshot.in_scope(ref):
             print(f'跳过未获准公开的 Release：{tag!r}', flush=True)
             continue
-        asset_names = index(release['assets'], 'name', 'Gitea 附件')
+        asset_names = index(release['assets'], 'name', 'Forgejo 附件')
         if not VERSION.fullmatch(tag) or COMPLETE not in asset_names:
             gaps.append(tag)
             print(f'未同步历史或未验收正式版本（缺少适用完成证据）：{tag!r}', flush=True)
             continue
-        print(f'{tag}：预检 Gitea 原件与 GitHub 目标', flush=True)
-        require(ref in snapshot.refs, 'Gitea 正式版本缺少对应 TAG；请在发布结束后重跑')
+        print(f'{tag}：预检 Forgejo 原件与 GitHub 目标', flush=True)
+        require(ref in snapshot.refs, 'Forgejo 正式版本缺少对应 TAG；请在发布结束后重跑')
         require(tag not in target_releases or dest_refs.get(ref) == snapshot.refs[ref],
                 'GitHub 已有同名 Release，但 TAG 缺失或冲突：' + tag)
         versions.append(Version(tag, release, directory, source, target, snapshot, target_releases.get(tag)))
@@ -458,7 +459,7 @@ def sync(directory, source, target):
 
 def main(project):
     global BRANCHES
-    values = (GITEA_API, GITEA_OWNER, GITEA_REPO, GITEA_GIT, GITEA_IMAGE, GITHUB_OWNER, GITHUB_REPO, GITHUB_GIT,
+    values = (FORGEJO_API, FORGEJO_OWNER, FORGEJO_REPO, FORGEJO_GIT, FORGEJO_IMAGE, GITHUB_OWNER, GITHUB_REPO, GITHUB_GIT,
               BRANCHES_JSON)
     require(not any('@@' in value for value in values) and GITHUB_PRIVATE in ('true', 'false') and
             USE_LFS in ('true', 'false'), '同步模板尚未配置')
@@ -466,8 +467,8 @@ def main(project):
     require(isinstance(BRANCHES, list) and all(isinstance(branch, str) and branch for branch in BRANCHES) and
             (BRANCHES == ['*'] or ('main' in BRANCHES and '*' not in BRANCHES)), '分支同步范围无效')
     require(all(re.fullmatch(r'[A-Za-z0-9_.-]+', name) and name not in ('.', '..')
-                for name in (GITEA_OWNER, GITEA_REPO, GITHUB_OWNER, GITHUB_REPO)), '仓库名称配置无效')
-    for url in (GITEA_GIT, GITHUB_GIT):
+                for name in (FORGEJO_OWNER, FORGEJO_REPO, GITHUB_OWNER, GITHUB_REPO)), '仓库名称配置无效')
+    for url in (FORGEJO_GIT, GITHUB_GIT):
         require(not url.startswith('-') and '::' not in url, 'Git 远端地址配置无效')
         if url.startswith('https://'):
             require(not urllib.parse.urlsplit(url).query, 'Git URL 不得携带查询凭据')
@@ -477,10 +478,10 @@ def main(project):
                     'Git URL 必须使用配置好的 SSH 或 HTTPS')
             if url.startswith('ssh://'):
                 require(urllib.parse.urlsplit(url).password is None, 'Git URL 不得携带密码')
-    gitea_token, github_token = os.environ.get('GITEA_TOKEN'), os.environ.get('GITHUB_TOKEN')
-    require(gitea_token and github_token, '请显式提供 GITEA_TOKEN 和 GITHUB_TOKEN')
-    source = API(f'{GITEA_API.rstrip("/")}/repos/{GITEA_OWNER}/{GITEA_REPO}',
-                 'token ' + gitea_token, GITEA_DOWNLOAD_HOSTS)
+    forgejo_token, github_token = os.environ.get('FORGEJO_TOKEN'), os.environ.get('GITHUB_TOKEN')
+    require(forgejo_token and github_token, '请显式提供 FORGEJO_TOKEN 和 GITHUB_TOKEN')
+    source = API(f'{FORGEJO_API.rstrip("/")}/repos/{FORGEJO_OWNER}/{FORGEJO_REPO}',
+                 'token ' + forgejo_token, FORGEJO_DOWNLOAD_HOSTS)
     target = API(f'https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}',
                  'Bearer ' + github_token, GITHUB_DOWNLOAD_HOSTS)
     require(shutil.which('git'), '缺少命令：git')
@@ -493,7 +494,7 @@ def main(project):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise RuntimeError('本项目已有同步任务，请稍后重试') from None
-        with tempfile.TemporaryDirectory(prefix='gitea-sync-') as directory:
+        with tempfile.TemporaryDirectory(prefix='forgejo-sync-') as directory:
             sync(Path(directory), source, target)
 
 

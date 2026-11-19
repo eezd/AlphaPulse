@@ -20,9 +20,9 @@ ASSET = Path(__file__).parents[2] / 'sysnc-github.sh'
 SOURCE = ASSET.read_text().split("<<'PY'\n", 1)[1].rsplit('\nPY', 1)[0]
 SRC_PATH = '/api/v1/repos/owner/project'
 DST_PATH = '/repos/owner/project'
-SOURCE_IMAGE = 'gitea.test/owner/project'
+SOURCE_IMAGE = 'forgejo.test/owner/project'
 TARGET_IMAGE = 'ghcr.io/owner/project'
-TOKENS = {'GITEA_TOKEN': 'fixture-gitea-token', 'GITHUB_TOKEN': 'fixture-github-token'}
+TOKENS = {'FORGEJO_TOKEN': 'fixture-forgejo-token', 'GITHUB_TOKEN': 'fixture-github-token'}
 
 
 def sha256(data):
@@ -86,16 +86,16 @@ class SyncTests(unittest.TestCase):
         self.git('push', self.source, '--tags')
         self.scope = {'__name__': 'fixture'}
         exec(compile(SOURCE, str(ASSET), 'exec'), self.scope)
-        self.scope.update(GITEA_API='https://gitea.test/api/v1', GITEA_OWNER='owner', GITEA_REPO='project',
-                          GITEA_GIT=str(self.source), GITEA_IMAGE=SOURCE_IMAGE, GITHUB_OWNER='owner',
+        self.scope.update(FORGEJO_API='https://forgejo.test/api/v1', FORGEJO_OWNER='owner', FORGEJO_REPO='project',
+                          FORGEJO_GIT=str(self.source), FORGEJO_IMAGE=SOURCE_IMAGE, GITHUB_OWNER='owner',
                           GITHUB_REPO='project', GITHUB_GIT=str(self.target), GITHUB_PRIVATE='false',
-                          GITEA_DOWNLOAD_HOSTS=('objects.test',), BRANCHES=['main', 'dev'], USE_LFS='false')
+                          FORGEJO_DOWNLOAD_HOSTS=('objects.test',), BRANCHES=['main', 'dev'], USE_LFS='false')
         self.original_run = self.scope['run']
         self.scope['run'] = self.run_tool
         self.patch_context.enter_context(patch('urllib.request.build_opener', return_value=self))
         which = self.scope['shutil'].which
         self.patch_context.enter_context(patch('shutil.which', side_effect=lambda p: p if p in ('skopeo', 'git-lfs') else which(p)))
-        self.source_api = self.scope['API']('https://gitea.test' + SRC_PATH, 'token ' + TOKENS['GITEA_TOKEN'],
+        self.source_api = self.scope['API']('https://forgejo.test' + SRC_PATH, 'token ' + TOKENS['FORGEJO_TOKEN'],
                                             ('objects.test',))
         self.target_api = self.scope['API']('https://api.github.com' + DST_PATH, 'Bearer ' + TOKENS['GITHUB_TOKEN'])
 
@@ -148,8 +148,10 @@ class SyncTests(unittest.TestCase):
             ref = args[-1].removeprefix('docker://')
             if args[1] == 'inspect':
                 content = self.manifests.get(ref)
-                return SimpleNamespace(returncode=0 if content else 1, stdout=content,
-                                       stderr=b'manifest unknown' if content is None else b'')
+                result = SimpleNamespace(returncode=0 if content is not None else 2, stdout=content,
+                                         stderr=b'manifest unknown' if content is None else b'')
+                with patch('subprocess.run', return_value=result):
+                    return self.original_run(args, phase, **kwargs)
             self.assertEqual(args[1:4], ['copy', '--all', '--preserve-digests'])
             src = args[-2].removeprefix('docker://')
             self.assertTrue(src.startswith(SOURCE_IMAGE + '@sha256:'))
@@ -177,7 +179,7 @@ class SyncTests(unittest.TestCase):
         path, query = url.path, urllib.parse.parse_qs(url.query)
         method, host = request.get_method(), url.netloc
         self.requests.append(request)
-        expected = {'gitea.test': 'token ' + TOKENS['GITEA_TOKEN'],
+        expected = {'forgejo.test': 'token ' + TOKENS['FORGEJO_TOKEN'],
                     'api.github.com': 'Bearer ' + TOKENS['GITHUB_TOKEN'],
                     'uploads.github.com': 'Bearer ' + TOKENS['GITHUB_TOKEN'], 'objects.test': None}
         self.assertEqual(request.get_header('Authorization'), expected[host])
@@ -186,7 +188,7 @@ class SyncTests(unittest.TestCase):
                                          io.BytesIO(str(TOKENS).encode()))
         if method != 'GET':
             self.http_writes.append((method, path))
-        if host == 'gitea.test':
+        if host == 'forgejo.test':
             if path == SRC_PATH:
                 return Response({'permissions': {'push': True}}, {})
             if path == SRC_PATH + '/releases':
@@ -322,12 +324,27 @@ class SyncTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'GitHub 目标、可见性或写权限'):
             self.sync()
         self.can_push = True
-        self.failure = ('gitea.test', SRC_PATH + '/releases', '2')
-        with self.assertRaisesRegex(RuntimeError, '读取 Gitea Release失败：HTTP 403') as error:
+        self.failure = ('forgejo.test', SRC_PATH + '/releases', '2')
+        with self.assertRaisesRegex(RuntimeError, '读取 Forgejo Release失败：HTTP 403') as error:
             self.sync()
         self.assertNotIn('fixture-', str(error.exception) + self.output)
         self.assertEqual(self.refs(), set())
         self.assertEqual((self.http_writes, self.oci_writes, self.lfs), ([], [], []))
+
+    def test_registry_inspect_classifies_missing_destination_only(self):
+        cases = ((1, b'name unknown', True, True), (2, b'manifest unknown', True, True),
+                 (2, b'manifest unknown', False, False), (2, b'unauthorized', True, False),
+                 (2, b'toomanyrequests', True, False))
+        for status, error, allow_missing, absent in cases:
+            result = SimpleNamespace(returncode=status, stdout=b'', stderr=error)
+            with patch.dict(self.scope, run=self.original_run), patch('subprocess.run', return_value=result):
+                with self.subTest(status=status, error=error, allow_missing=allow_missing):
+                    args = (TARGET_IMAGE + ':fixture', str(self.auth))
+                    if absent:
+                        self.assertIsNone(self.scope['read_manifest'](*args, allow_missing=allow_missing))
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, '读取 OCI 清单失败'):
+                            self.scope['read_manifest'](*args, allow_missing=allow_missing)
 
     def test_unproven_formal_release_is_reported_and_tag_never_pushed(self):
         tag = '20261109-dddddddd'
@@ -339,7 +356,7 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(len(self.dst_releases), 2)
 
     def test_git_subcommands_do_not_receive_api_credentials(self):
-        result = self.original_run(['bash', '-c', '[[ ! -v GITEA_TOKEN && ! -v GITHUB_TOKEN ]]'], '模拟 Git')
+        result = self.original_run(['bash', '-c', '[[ ! -v FORGEJO_TOKEN && ! -v GITHUB_TOKEN ]]'], '模拟 Git')
         self.assertEqual(result.returncode, 0)
 
     def test_incomplete_pagination_detected_from_headers(self):
@@ -352,13 +369,13 @@ class SyncTests(unittest.TestCase):
         scope = {'__name__': 'sync_config'}
         exec(compile(SOURCE, str(ASSET), 'exec'), scope)
         self.assertEqual(json.loads(scope['BRANCHES_JSON']), ['main', 'dev'])
-        self.assertEqual(scope['GITEA_GIT'], 'https://git.134333.xyz/eezd/AlphaPulse.git')
+        self.assertEqual(scope['FORGEJO_GIT'], 'https://git.134333.xyz/eezd/AlphaPulse.git')
         self.assertEqual(scope['GITHUB_GIT'], 'https://github.com/eezd/AlphaPulse.git')
         self.assertEqual(scope['USE_LFS'], 'false')
 
-    def test_launch_from_other_cwd_has_no_identity_gate(self):
+    def test_launch_from_other_cwd_requires_explicit_credentials_without_network(self):
         env = {key: value for key, value in os.environ.items() if key not in TOKENS}
         result = subprocess.run([str(ASSET)], cwd=self.project, env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 1)
-        self.assertIn('请显式提供 GITEA_TOKEN 和 GITHUB_TOKEN', result.stderr)
+        self.assertIn('FORGEJO_TOKEN', result.stderr)
         self.assertNotIn('root', result.stderr)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build receipts and publish exact Gitea artifacts without rebuilding on retry."""
+"""Publish and verify exact Forgejo release artifacts."""
 
 import base64
 import hashlib
@@ -16,8 +16,8 @@ import urllib.request
 
 
 REPOSITORY = 'eezd/AlphaPulse'
-GITEA_IMAGE = 'git.134333.xyz/eezd/alphapulse'
-GITEA_GIT_URL = f'https://{GITEA_IMAGE.split("/")[0]}/{REPOSITORY}.git'
+FORGEJO_IMAGE = 'git.134333.xyz/eezd/alphapulse'
+FORGEJO_GIT_URL = f'https://{FORGEJO_IMAGE.split("/")[0]}/{REPOSITORY}.git'
 PLATFORMS = ('linux/amd64', 'linux/arm64', 'windows/amd64', 'windows/arm64', 'darwin/amd64', 'darwin/arm64')
 UPLOAD_LIMIT = 90_000_000
 
@@ -53,7 +53,7 @@ def archive_name(version, platform):
 class SafeRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, request, *args):
         redirected = super().redirect_request(request, *args)
-        if redirected and urllib.parse.urlsplit(request.full_url).netloc != urllib.parse.urlsplit(redirected.full_url).netloc:
+        if redirected and urllib.parse.urlsplit(request.full_url)[:2] != urllib.parse.urlsplit(redirected.full_url)[:2]:
             redirected.remove_header('Authorization')
         return redirected
 
@@ -67,8 +67,9 @@ class API:
 
     def request(self, path, data=None, method=None, *, raw=False, content_type=None, missing=False):
         url = path if path.startswith('https://') or path.startswith('http://') else self.root + path
-        require(urllib.parse.urlsplit(url).netloc == urllib.parse.urlsplit(self.root).netloc,
-                'Refusing credential-bearing request to another host')
+        require(urllib.parse.urlsplit(url)[:2] == urllib.parse.urlsplit(self.root)[:2]
+                and urllib.parse.urlsplit(url).scheme == 'https',
+                'Refusing credential-bearing request outside the HTTPS API origin')
         headers = {'User-Agent': 'AlphaPulse-Release', 'Authorization': 'token ' + self.token}
         if data is not None and not isinstance(data, bytes):
             data = json.dumps(data).encode()
@@ -92,18 +93,34 @@ class API:
     def release(self, version):
         return self.repo('/releases/tags/' + version, missing=True)
 
+    def pages(self, path, *, repo=False):
+        request = self.repo if repo else self.request
+        separator = '&' if '?' in path else '?'
+        seen = set()
+        for page in range(1, 1001):
+            items = request(f'{path}{separator}page={page}&limit=50')
+            require(isinstance(items, list), 'Expected a paginated Forgejo list')
+            if not items:
+                return
+            for item in items:
+                require(item['id'] not in seen, 'Repeated item in Forgejo pagination')
+                seen.add(item['id'])
+                yield item
+        raise ValueError('Forgejo list exceeds the pagination limit')
+
     def assets(self, release):
-        return self.repo(f'/releases/{release["id"]}/assets')
+        return list(self.pages(f'/releases/{release["id"]}/assets', repo=True))
 
     def download(self, asset):
         url = asset['browser_download_url']
         require(urllib.parse.urlsplit(url).netloc in {
             urllib.parse.urlsplit(self.root).netloc, 'git.134333.xyz',
-        }, 'Unexpected Gitea release download host')
-        # Use the same configured Gitea origin as the API (also inside CI's private network).
+        }, 'Unexpected Forgejo release download host')
+        # Use the configured Forgejo origin for authenticated downloads.
         public = urllib.parse.urlsplit(url)
         url = self.root.removesuffix('/api/v1') + public.path + ('?' + public.query if public.query else '')
-        request = urllib.request.Request(url, headers={'Authorization': 'token ' + self.token})
+        request = urllib.request.Request(url, headers={'Authorization': 'token ' + self.token,
+                                                       'User-Agent': 'AlphaPulse-Release'})
         with self.opener.open(request, timeout=120) as response:
             return response.read()
 
@@ -133,22 +150,22 @@ class API:
 
 
 def client():
-    require(os.environ.get('GITEA_RELEASE_TOKEN'), 'Configure the account-level ALL_GITEA_TOKEN Gitea secret before releasing')
-    return API(os.environ['GITEA_API_URL'], os.environ['GITEA_RELEASE_TOKEN'])
+    require(os.environ.get('FORGEJO_RELEASE_TOKEN'), 'Configure the FORGEJO_RELEASE_TOKEN Forgejo secret before releasing')
+    return API(os.environ['FORGEJO_API_URL'], os.environ['FORGEJO_RELEASE_TOKEN'])
 
 
 def git_env(api):
     authorization = base64.b64encode(('eezd:' + api.token).encode()).decode()
     return {**os.environ, 'GIT_TERMINAL_PROMPT': '0', 'GIT_CONFIG_COUNT': '3',
             'GIT_CONFIG_KEY_0': 'credential.helper', 'GIT_CONFIG_VALUE_0': '',
-            'GIT_CONFIG_KEY_1': f'http.{GITEA_GIT_URL}.extraHeader',
+            'GIT_CONFIG_KEY_1': f'http.{FORGEJO_GIT_URL}.extraHeader',
             'GIT_CONFIG_VALUE_1': 'Authorization: Basic ' + authorization,
             'GIT_CONFIG_KEY_2': 'http.followRedirects', 'GIT_CONFIG_VALUE_2': 'false'}
 
 
 def registry_login():
-    subprocess.run(['docker', 'login', GITEA_IMAGE.split('/')[0], '--username', 'eezd', '--password-stdin'],
-                   input=os.environ['GITEA_RELEASE_TOKEN'], text=True, check=True)
+    subprocess.run(['docker', 'login', FORGEJO_IMAGE.split('/')[0], '--username', 'eezd', '--password-stdin'],
+                   input=os.environ['FORGEJO_RELEASE_TOKEN'], text=True, check=True)
 
 
 def registry_digest(image, reference):
@@ -157,7 +174,7 @@ def registry_digest(image, reference):
                              if reference.startswith('sha256:') else image + ':' + reference,
                              '--format', '{{json .Manifest}}'], capture_output=True, text=True)
     if result.returncode:
-        if 'not found' in result.stderr.lower() or 'manifest unknown' in result.stderr.lower():
+        if 'manifest unknown' in result.stderr.lower() or 'name unknown' in result.stderr.lower() or result.stderr.rstrip().endswith(': not found'):
             return None
         raise RuntimeError('Registry inspection failed: ' + result.stderr.strip())
     value = json.loads(result.stdout)['digest']
