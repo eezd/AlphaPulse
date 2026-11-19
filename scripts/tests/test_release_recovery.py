@@ -150,6 +150,27 @@ class RecoveryTests(unittest.TestCase):
                 self.invoke()
         return self.record()
 
+    def test_first_tag_push_targets_only_the_configured_https_repository(self):
+        repo = self.api.repo
+        def missing_tag(path, *args, **kwargs):
+            if path == '/commits/'+self.version:
+                return None
+            return repo(path, *args, **kwargs)
+
+        environment = {'GIT_TERMINAL_PROMPT': '0'}
+        with patch.object(self.api, 'repo', side_effect=missing_tag), \
+             patch.object(manual, 'git_env', return_value=environment), \
+             patch.object(manual, 'prepare_artifacts', side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.invoke()
+        manual.run.assert_any_call('git', 'push', 'https://git.134333.xyz/eezd/AlphaPulse.git',
+                                   'refs/tags/'+self.version, env=environment)
+        config = release.git_env(self.api)
+        self.assertEqual(config['GIT_CONFIG_KEY_1'],
+                         'http.https://git.134333.xyz/eezd/AlphaPulse.git.extraHeader')
+        self.assertEqual(config['GIT_CONFIG_KEY_2'], 'http.followRedirects')
+        self.assertEqual(config['GIT_CONFIG_VALUE_2'], 'false')
+
     def test_check_package_failure_or_interrupt_allows_fixed_commit_and_keeps_identity(self):
         # All three happen in package.py; none yields a confirmed package receipt.
         for index, failure in enumerate((subprocess.CalledProcessError(1, ['pytest']),

@@ -17,6 +17,7 @@ import urllib.request
 
 REPOSITORY = 'eezd/AlphaPulse'
 GITEA_IMAGE = 'git.134333.xyz/eezd/alphapulse'
+GITEA_GIT_URL = f'https://{GITEA_IMAGE.split("/")[0]}/{REPOSITORY}.git'
 PLATFORMS = ('linux/amd64', 'linux/arm64', 'windows/amd64', 'windows/arm64', 'darwin/amd64', 'darwin/arm64')
 UPLOAD_LIMIT = 90_000_000
 
@@ -137,12 +138,12 @@ def client():
 
 
 def git_env(api):
-    root = GITEA_IMAGE.split('/')[0]
-    authorization = base64.b64encode(('x-access-token:' + api.token).encode()).decode()
-    return {**os.environ, 'GIT_TERMINAL_PROMPT': '0', 'GIT_CONFIG_COUNT': '2',
+    authorization = base64.b64encode(('eezd:' + api.token).encode()).decode()
+    return {**os.environ, 'GIT_TERMINAL_PROMPT': '0', 'GIT_CONFIG_COUNT': '3',
             'GIT_CONFIG_KEY_0': 'credential.helper', 'GIT_CONFIG_VALUE_0': '',
-            'GIT_CONFIG_KEY_1': f'http.https://{root}/.extraheader',
-            'GIT_CONFIG_VALUE_1': 'Authorization: Basic ' + authorization}
+            'GIT_CONFIG_KEY_1': f'http.{GITEA_GIT_URL}.extraHeader',
+            'GIT_CONFIG_VALUE_1': 'Authorization: Basic ' + authorization,
+            'GIT_CONFIG_KEY_2': 'http.followRedirects', 'GIT_CONFIG_VALUE_2': 'false'}
 
 
 def registry_login():

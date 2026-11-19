@@ -12,7 +12,7 @@ import tarfile
 import time
 import urllib.parse
 
-from release import (GITEA_IMAGE, UPLOAD_LIMIT, client,
+from release import (GITEA_GIT_URL, GITEA_IMAGE, UPLOAD_LIMIT, client,
                      PLATFORMS, archive_name, digest, git_env, image_digest, registry_digest, registry_login,
                      require, run, verify_anonymous, write_json)
 
@@ -239,7 +239,8 @@ def execute():
     require(existing is None or existing['sha'] == commit, 'Tag collision')
     if existing is None:
         run('git','-c','user.name=eezd','-c','user.email=eezd@outlook.com','tag','-a',version,commit,'-m','AlphaPulse '+version)
-        run('git','push','origin','refs/tags/'+version,env=git_env(gitea))
+        # The runner checkout can use an internal HTTP origin.
+        run('git','push',GITEA_GIT_URL,'refs/tags/'+version,env=git_env(gitea))
     release = gitea.release(version)
     if not release:
         release = gitea.repo('/releases', method='POST', data={'tag_name': version, 'target_commitish': commit,
