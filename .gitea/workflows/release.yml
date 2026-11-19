@@ -38,7 +38,7 @@ jobs:
       - name: Install release tools
         run: |
           apt-get update
-          apt-get install -y python3 python3-venv skopeo git-lfs ca-certificates curl
+          apt-get install -y python3 python3-venv skopeo ca-certificates curl
           install -m 0755 -d /etc/apt/keyrings
           curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
           echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable' > /etc/apt/sources.list.d/docker.list
@@ -54,7 +54,6 @@ jobs:
           SOURCE_SHA: ${{ inputs.source_sha }}
           GITEA_API_URL: ${{ gitea.server_url }}/api/v1
           GITEA_RELEASE_TOKEN: ${{ secrets.ALL_GITEA_TOKEN }}
-          GITHUB_RELEASE_TOKEN: ${{ secrets.ALL_GITHUB_TOKEN }}
           CI_RUN_ID: ${{ gitea.run_id }}
           CI_RESOURCE_LABEL: io.alphapulse.ci.run=release-${{ gitea.run_id }}-${{ gitea.run_attempt }}
           DOCKER_CONFIG: /tmp/alphapulse-release-auth

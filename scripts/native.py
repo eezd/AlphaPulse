@@ -38,7 +38,7 @@ def build():
     for directory in ('backend', 'web'):
         shutil.copytree(ROOT/directory, candidate/directory, ignore=shutil.ignore_patterns('.venv', 'node_modules', 'dist', '__pycache__', '.pytest_cache', '.ruff_cache'))
     shutil.copytree(ROOT/'scripts', candidate/'scripts', ignore=shutil.ignore_patterns('__pycache__'))
-    for script in ('start.sh', 'stop.sh', 'status.sh', 'release.sh'):
+    for script in ('start.sh', 'stop.sh', 'status.sh', 'release.sh', 'sysnc-github.sh'):
         shutil.copy2(ROOT/script, candidate/script)
     subprocess.run(['uv', 'sync', '--locked', '--python', '/usr/bin/python3.13'], cwd=candidate/'backend', check=True)
     subprocess.run(['uv', 'run', 'pytest', '-q'], cwd=candidate/'backend', check=True)
@@ -46,7 +46,7 @@ def build():
     for args in (['pnpm', 'install', '--frozen-lockfile'], ['pnpm', 'lint:check'], ['pnpm', 'typecheck'], ['pnpm', 'test'], ['pnpm', 'build']):
         subprocess.run(args, cwd=candidate/'web', check=True)
     subprocess.run(['python3', '-m', 'unittest', 'discover', '-s', str(candidate/'scripts/tests'), '-q'], cwd=candidate, check=True)
-    checked_scripts = ['common.py', 'mirror.py', 'native.py', 'maintenance.py', 'release.py',
+    checked_scripts = ['common.py', 'native.py', 'maintenance.py', 'release.py',
                        'manual-release.py', 'package.py', 'install-package.py', 'smoke-release.py', 'tests']
     subprocess.run(['uvx', 'ruff==0.14.14', 'check', '--select', 'F,E9,B',
                     *(str(candidate/'scripts'/name) for name in checked_scripts)], check=True)
@@ -57,28 +57,26 @@ def build():
     # Service interpreter must be accessible outside /root, with project files installed non-editably.
     subprocess.run(['uv', 'sync', '--locked', '--no-dev', '--no-editable', '--python', '/usr/bin/python3.13'], cwd=candidate/'backend', check=True)
     subprocess.run([str(candidate/'backend/.venv/bin/python'), '-m', 'playwright', 'install', '--only-shell', 'chromium'],
-                   env={**os.environ, 'PLAYWRIGHT_BROWSERS_PATH': str(RUNTIME/'data/ms-playwright')}, check=True)
+                   env={**os.environ, 'PLAYWRIGHT_BROWSERS_PATH': str(RUNTIME/'ms-playwright')}, check=True)
     return candidate
 
 
 def unit_text(role):
-    python = str(RUNTIME/'current/backend/.venv/bin/python')
-    command = (python+' -m uvicorn '+ROLES[role]+' --host 127.0.0.1 --port 21005 --proxy-headers --forwarded-allow-ips 127.0.0.1'
-               if role == 'api' else python+' -m '+ROLES[role])
+    if role not in ROLES:
+        raise ValueError(f'Unknown AlphaPulse service: {role}')
     return f'''[Unit]
 Description=AlphaPulse {role}
 After=network-online.target
 Wants=network-online.target
 [Service]
-Type=simple
-User=alphapulse
-Group=alphapulse
-WorkingDirectory={RUNTIME}/current/backend
+Type=exec
+WorkingDirectory={ROOT}
 EnvironmentFile={RUNTIME}/config/app.env
-Environment=PLAYWRIGHT_BROWSERS_PATH={RUNTIME}/data/ms-playwright
-Environment=HOME={RUNTIME}/data
+Environment="PLAYWRIGHT_BROWSERS_PATH={RUNTIME}/ms-playwright"
+Environment=HOME=%h
 Environment=PYTHONUNBUFFERED=1
-ExecStart={command}
+ExecStart="{ROOT}/start.sh" --systemd {role}
+ExecStop="{ROOT}/stop.sh" --systemd {role}
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec={3600 if role in ('api', 'news-risk') else 120}
@@ -123,7 +121,7 @@ def activate(candidate, before_workers=None):
     try:
         link(candidate)
         for role in ROLES:
-            text = unit_text(role).replace('ExecStart=', f'Environment=APP_VERSION={meta["version"]}\nEnvironment=APP_COMMIT={meta["source_sha"]}\nEnvironment=WEB_DIST_DIR={candidate}/web/dist\nExecStart=')
+            text = unit_text(role).replace('ExecStart=', f'Environment=APP_VERSION={meta["version"]}\nEnvironment=APP_COMMIT={meta["source_sha"]}\nEnvironment="WEB_DIST_DIR={candidate}/web/dist"\nExecStart=')
             (unit_dir/('alphapulse-'+role+'.service')).write_text(text)
         run('systemctl', 'daemon-reload')
         run('systemctl', 'enable', *UNITS)
@@ -207,11 +205,8 @@ def update(candidate):
 
 
 def main():
-    if os.geteuid() != 0:
-        raise RuntimeError('Run as root to manage AlphaPulse systemd services')
     if not (RUNTIME/'config/app.env').is_file():
         raise RuntimeError('Missing runtime/config/app.env; initialize native configuration first')
-    run('id', 'alphapulse')
     with (RUNTIME/'.deploy.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if (RUNTIME/'deployment.pending.json').exists():

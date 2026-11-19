@@ -69,7 +69,7 @@ class ClientTests(unittest.TestCase):
         import release
         with patch.dict(os.environ, {'GITEA_RELEASE_TOKEN': ''}), patch.object(release, 'API') as api:
             with self.assertRaisesRegex(ValueError, 'ALL_GITEA_TOKEN'):
-                release.clients()
+                release.client()
             api.assert_not_called()
 
     def test_release_outside_repo_requires_explicit_branch(self):
@@ -87,10 +87,13 @@ class ClientTests(unittest.TestCase):
             self.assertIn('GITEA_TOKEN',result.stderr)
 
 class RemoteClientTests(unittest.TestCase):
-    def invoke_client(self, *, bad_sha=False, draft=False, dispatch_error=False):
-        import contextlib,io,json,os,urllib.error,urllib.request
+    def invoke_client(self, *, bad_sha=False, bad_hash=False, draft=False, dispatch_error=False):
+        import contextlib,hashlib,io,json,os,urllib.error,urllib.request
         client=(Path(__file__).resolve().parents[2]/'release.sh').read_text().split("<<'PY'\n",1)[1].rsplit('\nPY',1)[0]
         sha='a'*40;version='20261109-'+sha[:8];calls=[]
+        build = {'source_sha': 'b'*40 if bad_sha else sha, 'version': version}
+        marker = {'source_sha': sha, 'version': version,
+                  'build_sha256': 'b'*64 if bad_hash else hashlib.sha256(json.dumps(build).encode()).hexdigest()}
         class Response:
             def __init__(self,value):self.value=value
             def __enter__(self):return self
@@ -104,8 +107,12 @@ class RemoteClientTests(unittest.TestCase):
                 if dispatch_error:raise urllib.error.URLError('uncertain post')
                 return Response({'workflow_run_id':123})
             if '/actions/runs/' in url:return Response({'status':'completed','conclusion':'success'})
-            if '/releases/tags/' in url:return Response({'tag_name':version,'draft':draft,'prerelease':False,'assets':[{'name':'build.json','browser_download_url':'https://git.134333.xyz/download/build.json'}]})
-            if '/download/build.json' in url:return Response({'source_sha':'b'*40 if bad_sha else sha,'version':version})
+            if '/releases/tags/' in url:
+                return Response({'tag_name': version, 'draft': draft, 'prerelease': False, 'assets': [
+                    {'name': name, 'browser_download_url': 'https://git.134333.xyz/download/'+name}
+                    for name in ('build.json', 'release-complete.json')]})
+            if '/download/build.json' in url:return Response(build)
+            if '/download/release-complete.json' in url:return Response(marker)
             raise AssertionError(url)
         from unittest.mock import Mock
         opener=Mock();opener.open.side_effect=open_request
@@ -126,6 +133,7 @@ class RemoteClientTests(unittest.TestCase):
         self.assertEqual(body['inputs']['source_sha'],'a'*40)
     def test_draft_release_cannot_succeed(self):self.assertEqual(self.invoke_client(draft=True)[0],1)
     def test_wrong_metadata_sha_cannot_succeed(self):self.assertEqual(self.invoke_client(bad_sha=True)[0],1)
+    def test_wrong_completion_hash_cannot_succeed(self):self.assertEqual(self.invoke_client(bad_hash=True)[0],1)
     def test_uncertain_dispatch_is_never_reposted(self):
         code,calls,_=self.invoke_client(dispatch_error=True)
         self.assertEqual(code,1)

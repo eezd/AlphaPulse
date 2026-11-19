@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
-(( $# == 0 )) || { printf '用法：bash %s\n' "$0" >&2; exit 2; }
-project_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 services=(alphapulse-api.service alphapulse-crawler.service alphapulse-market.service alphapulse-calendar.service alphapulse-news-risk.service alphapulse-jin10-calendar.service)
-[[ ${services[*]} != *'@@'* ]] || { printf '尚未配置项目 systemd unit\n' >&2; exit 1; }
+if [[ ${1-} == --systemd ]] && (( $# == 2 )); then
+    for service in "${services[@]}"; do
+        # systemd sends the termination signal and waits within TimeoutStopSec.
+        [[ $service != "alphapulse-$2.service" ]] || exit 0
+    done
+    printf '未知的 AlphaPulse 服务：%s\n' "$2" >&2
+    exit 2
+fi
+(( $# == 0 )) || { printf '用法：%s [--systemd <服务>]\n' "$0" >&2; exit 2; }
+project_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 cd -- "$project_dir"
 command -v flock >/dev/null || { printf '缺少命令：flock\n' >&2; exit 1; }
 command -v systemctl >/dev/null || { printf '缺少命令：systemctl\n' >&2; exit 1; }

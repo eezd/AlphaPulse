@@ -1,3 +1,4 @@
+import fcntl
 from pathlib import Path
 import sys
 import tempfile
@@ -84,11 +85,12 @@ class NativeTests(unittest.TestCase):
             root = Path(tmp)
             (root/'config').mkdir()
             (root/'config/app.env').write_text('')
-            with patch.object(native, 'RUNTIME', root), patch.object(native, 'run'), \
+            with patch.object(native, 'RUNTIME', root), patch.object(native, 'run') as run, \
                  patch.object(native, 'build', side_effect=RuntimeError('build failed')), \
                  patch.object(native, 'activate') as activate:
                 with self.assertRaisesRegex(RuntimeError, 'build failed'):
                     native.main()
+                run.assert_not_called()
                 activate.assert_not_called()
 
     def test_status_is_read_only_and_preserves_inactive_exit_code(self):
@@ -103,6 +105,29 @@ class NativeTests(unittest.TestCase):
                                     env={**os.environ, 'PATH': tmp+':'+os.environ['PATH']})
             self.assertEqual(result.returncode, 3)
             self.assertFalse((directory/'runtime').exists())
+
+    def test_start_and_stop_respect_existing_deployment_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime = root/'runtime'
+            (runtime/'config').mkdir(parents=True)
+            (runtime/'config/app.env').touch()
+            script = root/'stop.sh'
+            script.write_bytes((native.ROOT/'stop.sh').read_bytes())
+            with (runtime/'.deploy.lock').open('a') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                with patch.object(native, 'RUNTIME', runtime), patch.object(native, 'build') as build:
+                    with self.assertRaises(BlockingIOError):
+                        native.main()
+                    build.assert_not_called()
+                systemctl = root/'systemctl'
+                systemctl.write_text('#!/bin/sh\ntouch invoked-systemctl\n')
+                systemctl.chmod(0o755)
+                result = subprocess.run(['bash', str(script)], cwd='/', capture_output=True,
+                                        env={**os.environ, 'PATH': tmp+':'+os.environ['PATH']})
+                self.assertEqual(result.returncode, 1)
+                self.assertIn('项目正在构建或启停'.encode(), result.stderr)
+                self.assertFalse((root/'invoked-systemctl').exists())
 
     def test_pending_maintenance_blocks_build(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -119,11 +144,40 @@ class NativeTests(unittest.TestCase):
         self.assertEqual(len(native.UNITS), 6)
         for role in native.ROLES:
             content = native.unit_text(role)
-            self.assertIn('User=alphapulse', content)
-            self.assertIn('WorkingDirectory=', content)
+            self.assertNotIn('User=', content)
+            self.assertNotIn('Group=', content)
+            self.assertIn('Environment=HOME=%h', content)
+            self.assertIn(f'Environment="PLAYWRIGHT_BROWSERS_PATH={native.RUNTIME}/ms-playwright"', content)
+            self.assertIn(f'ExecStart="{native.ROOT}/start.sh" --systemd {role}', content)
+            self.assertIn(f'ExecStop="{native.ROOT}/stop.sh" --systemd {role}', content)
+            self.assertIn('Type=exec', content)
             self.assertNotIn('ExecStartPre', content)
             self.assertIn('Restart=on-failure', content)
-        self.assertIn('--port 21005', native.unit_text('api'))
+
+    def test_systemd_entrypoints_run_foreground_without_service_management(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ('start.sh', 'stop.sh'):
+                script = root/name
+                script.write_text((native.ROOT/name).read_text())
+            backend = root/'runtime/current/backend'
+            interpreter = backend/'.venv/bin/python'
+            interpreter.parent.mkdir(parents=True)
+            interpreter.write_text('#!/bin/sh\nprintf "%s\\n" "$PWD" "$@"\n')
+            interpreter.chmod(0o755)
+            # These modes need only the foreground interpreter, not build or systemctl commands.
+            env = {'PATH': '/nonexistent'}
+            dirname = root/'dirname'
+            dirname.symlink_to('/usr/bin/dirname')
+            for role, module in native.ROLES.items():
+                with self.subTest(role=role):
+                    result = subprocess.check_output(['/bin/bash', str(root/'start.sh'), '--systemd', role],
+                                                     cwd='/', env={**env, 'PATH': tmp}, text=True).splitlines()
+                    expected = ['uvicorn', module, '--host', '127.0.0.1', '--port', '21005',
+                                '--proxy-headers', '--forwarded-allow-ips', '127.0.0.1'] if role == 'api' else [module]
+                    self.assertEqual(result, [str(backend), '-m', *expected])
+                    subprocess.run(['/bin/bash', str(root/'stop.sh'), '--systemd', role], cwd='/', env=env, check=True)
+            self.assertFalse((root/'runtime/.deploy.lock').exists())
 
     def test_activation_failure_restores_previous_link_and_unit_files(self):
         with tempfile.TemporaryDirectory() as tmp:

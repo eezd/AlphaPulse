@@ -23,32 +23,28 @@ spec.loader.exec_module(manual)
 
 class FakeAPI(release.API):
     """Keep the production upload/hash checks; replace only HTTP and downloads."""
-    def __init__(self, github=False):
-        super().__init__('https://api.github.com' if github else 'https://gitea.test/api/v1', 'fixture', github)
-        self.headers = {'X-OAuth-Scopes': 'repo,workflow,write:packages'}
+    def __init__(self):
+        super().__init__('https://gitea.test/api/v1', 'fixture')
         self.releases = {}
         self.blobs = {}
         self.uploads = []
-        self.fail_upload = False
+        self.fail_upload = None
         self.head = 'a'*40
         self.before_upload = lambda: None
 
     def request(self, path, data=None, method=None, **kwargs):
         if path == '/user':
             return {'login': 'eezd'}
-        if method == 'POST' and (path.startswith('https://uploads.github.com/') or '/assets?' in path):
+        if method == 'POST' and '/assets?' in path:
             self.before_upload()
             name = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)['name'][0]
             identifier = int(path.split('/releases/')[1].split('/')[0])
-            if self.github:
-                blob = data
-            else:
-                boundary = kwargs['content_type'].split('boundary=')[1]
-                blob = data.split(b'\r\n\r\n', 1)[1].removesuffix(('\r\n--'+boundary+'--\r\n').encode())
+            boundary = kwargs['content_type'].split('boundary=')[1]
+            blob = data.split(b'\r\n\r\n', 1)[1].removesuffix(('\r\n--'+boundary+'--\r\n').encode())
             self.blobs[identifier, name] = blob
             self.uploads.append((identifier, name))
-            if self.fail_upload:
-                self.fail_upload = False
+            if self.fail_upload == name:
+                self.fail_upload = None
                 raise RuntimeError('upload interrupted after storage')
             return {}
         prefix = '/repos/'+release.REPOSITORY
@@ -65,8 +61,7 @@ class FakeAPI(release.API):
             return self.releases.get(path.removeprefix('/releases/tags/'))
         if path == '/releases' and method == 'POST':
             identifier = len(self.releases)+1
-            value = {**data, 'id': identifier, 'prerelease': False,
-                     'upload_url': f'https://uploads.github.com/repos/eezd/AlphaPulse/releases/{identifier}/assets{{?name}}'}
+            value = {**data, 'id': identifier, 'prerelease': False}
             self.releases[data['tag_name']] = value
             return value
         if path.startswith('/releases/'):
@@ -90,7 +85,7 @@ class RecoveryTests(unittest.TestCase):
         self.root = Path(temporary.name)
         self.records = self.root/'releases'
         self.records.mkdir()
-        self.apis = (FakeAPI(), FakeAPI(github=True))
+        self.api = FakeAPI()
         self.value = 'sha256:'+'c'*64
         self.remote_images = {}
         self.image_uploads = []
@@ -103,15 +98,13 @@ class RecoveryTests(unittest.TestCase):
                 self.remote_images[image, tag] = self.value
                 self.image_uploads.append((image, tag))
             return ''
-        for api in self.apis:
-            api.before_upload = self.assert_upload_ready
+        self.api.before_upload = self.assert_upload_ready
         patches = [
             patch.object(manual, 'STATE', self.root),
-            patch.object(manual, 'clients', return_value=self.apis),
+            patch.object(manual, 'client', return_value=self.api),
             patch.object(manual, 'run', side_effect=command),
             patch.object(manual, 'ancestor', return_value=True),
             patch.object(manual, 'git_env', return_value={}),
-            patch.object(manual, 'synchronize'),
             patch.object(manual, 'registry_login'),
             patch.object(manual, 'registry_digest', side_effect=lambda image, tag: self.remote_images.get((image, tag))),
             patch.object(manual, 'image_digest', return_value=self.value),
@@ -136,7 +129,7 @@ class RecoveryTests(unittest.TestCase):
         record = self.record()
         self.assertEqual(record['phase'], 'publishing')
         checkpoint = manual.verify_checkpoint(self.records/self.version, record)
-        self.assertEqual(record['assets'], {k: v for k, v in checkpoint['files'].items() if k != 'candidate.oci'})
+        self.assertEqual(record['assets'], {k: v for k, v in checkpoint['files'].items() if k not in manual.INTERNAL})
 
     def originals(self, cache, record):
         """Small file fixture only; release transitions and verification remain real."""
@@ -147,7 +140,7 @@ class RecoveryTests(unittest.TestCase):
         (cache/'candidate.oci').write_bytes(b'fixture OCI')
         release.write_json(cache/'build.json', {'version': record['version'], 'source_sha': record['source_sha'],
                                               'source_branch': record['source_branch'], 'previous_tag': record['previous_tag'],
-                                              'images': {'digest': self.value}})
+                                              'image': {'digest': self.value}})
         release.write_json(cache/'checkpoint.json', {'version': record['version'], 'source_sha': record['source_sha'],
                            'files': {p.name: release.digest(p) for p in cache.iterdir() if p.is_file()}})
 
@@ -162,8 +155,7 @@ class RecoveryTests(unittest.TestCase):
         for index, failure in enumerate((subprocess.CalledProcessError(1, ['pytest']),
                                         subprocess.CalledProcessError(1, ['package']), KeyboardInterrupt())):
             with self.subTest(failure=type(failure).__name__):
-                for api in self.apis:
-                    api.head = 'a'*40
+                self.api.head = 'a'*40
                 with patch.object(manual.subprocess, 'run', side_effect=failure):
                     with self.assertRaises(type(failure)):
                         self.invoke()
@@ -171,10 +163,10 @@ class RecoveryTests(unittest.TestCase):
                 self.assertEqual(before['phase'], 'building')
                 self.assertEqual(before['notes'], 'init')
                 self.assertIsNone(before['previous_tag'])
-                self.assertTrue(all(api.release(self.version)['draft'] and not api.blobs for api in self.apis))
+                self.assertTrue(self.api.release(self.version)['draft'])
+                self.assertFalse(self.api.blobs)
                 fixed_sha = 'bcd'[index]*40
-                for api in self.apis:
-                    api.head = fixed_sha
+                self.api.head = fixed_sha
                 with patch.dict(os.environ, {'SOURCE_SHA': fixed_sha}), patch.object(manual, 'prepare_artifacts', side_effect=KeyboardInterrupt):
                     with self.assertRaises(KeyboardInterrupt):
                         self.invoke()
@@ -195,21 +187,19 @@ class RecoveryTests(unittest.TestCase):
     def test_originals_remote_assets_images_and_legacy_records_block(self):
         record = self.reserve()
         cache = self.records/self.version
-        for evidence in ('packages', 'gitea-asset', 'github-asset', 'image', 'legacy'):
+        for evidence in ('packages', 'gitea-asset', 'image', 'legacy'):
             with self.subTest(evidence=evidence):
                 if evidence == 'packages':
                     (cache/'packages.json').write_text('{}')
-                elif evidence.endswith('asset'):
-                    api = self.apis[evidence.startswith('github')]
-                    api.blobs[api.release(self.version)['id'], 'original'] = b'original'
+                elif evidence == 'gitea-asset':
+                    self.api.blobs[self.api.release(self.version)['id'], 'original'] = b'original'
                 elif evidence == 'image':
-                    self.remote_images[release.GITHUB_IMAGE, self.version] = self.value
+                    self.remote_images[release.GITEA_IMAGE, self.version] = self.value
                 else:
                     record.pop('phase')
-                self.assertTrue(manual.needs_recovery(record, self.records, self.apis))
+                self.assertTrue(manual.needs_recovery(record, self.records, self.api))
                 (cache/'packages.json').unlink(missing_ok=True)
-                for api in self.apis:
-                    api.blobs.clear()
+                self.api.blobs.clear()
                 self.remote_images.clear()
 
     def test_retrying_old_reservation_cannot_bypass_pending_publication(self):
@@ -222,30 +212,58 @@ class RecoveryTests(unittest.TestCase):
 
     def test_partial_upload_resumes_only_missing_assets_without_rebuilding(self):
         def prepare(cache, record):
-            self.assertFalse(any(api.uploads for api in self.apis))
+            self.assertFalse(self.api.uploads)
             self.originals(cache, record)
-        self.apis[0].fail_upload = True
+        self.api.fail_upload = release.archive_name(self.version, 'darwin/amd64')
         with patch.object(manual, 'prepare_artifacts', side_effect=prepare) as build:
             with self.assertRaisesRegex(RuntimeError, 'upload interrupted'):
                 self.invoke()
             self.assertEqual(self.record()['phase'], 'publishing')
             self.assertTrue((self.records/self.version/'checkpoint.json').exists())
-            first = self.apis[0].uploads[0]
+            first = self.api.uploads[0]
             copies = self.image_uploads.copy()
             self.invoke()
             build.assert_called_once()
             self.assertEqual(self.image_uploads, copies)
-        self.assertEqual(self.apis[0].uploads.count(first), 1)
+        self.assertEqual(self.api.uploads.count(first), 1)
         record = self.record()
         self.assertTrue(record['complete'])
         self.assertEqual(record['phase'], 'complete')
-        self.assertEqual(len(record['assets']), 9)
-        for api in self.apis:
-            self.assertFalse(api.release(self.version)['draft'])
-            self.assertEqual(len(api.uploads), 9)
+        self.assertEqual(len(record['assets']), 8)
+        self.assertFalse(self.api.release(self.version)['draft'])
+        self.assertEqual(len(self.api.uploads), 9)
+        self.assertEqual(self.api.uploads[-1][1], manual.COMPLETE)
+
+    def test_completion_marker_recovers_after_upload_interrupt(self):
+        self.api.fail_upload = manual.COMPLETE
+        with patch.object(manual, 'prepare_artifacts', side_effect=self.originals) as build:
+            with self.assertRaisesRegex(RuntimeError, 'upload interrupted'):
+                self.invoke()
+            published = self.api.release(self.version)
+            self.assertFalse(published['draft'])
+            self.assertEqual(self.record()['phase'], 'publishing')
+            self.assertEqual(json.loads(self.api.asset_bytes(published, manual.COMPLETE)),
+                             manual.completion_marker(self.record()))
+            uploads = self.api.uploads.copy()
+            self.invoke()
+            self.assertTrue(self.record()['complete'])
+            self.assertEqual(uploads, self.api.uploads)
+            build.assert_called_once()
+
+    def test_bad_published_image_does_not_record_completion(self):
+        def read_image(reference):
+            if reference.endswith(':'+self.version):
+                return 'sha256:'+'d'*64
+            return self.value
+        with patch.object(manual, 'prepare_artifacts', side_effect=self.originals), \
+             patch.object(manual, 'image_digest', side_effect=read_image):
+            with self.assertRaisesRegex(ValueError, 'Gitea image differs'):
+                self.invoke()
+        self.assertEqual(self.record()['phase'], 'publishing')
+        self.assertNotIn(manual.COMPLETE, [name for _, name in self.api.uploads])
 
     def test_missing_or_corrupt_publishing_originals_fail_without_rebuild(self):
-        self.apis[0].fail_upload = True
+        self.api.fail_upload = 'build.json'
         with patch.object(manual, 'prepare_artifacts', side_effect=self.originals):
             with self.assertRaises(RuntimeError):
                 self.invoke()
@@ -260,7 +278,7 @@ class RecoveryTests(unittest.TestCase):
             prepare.assert_not_called()
 
     def test_publishing_retry_cannot_rewrite_frozen_hashes(self):
-        self.apis[0].fail_upload = True
+        self.api.fail_upload = 'build.json'
         with patch.object(manual, 'prepare_artifacts', side_effect=self.originals):
             with self.assertRaises(RuntimeError):
                 self.invoke()
@@ -326,8 +344,9 @@ class ArtifactTests(unittest.TestCase):
             (downloads/'SHA256SUMS').write_text(''.join(f'{v["sha256"]}  {k}\n' for k, v in files.items()))
             release.write_json(downloads/'build.json', {'commit': record['source_sha'], 'version': record['version'],
                                                       'files': files, 'validation': {}})
-            manifest = json.dumps({'manifests': [{'platform': {'os': 'linux', 'architecture': arch}}
-                                                 for arch in ('amd64', 'arm64')]}).encode()
+            platforms = {'linux/amd64': 'sha256:'+'1'*64, 'linux/arm64': 'sha256:'+'2'*64}
+            manifest = json.dumps({'manifests': [{'platform': {'os': 'linux', 'architecture': key.split('/')[1]},
+                                                 'digest': digest} for key, digest in platforms.items()]}).encode()
             value = 'sha256:'+hashlib.sha256(manifest).hexdigest()
             def build_oci(image, destination, *args):
                 outer = json.dumps({'manifests': [{'digest': value}]}).encode()
@@ -349,4 +368,8 @@ class ArtifactTests(unittest.TestCase):
             run.assert_called_once_with('docker', 'load', '--input', str(cache/'candidate.oci'))
             checkpoint = manual.verify_checkpoint(cache, record)
             self.assertEqual(len(checkpoint['files']), 10)
-            self.assertEqual(json.loads((cache/'build.json').read_text())['images']['digest'], value)
+            build = json.loads((cache/'build.json').read_text())
+            self.assertEqual(build['image'], {'digest': value, 'ref': release.GITEA_IMAGE+':'+record['version'],
+                                              'platforms': platforms})
+            self.assertEqual({item['name']: item['sha256'] for item in build['packages']},
+                             {name: info['sha256'] for name, info in files.items()})

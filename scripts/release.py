@@ -17,7 +17,6 @@ import urllib.request
 
 REPOSITORY = 'eezd/AlphaPulse'
 GITEA_IMAGE = 'git.134333.xyz/eezd/alphapulse'
-GITHUB_IMAGE = 'ghcr.io/eezd/alphapulse'
 PLATFORMS = ('linux/amd64', 'linux/arm64', 'windows/amd64', 'windows/arm64', 'darwin/amd64', 'darwin/arm64')
 UPLOAD_LIMIT = 90_000_000
 
@@ -59,24 +58,17 @@ class SafeRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class API:
-    def __init__(self, root, token, github=False):
-        require(token or github, f'Missing credential for {root}')
-        self.root, self.token, self.github = root.rstrip('/'), token, github
+    def __init__(self, root, token):
+        require(token, f'Missing credential for {root}')
+        self.root, self.token = root.rstrip('/'), token
         self.opener = urllib.request.build_opener(SafeRedirect())
         self.headers = {}
 
     def request(self, path, data=None, method=None, *, raw=False, content_type=None, missing=False):
         url = path if path.startswith('https://') or path.startswith('http://') else self.root + path
-        allowed = {urllib.parse.urlsplit(self.root).netloc}
-        if self.github:
-            allowed.add('uploads.github.com')
-        require(urllib.parse.urlsplit(url).netloc in allowed, 'Refusing credential-bearing request to another host')
-        require(self.token or (method in (None, 'GET')), 'Anonymous client cannot mutate releases')
-        headers = {'User-Agent': 'AlphaPulse-Release'}
-        if self.token:
-            headers['Authorization'] = ('Bearer ' if self.github else 'token ') + self.token
-        if self.github:
-            headers.update({'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'})
+        require(urllib.parse.urlsplit(url).netloc == urllib.parse.urlsplit(self.root).netloc,
+                'Refusing credential-bearing request to another host')
+        headers = {'User-Agent': 'AlphaPulse-Release', 'Authorization': 'token ' + self.token}
         if data is not None and not isinstance(data, bytes):
             data = json.dumps(data).encode()
             content_type = 'application/json'
@@ -103,14 +95,6 @@ class API:
         return self.repo(f'/releases/{release["id"]}/assets')
 
     def download(self, asset):
-        if self.github:
-            # The API requires an octet-stream Accept header for binary release assets.
-            headers = {'Accept': 'application/octet-stream', 'X-GitHub-Api-Version': '2022-11-28'}
-            if self.token:
-                headers['Authorization'] = 'Bearer ' + self.token
-            request = urllib.request.Request(asset['url'], headers=headers)
-            with self.opener.open(request, timeout=120) as response:
-                return response.read()
         url = asset['browser_download_url']
         require(urllib.parse.urlsplit(url).netloc in {
             urllib.parse.urlsplit(self.root).netloc, 'git.134333.xyz',
@@ -134,45 +118,36 @@ class API:
             require(len(existing) == 1 and hashlib.sha256(self.download(existing[0])).hexdigest() == digest(path),
                     f'Existing asset conflicts: {path.name}')
             return
-        require(release['draft'], f'Cannot add files to a published release: {path.name}')
+        require(release['draft'] or path.name == 'release-complete.json',
+                f'Cannot add files to a published release: {path.name}')
         require(path.stat().st_size < UPLOAD_LIMIT, f'Asset exceeds CDN budget: {path.name}')
-        if self.github:
-            url = release['upload_url'].split('{')[0] + '?name=' + urllib.parse.quote(path.name)
-            self.request(url, path.read_bytes(), method='POST', content_type='application/octet-stream')
-        else:
-            boundary = 'alphapulse-' + secrets.token_hex(12)
-            body = (f'--{boundary}\r\nContent-Disposition: form-data; name="attachment"; '
-                    f'filename="{path.name}"\r\nContent-Type: application/octet-stream\r\n\r\n').encode()
-            body += path.read_bytes() + f'\r\n--{boundary}--\r\n'.encode()
-            self.repo(f'/releases/{release["id"]}/assets?name={urllib.parse.quote(path.name)}',
-                      data=body, method='POST', content_type=f'multipart/form-data; boundary={boundary}')
+        boundary = 'alphapulse-' + secrets.token_hex(12)
+        body = (f'--{boundary}\r\nContent-Disposition: form-data; name="attachment"; '
+                f'filename="{path.name}"\r\nContent-Type: application/octet-stream\r\n\r\n').encode()
+        body += path.read_bytes() + f'\r\n--{boundary}--\r\n'.encode()
+        self.repo(f'/releases/{release["id"]}/assets?name={urllib.parse.quote(path.name)}',
+                  data=body, method='POST', content_type=f'multipart/form-data; boundary={boundary}')
         require(hashlib.sha256(self.asset_bytes(release, path.name)).hexdigest() == digest(path),
                 f'Uploaded asset verification failed: {path.name}')
 
 
-def clients():
+def client():
     require(os.environ.get('GITEA_RELEASE_TOKEN'), 'Configure the account-level ALL_GITEA_TOKEN Gitea secret before releasing')
-    require(os.environ.get('GITHUB_RELEASE_TOKEN'), 'Configure the ALL_GITHUB_TOKEN Gitea secret before releasing')
-    return (API(os.environ['GITEA_API_URL'], os.environ['GITEA_RELEASE_TOKEN']),
-            API('https://api.github.com', os.environ['GITHUB_RELEASE_TOKEN'], github=True))
+    return API(os.environ['GITEA_API_URL'], os.environ['GITEA_RELEASE_TOKEN'])
 
 
 def git_env(api):
-    root = 'https://github.com' if api.github else 'https://git.134333.xyz'
+    root = GITEA_IMAGE.split('/')[0]
     authorization = base64.b64encode(('x-access-token:' + api.token).encode()).decode()
     return {**os.environ, 'GIT_TERMINAL_PROMPT': '0', 'GIT_CONFIG_COUNT': '2',
             'GIT_CONFIG_KEY_0': 'credential.helper', 'GIT_CONFIG_VALUE_0': '',
-            'GIT_CONFIG_KEY_1': f'http.{root}/.extraheader',
+            'GIT_CONFIG_KEY_1': f'http.https://{root}/.extraheader',
             'GIT_CONFIG_VALUE_1': 'Authorization: Basic ' + authorization}
 
 
 def registry_login():
-    for registry, username, token in (
-        ('git.134333.xyz', 'eezd', os.environ['GITEA_RELEASE_TOKEN']),
-        ('ghcr.io', 'eezd', os.environ['GITHUB_RELEASE_TOKEN']),
-    ):
-        subprocess.run(['docker', 'login', registry, '--username', username, '--password-stdin'],
-                       input=token, text=True, check=True)
+    subprocess.run(['docker', 'login', GITEA_IMAGE.split('/')[0], '--username', 'eezd', '--password-stdin'],
+                   input=os.environ['GITEA_RELEASE_TOKEN'], text=True, check=True)
 
 
 def registry_digest(image, reference):

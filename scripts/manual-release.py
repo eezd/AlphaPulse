@@ -9,12 +9,15 @@ from pathlib import Path
 import re
 import subprocess
 import tarfile
+import time
 import urllib.parse
 
-from release import (GITEA_IMAGE, GITHUB_IMAGE, UPLOAD_LIMIT, clients,
+from release import (GITEA_IMAGE, UPLOAD_LIMIT, client,
                      PLATFORMS, archive_name, digest, git_env, image_digest, registry_digest, registry_login,
                      require, run, verify_anonymous, write_json)
-from mirror import synchronize
+
+COMPLETE = 'release-complete.json'
+INTERNAL = {'candidate.oci', 'packages.json'}
 
 STATE = Path('/docker/gitea/mirrors/AlphaPulse')
 CONTROL = Path(__file__).resolve().parents[1]
@@ -52,19 +55,30 @@ def release_notes(base, commit):
         groups[category].append(f'- {title} ([{sha[:8]}](https://git.134333.xyz/eezd/AlphaPulse/commit/{sha}))')
     body='\n\n'.join('### '+k+'\n\n'+'\n'.join(v) for k,v in groups.items() if v)
     previous=base['version']
-    return body+f'\n\n[Gitea compare](https://git.134333.xyz/eezd/AlphaPulse/compare/{previous}...{commit}) · [GitHub compare](https://github.com/eezd/AlphaPulse/compare/{previous}...{commit})'
+    return body+f'\n\n[Gitea compare](https://git.134333.xyz/eezd/AlphaPulse/compare/{previous}...{commit})'
 
 
-def verify_complete(apis, record):
-    for api in apis:
-        release=api.release(record['version'])
-        require(release and not release['draft'] and not release['prerelease'], 'Release is not formally published')
-        require(release['body']==record['notes'] and release['name']=='AlphaPulse '+record['version'], 'Release metadata differs')
-        require(api.repo('/commits/'+record['version'])['sha']==record['source_sha'], 'Published tag differs')
-        for name, info in record['assets'].items():
-            require(hashlib.sha256(api.asset_bytes(release,name)).hexdigest()==info, 'Published asset differs: '+name)
-    require(image_digest(GITEA_IMAGE+':'+record['version'])==record['image_digest'], 'Gitea image differs')
-    require(image_digest(GITHUB_IMAGE+':'+record['version'])==record['image_digest'], 'GHCR image differs')
+def verify_complete(api, record, *, require_marker):
+    release = api.release(record['version'])
+    require(release and not release['draft'] and not release['prerelease'], 'Release is not formally published')
+    require(release['body'] == record['notes'] and release['name'] == 'AlphaPulse '+record['version'], 'Release metadata differs')
+    require(api.repo('/commits/'+record['version'])['sha'] == record['source_sha'], 'Published tag differs')
+    expected = set(record['assets'])
+    names = [asset['name'] for asset in api.assets(release)]
+    if require_marker or COMPLETE in names:
+        expected.add(COMPLETE)
+        marker = json.loads(api.asset_bytes(release, COMPLETE))
+        require(marker == completion_marker(record), 'Release completion record differs')
+    require(sorted(names) == sorted(expected), 'Published asset set differs')
+    for name, checksum in record['assets'].items():
+        require(hashlib.sha256(api.asset_bytes(release, name)).hexdigest() == checksum, 'Published asset differs: '+name)
+    require(image_digest(GITEA_IMAGE+':'+record['version']) == record['image_digest'], 'Gitea image differs')
+    return release
+
+
+def completion_marker(record):
+    return {'version': record['version'], 'source_sha': record['source_sha'],
+            'build_sha256': record['assets']['build.json']}
 
 
 
@@ -82,7 +96,7 @@ def build_oci(image, destination, commit, version, packages_digest):
     finally:
         subprocess.run(['docker', 'buildx', 'rm', builder], check=False)
 
-def needs_recovery(record, records_dir, apis):
+def needs_recovery(record, records_dir, api):
     if record.get('complete'):
         return False
     # Missing phases are legacy records, not proof that no publication occurred.
@@ -91,20 +105,16 @@ def needs_recovery(record, records_dir, apis):
     cache = records_dir/record['version']
     if any((cache/name).exists() for name in ('checkpoint.json', 'packages.json', 'build.json')):
         return True
-    for api in apis:
-        release = api.release(record['version'])
-        if release and (not release['draft'] or api.assets(release)):
-            return True
-    for image, tag in ((GITEA_IMAGE, 'candidate-'+record['source_sha']),
-                       (GITEA_IMAGE, record['version']), (GITHUB_IMAGE, record['version'])):
-        if registry_digest(image, tag) is not None:
-            return True
-    return False
+    release = api.release(record['version'])
+    if release and (not release['draft'] or api.assets(release)):
+        return True
+    return any(registry_digest(GITEA_IMAGE, tag) is not None
+               for tag in ('candidate-'+record['source_sha'], record['version']))
 
 
-def check_pending(records_dir, version, apis):
+def check_pending(records_dir, version, api):
     for path in records_dir.glob('*.json'):
-        if path.stem != version and needs_recovery(json.loads(path.read_text()), records_dir, apis):
+        if path.stem != version and needs_recovery(json.loads(path.read_text()), records_dir, api):
             raise ValueError('Resolve the pending release before starting another version: '+path.stem)
 
 
@@ -180,9 +190,11 @@ def prepare_artifacts(cache, record):
         subprocess.run(['python3', str(CONTROL/'scripts/smoke-release.py'), local], check=True)
     finally:
         subprocess.run(['docker', 'image', 'rm', local], check=False)
-    metadata.update(schema=2, source_sha=commit, source_branch=record['source_branch'], previous_tag=record['previous_tag'],
-                    images={'gitea':GITEA_IMAGE+':'+version, 'ghcr':GITHUB_IMAGE+':'+version,
-                            'digest':value, 'manifests':manifests})
+    platforms = {f'{item["platform"]["os"]}/{item["platform"]["architecture"]}': item['digest']
+                 for item in manifests}
+    metadata.update(schema=3, source_sha=commit, source_branch=record['source_branch'], previous_tag=record['previous_tag'],
+                    packages=[{'name': name, 'sha256': info['sha256']} for name, info in sorted(metadata['files'].items())],
+                    image={'ref': GITEA_IMAGE+':'+version, 'digest': value, 'platforms': platforms})
     metadata['validation'].update(linux_images='amd64 native and arm64 emulated build, import and browser launch',
                                  isolated_business='Linux amd64 API, browser UI, SSE, WebSocket, migration and queue tests; synthetic data, no model calls')
     write_json(cache/'build.json', metadata)
@@ -195,11 +207,8 @@ def execute():
     branch=os.environ['SOURCE_BRANCH']; commit=os.environ['SOURCE_SHA']
     require(re.fullmatch('[0-9a-f]{40}',commit), 'Expected full source SHA')
     require(os.environ.get('GITHUB_REF','refs/heads/main')=='refs/heads/main','Control workflow must run from main')
-    apis=clients(); gitea,github=apis
-    for api in apis: require(api.request('/user')['login']=='eezd','Unexpected publishing identity')
-    require(github.repo()['permissions']['push'],'GitHub repository write permission required')
-    scopes={s.strip() for s in github.headers.get('X-OAuth-Scopes','').split(',')}
-    require({'write:packages','workflow'} <= scopes and bool(scopes & {'repo','public_repo'}),'GitHub classic PAT needs repository, workflow and packages access')
+    gitea = client()
+    require(gitea.request('/user')['login'] == 'eezd', 'Unexpected publishing identity')
     quoted=urllib.parse.quote(branch,safe='')
     head=gitea.repo('/branches/'+quoted)['commit']['id']
     run('git','fetch','--no-tags','origin','+refs/heads/*:refs/remotes/origin/*','+refs/tags/*:refs/tags/*')
@@ -211,42 +220,42 @@ def execute():
     if record_path.exists():
         record=json.loads(record_path.read_text())
         require(record['source_sha']==commit,'Version collision')
+        require(record.get('release_schema') == 3, 'Legacy release record requires separate reconciliation')
         if record.get('complete'):
-            registry_login(); verify_complete(apis,record); print('Reused complete release',version); return
-        require(record.get('phase') in ('building', 'publishing'), 'Legacy pending release has no phase; inspect its original artifacts before resuming')
+            registry_login()
+            verify_complete(gitea, record, require_marker=True)
+            print('Reused complete Gitea release', version)
+            return
+        require(record.get('phase') in ('building', 'publishing'), 'Invalid release phase')
     registry_login()
-    check_pending(records_dir, version, apis)
+    check_pending(records_dir, version, gitea)
     if not record_path.exists():
-        require(not gitea.release(version) and not github.release(version),'Existing legacy version must not be overwritten')
+        require(not gitea.release(version), 'Existing legacy version must not be overwritten')
         previous=select_baseline([json.loads(p.read_text()) for p in records_dir.glob('*.json')],branch,commit)
-        record={'source_branch':branch,'source_sha':commit,'version':version,'previous_tag':previous['version'] if previous else None,'notes':release_notes(previous,commit),'complete':False,'phase':'building'}
+        record={'source_branch':branch,'source_sha':commit,'version':version,'previous_tag':previous['version'] if previous else None,'notes':release_notes(previous,commit),'complete':False,'phase':'building','release_schema':3}
         write_json(record_path,record)
     cache=records_dir/version; cache.mkdir(exist_ok=True)
-    for api in apis:
-        existing=api.repo('/commits/'+version,missing=True)
-        require(existing is None or existing['sha']==commit,'Tag collision')
-    if gitea.repo('/commits/'+version,missing=True) is None:
+    existing = gitea.repo('/commits/'+version, missing=True)
+    require(existing is None or existing['sha'] == commit, 'Tag collision')
+    if existing is None:
         run('git','-c','user.name=eezd','-c','user.email=eezd@outlook.com','tag','-a',version,commit,'-m','AlphaPulse '+version)
         run('git','push','origin','refs/tags/'+version,env=git_env(gitea))
-    synchronize(STATE,'https://git.134333.xyz/eezd/AlphaPulse.git','https://github.com/eezd/AlphaPulse.git',git_env(github))
-    releases=[]
-    for api in apis:
-        r=api.release(version)
-        if not r:
-            r=api.repo('/releases',method='POST',data={'tag_name':version,'target_commitish':commit,'name':'AlphaPulse '+version,'body':record['notes'],'draft':True})
-        require(r['body']==record['notes'],'Release notes conflict')
-        releases.append(r)
+    release = gitea.release(version)
+    if not release:
+        release = gitea.repo('/releases', method='POST', data={'tag_name': version, 'target_commitish': commit,
+                             'name': 'AlphaPulse '+version, 'body': record['notes'], 'draft': True})
+    require(release['body'] == record['notes'] and release['name'] == 'AlphaPulse '+version
+            and not release['prerelease'], 'Release metadata conflict')
     if not (cache/'checkpoint.json').exists():
         require(record['phase'] == 'building', 'Original checkpoint is missing; restore it before retrying publication')
-        for api, release in zip(apis, releases, strict=True):
-            require(release['draft'] and not api.assets(release), 'Uploaded originals exist without a checkpoint; restore the original cache before retrying')
-        for image, tag in ((GITEA_IMAGE, 'candidate-'+commit), (GITEA_IMAGE, version), (GITHUB_IMAGE, version)):
-            require(registry_digest(image, tag) is None, 'Uploaded image exists without a checkpoint; restore the original cache before retrying')
+        require(release['draft'] and not gitea.assets(release), 'Uploaded originals exist without a checkpoint; restore the original cache before retrying')
+        for tag in ('candidate-'+commit, version):
+            require(registry_digest(GITEA_IMAGE, tag) is None, 'Uploaded image exists without a checkpoint; restore the original cache before retrying')
         prepare_artifacts(cache, record)
     checkpoint = verify_checkpoint(cache, record)
     metadata = json.loads((cache/'build.json').read_text())
-    value = metadata['images']['digest']
-    files = sorted(set(checkpoint['files']) - {'candidate.oci'})
+    value = metadata['image']['digest']
+    files = sorted(set(checkpoint['files']) - INTERNAL)
     assets = {name:checkpoint['files'][name] for name in files}
     if record['phase'] == 'publishing':
         require(record['assets'] == assets and record['image_digest'] == value, 'Publishing checkpoint differs from frozen record')
@@ -261,21 +270,24 @@ def execute():
         run('skopeo', 'copy', '--all', '--preserve-digests', '--authfile', os.environ['DOCKER_CONFIG']+'/config.json',
             'oci-archive:'+str(cache/'candidate.oci'), 'docker://'+candidate)
     require(image_digest(candidate) == value, 'Candidate image differs')
-    for image in (GITEA_IMAGE, GITHUB_IMAGE):
-        existing = registry_digest(image, version)
-        require(existing in (None, value), 'Immutable image version conflict')
-        if existing is None:
-            run('skopeo', 'copy', '--all', '--preserve-digests', '--authfile', os.environ['DOCKER_CONFIG']+'/config.json',
-                'docker://'+candidate, 'docker://'+image+':'+version)
-    verify_anonymous(GITHUB_IMAGE+':'+version)
-    verify_anonymous(GITEA_IMAGE+':'+version)
-    for api,r in zip(apis,releases,strict=True):
-        for name in files: api.upload(r,cache/name)
-        if r['draft']:api.repo('/releases/'+str(r['id']),method='PATCH',data={'draft':False})
-    verify_complete(apis,record)
-    record.update(complete=True,phase='complete',completed_at=int(__import__('time').time()))
+    reference = GITEA_IMAGE+':'+version
+    existing = registry_digest(GITEA_IMAGE, version)
+    require(existing in (None, value), 'Immutable image version conflict')
+    if existing is None:
+        run('skopeo', 'copy', '--all', '--preserve-digests', '--authfile', os.environ['DOCKER_CONFIG']+'/config.json',
+            'docker://'+candidate, 'docker://'+reference)
+    verify_anonymous(reference)
+    for name in files:
+        gitea.upload(release, cache/name)
+    if release['draft']:
+        require(sorted(asset['name'] for asset in gitea.assets(release)) == files, 'Draft asset set differs')
+        gitea.repo('/releases/'+str(release['id']), method='PATCH', data={'draft': False})
+    published = verify_complete(gitea, record, require_marker=False)
+    write_json(cache/COMPLETE, completion_marker(record))
+    gitea.upload(published, cache/COMPLETE)
+    record.update(complete=True, phase='complete', completed_at=int(time.time()))
     write_json(record_path,record)
-    print('Published',version)
+    print('Published to Gitea',version)
 
 if __name__=='__main__':
     STATE.mkdir(exist_ok=True)
