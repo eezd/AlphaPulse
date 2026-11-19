@@ -64,11 +64,20 @@ class SelectionTests(unittest.TestCase):
 
 
 class ClientTests(unittest.TestCase):
+    def test_workflow_secret_mapping_uses_a_legal_forgejo_name(self):
+        import re
+        workflow = (Path(__file__).resolve().parents[2] / '.forgejo/workflows/release.yml').read_text()
+        mappings = dict(re.findall(r'(?m)^\s+(\w+):\s+\$\{\{\s*secrets\.(\w+)\s*\}\}', workflow))
+        self.assertEqual(mappings['FORGEJO_RELEASE_TOKEN'], 'RELEASE_TOKEN')
+        for name in mappings.values():
+            self.assertRegex(name, r'(?i)^[A-Z_][A-Z0-9_]*$')
+            self.assertNotRegex(name, r'(?i)^(FORGEJO_|GITEA_|GITHUB_|[0-9])')
+
     def test_missing_account_secret_fails_before_network_access(self):
         import os
         import release
         with patch.dict(os.environ, {'FORGEJO_RELEASE_TOKEN': ''}), patch.object(release, 'API') as api:
-            with self.assertRaisesRegex(ValueError, 'FORGEJO_RELEASE_TOKEN'):
+            with self.assertRaisesRegex(ValueError, 'RELEASE_TOKEN.*FORGEJO_RELEASE_TOKEN'):
                 release.client()
             api.assert_not_called()
 

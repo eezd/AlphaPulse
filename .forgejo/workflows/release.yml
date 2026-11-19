@@ -54,7 +54,7 @@ jobs:
           CONTROL_REF: ${{ forgejo.ref }}
           REQUEST_ID: ${{ inputs.request_id }}
           FORGEJO_API_URL: ${{ forgejo.server_url }}/api/v1
-          FORGEJO_RELEASE_TOKEN: ${{ secrets.FORGEJO_RELEASE_TOKEN }}
+          FORGEJO_RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           CI_RUN_ID: ${{ forgejo.run_id }}
           CI_RESOURCE_LABEL: io.alphapulse.ci.run=release-${{ forgejo.run_id }}-${{ forgejo.run_attempt }}
           DOCKER_CONFIG: /tmp/alphapulse-release-auth

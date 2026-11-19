@@ -150,7 +150,7 @@ class API:
 
 
 def client():
-    require(os.environ.get('FORGEJO_RELEASE_TOKEN'), 'Configure the FORGEJO_RELEASE_TOKEN Forgejo secret before releasing')
+    require(os.environ.get('FORGEJO_RELEASE_TOKEN'), 'Configure the RELEASE_TOKEN Forgejo secret mapped to FORGEJO_RELEASE_TOKEN before releasing')
     return API(os.environ['FORGEJO_API_URL'], os.environ['FORGEJO_RELEASE_TOKEN'])
 
 
