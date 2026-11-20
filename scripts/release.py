@@ -109,7 +109,10 @@ class API:
         raise ValueError('Forgejo list exceeds the pagination limit')
 
     def assets(self, release):
-        return list(self.pages(f'/releases/{release["id"]}/assets', repo=True))
+        # Forgejo's release attachment endpoint returns the entire list without pagination.
+        assets = self.repo(f'/releases/{release["id"]}/assets')
+        require(isinstance(assets, list), 'Expected a Forgejo attachment list')
+        return assets
 
     def download(self, asset):
         url = asset['browser_download_url']

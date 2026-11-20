@@ -87,7 +87,7 @@ def completed_record(api, release):
             and build['source_branch'], 'Published build identity differs')
     marker = {'version': version, 'source_sha': sha, 'build_sha256': hashlib.sha256(raw).hexdigest()}
     require(json.loads(api.asset_bytes(release, COMPLETE)) == marker, 'Release completion record differs')
-    require(api.repo('/commits/'+version)['sha'] == sha, 'Published tag differs')
+    require(api.repo('/git/commits/'+version)['sha'] == sha, 'Published tag differs')
     checksums = {p['name']: p['sha256'] for p in build['packages']}
     require(set(checksums) == published_files(version) - {'SHA256SUMS', 'build.json'}
             and len(build['packages']) == len(checksums) and all(SHA.fullmatch(v) for v in checksums.values()),
@@ -216,7 +216,7 @@ def check_incomplete(api, release, branch, commit, version):
 
 
 def publish(api, cache, branch, commit, version):
-    existing = api.repo('/commits/'+version, missing=True)
+    existing = api.repo('/git/commits/'+version, missing=True)
     require(existing is None or existing['sha'] == commit, 'Tag collision')
     release = api.release(version)
     registry_login()
@@ -249,7 +249,7 @@ def publish(api, cache, branch, commit, version):
             require(registry_digest(FORGEJO_IMAGE, version) is None, 'Image deletion was not confirmed')
         api.repo('/releases/'+str(release['id']), method='DELETE')
         require(api.release(version) is None, 'Release deletion was not confirmed')
-        require(api.repo('/commits/'+version)['sha'] == commit, 'Cleanup changed the retained tag')
+        require(api.repo('/git/commits/'+version)['sha'] == commit, 'Cleanup changed the retained tag')
     if existing is None:
         run('git', '-c', 'user.name=eezd', '-c', 'user.email=eezd@outlook.com', 'tag', '-a', version, commit, '-m', 'AlphaPulse '+version)
         run('git', 'push', FORGEJO_GIT_URL, 'refs/tags/'+version, env=git_env(api))
@@ -268,7 +268,7 @@ def publish(api, cache, branch, commit, version):
     require(sorted(a['name'] for a in api.assets(release)) == sorted(files), 'Draft asset set differs')
     for name, checksum in record['assets'].items():
         require(hashlib.sha256(api.asset_bytes(release, name)).hexdigest() == checksum, 'Uploaded asset differs: '+name)
-    require(api.repo('/commits/'+version)['sha'] == commit, 'Published tag differs')
+    require(api.repo('/git/commits/'+version)['sha'] == commit, 'Published tag differs')
     api.repo('/releases/'+str(release['id']), method='PATCH', data={'draft': False})
     published = api.release(version)
     require(not published['draft'] and not published['prerelease'] and published['body'] == record['notes']

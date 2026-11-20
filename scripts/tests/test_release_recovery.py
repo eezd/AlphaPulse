@@ -54,8 +54,8 @@ class FakeAPI:
         self.files[record['tag_name']][path.name] = path.read_bytes()
 
     def repo(self, path, *, method='GET', data=None, missing=False):
-        if path.startswith('/commits/'):
-            sha = self.tags.get(path.removeprefix('/commits/'))
+        if path.startswith('/git/commits/'):
+            sha = self.tags.get(path.removeprefix('/git/commits/'))
             return {'sha': sha} if sha else None
         if path.startswith('/actions/runs/'):
             return self.runs[int(path.rsplit('/', 1)[1])]

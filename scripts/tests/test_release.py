@@ -64,6 +64,28 @@ class SelectionTests(unittest.TestCase):
 
 
 class ClientTests(unittest.TestCase):
+    def test_native_attachment_readback_uses_one_unpaginated_request(self):
+        import release
+        api = release.API('https://git.134333.xyz/api/v1', 'fixture-only')
+        attachments = [{'id': 1, 'name': 'build.json', 'browser_download_url': 'https://git.134333.xyz/attachments/fixture'}]
+        with patch.object(api, 'repo', return_value=attachments) as request, patch.object(api, 'download', return_value=b'metadata'):
+            self.assertEqual(api.asset_bytes({'id': 2}, 'build.json'), b'metadata')
+        request.assert_called_once_with('/releases/2/assets')
+
+    def test_native_attachment_list_rejects_non_list_response(self):
+        import release
+        api = release.API('https://git.134333.xyz/api/v1', 'fixture-only')
+        with patch.object(api, 'repo', return_value={'assets': []}):
+            with self.assertRaisesRegex(ValueError, 'Expected a Forgejo attachment list'):
+                api.assets({'id': 2})
+
+    def test_paginated_endpoints_still_reject_repeated_ids(self):
+        import release
+        api = release.API('https://git.134333.xyz/api/v1', 'fixture-only')
+        with patch.object(api, 'repo', return_value=[{'id': 1}]):
+            with self.assertRaisesRegex(ValueError, 'Repeated item in Forgejo pagination'):
+                list(api.pages('/releases', repo=True))
+
     def test_workflow_secret_mapping_uses_a_legal_forgejo_name(self):
         import re
         workflow = (Path(__file__).resolve().parents[2] / '.forgejo/workflows/release.yml').read_text()
