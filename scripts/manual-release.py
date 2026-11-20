@@ -120,9 +120,11 @@ def complete_history(api):
 def build_oci(image, destination, commit, version, packages_digest):
     builder = 'alphapulse-release-' + os.environ['CI_RUN_ID']
     require(re.fullmatch(r'alphapulse-release-[0-9]+', builder), 'Invalid builder identity')
+    context = builder+'-context'
+    run('docker', 'context', 'create', context)
     try:
         run('docker', 'buildx', 'create', '--name', builder, '--driver', 'docker-container',
-            '--driver-opt', 'image=moby/buildkit@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe', '--bootstrap')
+            '--driver-opt', 'image=moby/buildkit@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe', '--bootstrap', context)
         run('docker', 'buildx', 'build', '--builder', builder, '--platform=linux/amd64,linux/arm64', '--provenance=false',
             '--output=type=oci,dest='+str(destination)+',name=alphapulse-release-check:'+version,
             '--build-arg', 'APP_VERSION='+version, '--build-arg', 'APP_COMMIT='+commit,
@@ -130,6 +132,7 @@ def build_oci(image, destination, commit, version, packages_digest):
             '--label', 'io.alphapulse.packages.sha256='+packages_digest, '-f', str(CONTROL/'deploy/Dockerfile.release'), str(image))
     finally:
         subprocess.run(['docker', 'buildx', 'rm', builder], check=False)
+        subprocess.run(['docker', 'context', 'rm', context], check=False)
 
 
 def oci_manifest(path):
@@ -202,7 +205,7 @@ def check_incomplete(api, release, branch, commit, version):
     require(type(run_id) is int and run_id > 0 and str(run_id) != os.environ['CI_RUN_ID'], 'Previous release run is still active')
     previous = api.repo('/actions/runs/'+str(run_id))
     require(previous['id'] == run_id and previous['status'] in TERMINAL
-            and previous['event'] == 'workflow_dispatch' and previous['workflow_id'] == 'release.yml',
+            and previous['trigger_event'] == 'workflow_dispatch' and previous['workflow_id'] == 'release.yml',
             'Previous release run has not terminated or is unproven')
     inputs = json.loads(previous['event_payload'])['inputs']
     require(inputs == {'source_sha': commit, 'source_branch': build['source_branch'],

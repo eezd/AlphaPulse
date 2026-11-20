@@ -6,11 +6,12 @@ import io
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tarfile
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import release
@@ -134,7 +135,7 @@ class RebuildTests(unittest.TestCase):
                            'release_request_id': os.environ['REQUEST_ID'], 'packages': packages,
                            'image': {'ref': release.FORGEJO_IMAGE+':'+self.version, 'digest': self.value}})
         self.api.runs[int(os.environ['CI_RUN_ID'])] = {'id': int(os.environ['CI_RUN_ID']), 'status': 'failure',
-            'event': 'workflow_dispatch', 'workflow_id': 'release.yml', 'event_payload': json.dumps({'inputs': {
+            'event': '', 'trigger_event': 'workflow_dispatch', 'workflow_id': 'release.yml', 'event_payload': json.dumps({'inputs': {
                 'source_branch': 'dev', 'source_sha': self.commit, 'request_id': os.environ['REQUEST_ID']}})}
 
     def publish(self):
@@ -192,6 +193,15 @@ class RebuildTests(unittest.TestCase):
         self.api.runs[101]['status'] = 'running'
         writes = list(self.api.writes)
         with self.assertRaisesRegex(ValueError, 'not terminated'):
+            self.publish()
+        self.assertEqual(self.builds, 1)
+        self.assertEqual(self.api.writes, writes)
+
+    def test_previous_run_must_use_native_dispatch_trigger(self):
+        self.interrupt()
+        self.api.runs[101].update(event='workflow_dispatch', trigger_event='push')
+        writes = list(self.api.writes)
+        with self.assertRaisesRegex(ValueError, 'unproven'):
             self.publish()
         self.assertEqual(self.builds, 1)
         self.assertEqual(self.api.writes, writes)
@@ -301,6 +311,59 @@ class ExecuteTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'must run from main'):
                 manual.execute()
         client.assert_not_called()
+
+
+class OCIBuildTests(unittest.TestCase):
+    builder = 'alphapulse-release-123'
+    context = builder+'-context'
+
+    def setUp(self):
+        self.addCleanup(patch.stopall)
+        patch.dict(os.environ, {'CI_RUN_ID': '123', 'DOCKER_HOST': 'tcp://docker:2376',
+                                'DOCKER_TLS_VERIFY': '1', 'DOCKER_CERT_PATH': '/synthetic/certificates'}).start()
+        self.command = patch.object(manual, 'run', return_value='').start()
+        self.cleanup = patch.object(manual.subprocess, 'run').start()
+        self.operations = Mock()
+        self.operations.attach_mock(self.command, 'checked')
+        self.operations.attach_mock(self.cleanup, 'unchecked')
+
+    def build(self):
+        manual.build_oci(Path('/synthetic/image'), Path('/synthetic/candidate.oci'),
+                         'a'*40, '20261109-aaaaaaaa', 'b'*64)
+
+    def assert_cleanup(self):
+        self.assertEqual(self.operations.mock_calls[-2:], [
+            call.unchecked(['docker', 'buildx', 'rm', self.builder], check=False),
+            call.unchecked(['docker', 'context', 'rm', self.context], check=False)])
+
+    def test_tls_environment_is_captured_in_explicit_temporary_context(self):
+        self.build()
+        commands = [entry.args for entry in self.command.call_args_list]
+        self.assertEqual(commands[0], ('docker', 'context', 'create', self.context))
+        self.assertEqual(commands[1][:5], ('docker', 'buildx', 'create', '--name', self.builder))
+        self.assertEqual(commands[1][-1], self.context)
+        self.assertNotEqual(self.builder, self.context)
+        self.assertEqual(commands[2][:5], ('docker', 'buildx', 'build', '--builder', self.builder))
+        self.assertIn('--platform=linux/amd64,linux/arm64', commands[2])
+        self.assert_cleanup()
+
+    def test_builder_and_context_are_cleaned_after_builder_or_build_failure(self):
+        for stage in (1, 2):
+            with self.subTest(stage=stage):
+                self.operations.reset_mock()
+                failure = subprocess.CalledProcessError(1, ['docker', 'buildx'])
+                self.command.side_effect = ['']*stage+[failure]
+                with self.assertRaises(subprocess.CalledProcessError) as caught:
+                    self.build()
+                self.assertIs(caught.exception, failure)
+                self.assert_cleanup()
+
+    def test_context_creation_failure_does_not_remove_unowned_resources(self):
+        self.command.side_effect = subprocess.CalledProcessError(1, ['docker', 'context', 'create'])
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.build()
+        self.command.assert_called_once_with('docker', 'context', 'create', self.context)
+        self.cleanup.assert_not_called()
 
 
 class ArtifactTests(unittest.TestCase):
