@@ -526,3 +526,4 @@ def test_topic_page_is_skipped_without_hiding_article_failures(page_class, body,
         assert bool(spider.run.errors) == failed
         assert spider.run.history_done
     asyncio.run(check())
+

@@ -38,6 +38,7 @@ def build():
     for directory in ('backend', 'web'):
         shutil.copytree(ROOT/directory, candidate/directory, ignore=shutil.ignore_patterns('.venv', 'node_modules', 'dist', '__pycache__', '.pytest_cache', '.ruff_cache'))
     shutil.copytree(ROOT/'scripts', candidate/'scripts', ignore=shutil.ignore_patterns('__pycache__'))
+    shutil.copytree(ROOT/'.forgejo', candidate/'.forgejo')
     for script in ('start.sh', 'stop.sh', 'status.sh', 'release.sh', 'sysnc-github.sh'):
         shutil.copy2(ROOT/script, candidate/script)
     subprocess.run(['uv', 'sync', '--locked', '--python', '/usr/bin/python3.13'], cwd=candidate/'backend', check=True)

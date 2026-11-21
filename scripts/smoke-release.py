@@ -59,17 +59,16 @@ def smoke(build, label):
             isolated = [*env_args, '-e', 'DATABASE_URL=' + database_url]
             run('docker', 'run', '--rm', *common, *isolated, image, 'alembic', 'upgrade', revision)
             if database == 'research_ci':
-                name = network + '-research'
-                run('docker', 'create', '--name', name, *common, *isolated,
-                    '-e', 'RESEARCH_SOURCES_TEST_ISOLATED=1',
-                    '-e', 'RESEARCH_SOURCES_TEST_DATABASE_URL=' + database_url,
-                    '-e', 'RESEARCH_SOURCES_TEST_REDIS_URL=' + env['REDIS_URL'],
-                    '-e', 'RESEARCH_SOURCES_TEST_FIXTURES=/tmp/research-fixtures',
-                    image, 'python', '/tmp/smoke_research_sources.py')
-                # The daemon may not share the release runner's checkout path.
-                run('docker', 'cp', str(ROOT / 'backend/tests/fixtures/research'), name + ':/tmp/research-fixtures')
-                run('docker', 'cp', str(ROOT / 'scripts' / script), name + ':/tmp/smoke_research_sources.py')
-                print(run('docker', 'start', '-a', name), flush=True)
+                extra = ['-e', 'RESEARCH_SOURCES_TEST_ISOLATED=1',
+                         '-e', 'RESEARCH_SOURCES_TEST_DATABASE_URL=' + database_url,
+                         '-e', 'RESEARCH_SOURCES_TEST_REDIS_URL=' + env['REDIS_URL'],
+                         '-e', 'RESEARCH_SOURCES_TEST_FIXTURES=/research-fixtures']
+                container = run('docker', 'create', '-i', *common, *isolated, *extra, image, 'python', '-')
+                try:
+                    run('docker', 'cp', str(ROOT / 'backend/tests/fixtures/research'), container + ':/research-fixtures')
+                    print(run('docker', 'start', '-ai', container, input=(ROOT / 'scripts' / script).read_text()), flush=True)
+                finally:
+                    run('docker', 'rm', '-fv', container)
             else:
                 print(run('docker', 'run', '--rm', '-i', *common, *isolated, image, 'python', '-',
                           input=(ROOT / 'scripts' / script).read_text()), flush=True)

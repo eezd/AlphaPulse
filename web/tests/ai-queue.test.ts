@@ -7,7 +7,8 @@ import { moduleLoader } from "./module-loader.ts"
 const first = { task_id: "11111111111141118111111111111111", wait_id: "22222222222242228222222222222222" }
 const second = { task_id: "33333333333343338333333333333333", wait_id: "44444444444444448444444444444444" }
 function snapshot(target = first) {
-  return { checked_at: new Date().toISOString(), worker_heartbeat_at: new Date().toISOString(), progress_status: "available", items: [{
+  const checkedAt = new Date().toISOString()
+  return { checked_at: checkedAt, worker_heartbeat_at: checkedAt, progress_status: "available", items: [{
     claim: { kind: "analysis", id: 10 },
     task_id: target.task_id,
     stage: "analysis",

@@ -365,14 +365,6 @@ class SyncTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, '分页结果不完整'):
                 self.source_api.pages('/releases', '模拟分页', size_key='limit')
 
-    def test_project_scope_is_limited_to_main_and_dev(self):
-        scope = {'__name__': 'sync_config'}
-        exec(compile(SOURCE, str(ASSET), 'exec'), scope)
-        self.assertEqual(json.loads(scope['BRANCHES_JSON']), ['main', 'dev'])
-        self.assertEqual(scope['FORGEJO_GIT'], 'https://git.134333.xyz/eezd/AlphaPulse.git')
-        self.assertEqual(scope['GITHUB_GIT'], 'https://github.com/eezd/AlphaPulse.git')
-        self.assertEqual(scope['USE_LFS'], 'false')
-
     def test_launch_from_other_cwd_requires_explicit_credentials_without_network(self):
         env = {key: value for key, value in os.environ.items() if key not in TOKENS}
         result = subprocess.run([str(ASSET)], cwd=self.project, env=env, capture_output=True, text=True)

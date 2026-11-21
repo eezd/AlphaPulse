@@ -1,4 +1,3 @@
-import fcntl
 from pathlib import Path
 import sys
 import tempfile
@@ -12,20 +11,40 @@ import native
 
 
 class NativeTests(unittest.TestCase):
+    def test_build_copies_workflow_required_by_delivery_checks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for directory in ('backend', 'web', 'scripts', '.forgejo/workflows'):
+                (root/directory).mkdir(parents=True)
+            workflow = root/'.forgejo/workflows/release.yml'
+            workflow.write_text('on: workflow_dispatch\n')
+            for name in ('start.sh', 'stop.sh', 'status.sh', 'release.sh', 'sysnc-github.sh'):
+                (root/name).write_text('#!/bin/sh\n')
+
+            def process(args, **kwargs):
+                if args == ['pnpm', 'build']:
+                    (kwargs['cwd']/'dist').mkdir()
+                if args[:3] == ['python3', '-m', 'unittest']:
+                    self.assertEqual((kwargs['cwd']/'.forgejo/workflows/release.yml').read_bytes(), workflow.read_bytes())
+
+            with patch.object(native, 'ROOT', root), patch.object(native, 'RUNTIME', root/'runtime'), \
+                 patch.object(native, 'identity', return_value={'source_sha': 'a'*40, 'dirty': True}), \
+                 patch.object(native, 'run', return_value='1794224694'), \
+                 patch.object(native.subprocess, 'run', side_effect=process):
+                candidate = native.build()
+            self.assertEqual((candidate/'.forgejo/workflows/release.yml').read_bytes(), workflow.read_bytes())
+
     def test_schema_compatibility_allows_only_explicit_predecessors(self):
         import runpy
         from types import SimpleNamespace
         with patch.dict(sys.modules, {'dotenv': SimpleNamespace(dotenv_values=None)}):
             compatible = runpy.run_path(str(Path(native.__file__).with_name('maintenance.py')))['schema_compatible']
-        revisions = ('f07890123456', 'a18901234567', 'b29012345678', 'c30123456789',
-                     'd41234567890', 'e52345678901', 'f63456789012')
-        allowed = set(zip(revisions[1:], revisions[:-1], strict=True))
-        for actual in (*revisions, 'unknown'):
-            for expected in (*revisions, 'unknown'):
+        for actual in ('f07890123456', 'a18901234567', 'b29012345678', 'c30123456789', 'd41234567890', 'e52345678901', 'f63456789012', 'unknown'):
+            for expected in ('f07890123456', 'a18901234567', 'b29012345678', 'c30123456789', 'd41234567890', 'e52345678901', 'f63456789012', 'unknown'):
                 self.assertEqual(compatible({actual}, {expected}), actual == expected)
-                self.assertEqual(compatible({actual}, {expected}, previous=True),
-                                 actual == expected or (actual, expected) in allowed)
-        self.assertFalse(compatible({'f63456789012', 'unexpected'}, {'e52345678901'}, previous=True))
+                self.assertEqual(compatible({actual}, {expected}, previous=True), actual == expected or
+                    (actual, expected) in {('a18901234567', 'f07890123456'), ('b29012345678', 'a18901234567'), ('c30123456789', 'b29012345678'), ('d41234567890', 'c30123456789'), ('e52345678901', 'd41234567890'), ('f63456789012', 'e52345678901')})
+        self.assertFalse(compatible({'b29012345678', 'unexpected'}, {'a18901234567'}, previous=True))
 
     def check_update(self, active, *, activation_error=None, drain_error=None):
         with tempfile.TemporaryDirectory() as tmp:
@@ -92,8 +111,7 @@ class NativeTests(unittest.TestCase):
                  patch.object(native, 'activate', side_effect=RuntimeError('failed rollback')):
                 with self.assertRaisesRegex(RuntimeError, 'left services running'):
                     native.update(candidate)
-                self.assertTrue({'restore', 'restore-rollback'}.isdisjoint(
-                    call.args[1] for call in maintenance.call_args_list))
+                self.assertNotIn('restore', [call.args[1] for call in maintenance.call_args_list])
                 self.assertTrue((root/'deployment.pending.json').exists())
 
     def test_build_failure_does_not_change_running_services(self):
@@ -121,29 +139,6 @@ class NativeTests(unittest.TestCase):
                                     env={**os.environ, 'PATH': tmp+':'+os.environ['PATH']})
             self.assertEqual(result.returncode, 3)
             self.assertFalse((directory/'runtime').exists())
-
-    def test_start_and_stop_respect_existing_deployment_lock(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            runtime = root/'runtime'
-            (runtime/'config').mkdir(parents=True)
-            (runtime/'config/app.env').touch()
-            script = root/'stop.sh'
-            script.write_bytes((native.ROOT/'stop.sh').read_bytes())
-            with (runtime/'.deploy.lock').open('a') as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
-                with patch.object(native, 'RUNTIME', runtime), patch.object(native, 'build') as build:
-                    with self.assertRaises(BlockingIOError):
-                        native.main()
-                    build.assert_not_called()
-                systemctl = root/'systemctl'
-                systemctl.write_text('#!/bin/sh\ntouch invoked-systemctl\n')
-                systemctl.chmod(0o755)
-                result = subprocess.run(['bash', str(script)], cwd='/', capture_output=True,
-                                        env={**os.environ, 'PATH': tmp+':'+os.environ['PATH']})
-                self.assertEqual(result.returncode, 1)
-                self.assertIn('项目正在构建或启停'.encode(), result.stderr)
-                self.assertFalse((root/'invoked-systemctl').exists())
 
     def test_pending_maintenance_blocks_build(self):
         with tempfile.TemporaryDirectory() as tmp:

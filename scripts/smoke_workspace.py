@@ -120,7 +120,7 @@ async def main():
                             received.add(json.loads(await socket.recv())['type'])
                 async with async_playwright() as playwright:
                     browser = await playwright.chromium.launch()
-                    context = await browser.new_context(viewport={'width': 1440, 'height': 1100}, device_scale_factor=1)
+                    context = await browser.new_context(viewport={'width': 1600, 'height': 1100}, device_scale_factor=1)
                     await context.add_init_script('if (window === window.top) localStorage.setItem("alphapulse.auth.token", ' + json.dumps(token) + ')')
                     page = await context.new_page()
                     errors = []
@@ -195,7 +195,7 @@ async def main():
                     await page.get_by_role('button', name='盘口／成交').click()
                     await page.get_by_text('买卖各 20 档 · 实时快照').wait_for()
                     await context.close()
-                    login = await browser.new_page(viewport={'width': 1440, 'height': 1100})
+                    login = await browser.new_page(viewport={'width': 1600, 'height': 1100})
                     await login.goto(origin + '/login')
                     await login.get_by_placeholder('用户名').wait_for()
                     await login.screenshot(path=str(output / 'login.png'))

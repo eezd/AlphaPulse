@@ -28,7 +28,7 @@ FORGEJO_GIT = 'https://git.134333.xyz/eezd/AlphaPulse.git'
 FORGEJO_IMAGE = 'git.134333.xyz/eezd/alphapulse'  # 仓库路径，无 docker://、版本或摘要
 GITHUB_OWNER = 'eezd'
 GITHUB_REPO = 'AlphaPulse'
-GITHUB_GIT = 'https://github.com/eezd/AlphaPulse.git'
+GITHUB_GIT = 'git@github.com:eezd/AlphaPulse.git'
 GITHUB_PRIVATE = 'false'  # true / false
 BRANCHES_JSON = r'''["main", "dev"]'''
 BRANCHES = None  # 在 main 中解析已确认的分支范围
@@ -257,7 +257,7 @@ class Snapshot:
 
 
 def read_manifest(ref, authfile, *, allow_missing=False):
-    # Skopeo 1.18 can return 2 for a missing destination; classify the Registry error.
+    # Skopeo 1.18 在目标清单缺失时也可能返回 2，仍须按 Registry 错误分类。
     result = run(['skopeo', 'inspect', '--raw', '--authfile', authfile, 'docker://' + ref],
                  '读取 OCI 清单', allowed=(0, 1, 2))
     if result.returncode != 0:
