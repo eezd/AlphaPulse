@@ -39,7 +39,7 @@ def build():
         shutil.copytree(ROOT/directory, candidate/directory, ignore=shutil.ignore_patterns('.venv', 'node_modules', 'dist', '__pycache__', '.pytest_cache', '.ruff_cache'))
     shutil.copytree(ROOT/'scripts', candidate/'scripts', ignore=shutil.ignore_patterns('__pycache__'))
     shutil.copytree(ROOT/'.forgejo', candidate/'.forgejo')
-    for script in ('start.sh', 'stop.sh', 'status.sh', 'release.sh', 'sysnc-github.sh'):
+    for script in ('start.sh', 'stop.sh', 'status.sh'):
         shutil.copy2(ROOT/script, candidate/script)
     subprocess.run(['uv', 'sync', '--locked', '--python', '/usr/bin/python3.13'], cwd=candidate/'backend', check=True)
     subprocess.run(['uv', 'run', 'pytest', '-q'], cwd=candidate/'backend', check=True)
@@ -48,7 +48,7 @@ def build():
         subprocess.run(args, cwd=candidate/'web', check=True)
     subprocess.run(['python3', '-m', 'unittest', 'discover', '-s', str(candidate/'scripts/tests'), '-q'], cwd=candidate, check=True)
     checked_scripts = ['common.py', 'native.py', 'maintenance.py', 'release.py',
-                       'manual-release.py', 'package.py', 'install-package.py', 'smoke-release.py',
+                       'manual-release.py', 'resolve-release.py', 'sync-github.py', 'package.py', 'install-package.py', 'smoke-release.py',
                        'smoke_briefings.py', 'smoke_analysis_parts.py', 'smoke_workspace.py', 'tests']
     subprocess.run(['uvx', 'ruff==0.14.14', 'check', '--select', 'F,E9,B',
                     *(str(candidate/'scripts'/name) for name in checked_scripts)], check=True)

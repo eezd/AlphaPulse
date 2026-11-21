@@ -236,7 +236,7 @@ class RebuildTests(unittest.TestCase):
 
     def test_old_run_inputs_must_match_build_identity(self):
         self.interrupt()
-        self.api.runs[101]['event_payload'] = json.dumps({'inputs': {'source_sha': 'b'*40}})
+        self.api.runs[101]['event_payload'] = json.dumps({'ref': 'refs/heads/main', 'inputs': {'source_branch': 'dev', 'source_sha': 'b'*40}})
         with self.assertRaisesRegex(ValueError, 'inputs differ'):
             self.publish()
 
@@ -287,30 +287,110 @@ class RebuildTests(unittest.TestCase):
         self.assertEqual(self.api.writes[writes:], [('DELETE', '/releases/1')])
 
 
+class ActionsProvenanceTests(RebuildTests):
+    def setUp(self):
+        super().setUp()
+        patch.object(manual, 'ancestor', return_value=True).start()
+
+    def prepare(self, cache, record):
+        super().prepare(cache, record)
+        build = json.loads((cache/'build.json').read_text())
+        build.update(schema=5, control_sha='c'*40, source_branch_head=self.commit,
+                     release_request_id='00000000-0000-4000-8000-000000000101',
+                     release_inputs={'source_branch': 'dev', 'source_sha': ''})
+        release.write_json(cache/'build.json', build)
+        self.api.runs[int(os.environ['CI_RUN_ID'])].update(commit_sha='c'*40,
+            event_payload=json.dumps({'ref': 'refs/heads/main', 'inputs': build['release_inputs']}))
+
+    def test_new_provenance_mismatches_never_delete_or_build(self):
+        self.interrupt()
+        original_files, original_runs = copy.deepcopy(self.api.files), copy.deepcopy(self.api.runs)
+        for mutation in ('control_sha', 'ref', 'inputs', 'schema'):
+            with self.subTest(mutation=mutation):
+                self.api.files, self.api.runs = copy.deepcopy(original_files), copy.deepcopy(original_runs)
+                run = self.api.runs[101]
+                event = json.loads(run['event_payload'])
+                if mutation == 'control_sha':
+                    run['commit_sha'] = 'd'*40
+                elif mutation == 'ref':
+                    event['ref'] = 'refs/heads/dev'
+                elif mutation == 'inputs':
+                    event['inputs']['source_sha'] = 'd'*40
+                else:
+                    build = json.loads(self.api.files[self.version]['build.json'])
+                    build['schema'] = 99
+                    self.api.files[self.version]['build.json'] = json.dumps(build).encode()
+                run['event_payload'] = json.dumps(event)
+                writes = list(self.api.writes)
+                with self.assertRaises(ValueError):
+                    self.publish()
+                self.assertEqual(self.api.writes, writes)
+                self.assertEqual(self.builds, 1)
+
+    def test_old_branch_head_must_still_prove_ancestry(self):
+        self.interrupt()
+        with patch.object(manual, 'ancestor', return_value=False):
+            with self.assertRaisesRegex(ValueError, 'branch history'):
+                self.publish()
+        self.assertFalse(any(action == 'DELETE' for action, _ in self.api.writes))
+
+
 class ExecuteTests(unittest.TestCase):
+    context = {'schema': 1, 'source_branch': 'feature/demo', 'source_sha': 'a'*40, 'source_branch_head': 'b'*40,
+               'version': '19700101-aaaaaaaa', 'control_sha': 'c'*40, 'release_run_id': 123,
+               'release_request_id': '00000000-0000-4000-8000-000000000123',
+               'release_inputs': {'source_branch': 'feature/demo', 'source_sha': 'a'*40}}
+
     def test_fixed_sha_fetch_uses_explicit_authenticated_forgejo_url(self):
         api = Mock(token='synthetic')
         api.request.return_value = {'login': 'eezd'}
-        api.repo.return_value = {'commit': {'id': 'b'*40}}
-        with patch.dict(os.environ, {'SOURCE_BRANCH': 'feature/demo', 'SOURCE_SHA': 'a'*40,
-                                     'CONTROL_REF': 'refs/heads/main'}), \
+        api.repo.return_value = {'commit': {'id': 'd'*40}}  # Branch advanced after resolving.
+        with patch.object(manual, 'release_context', return_value=self.context), \
              patch.object(manual, 'client', return_value=api), \
-             patch.object(manual, 'run', side_effect=['', '0']) as run, \
+             patch.object(manual, 'run', side_effect=['a'*40, '', '0']) as run, \
              patch.object(manual, 'ancestor', return_value=True) as ancestor, \
              patch.object(manual, 'publish') as publish:
             manual.execute()
         self.assertEqual(api.repo.call_args.args, ('/branches/feature%2Fdemo',))
-        self.assertEqual(run.call_args_list[0].args[:4], ('git', 'fetch', '--no-tags', release.FORGEJO_GIT_URL))
-        self.assertIn('Authorization: Basic ', run.call_args_list[0].kwargs['env']['GIT_CONFIG_VALUE_1'])
-        ancestor.assert_called_once_with('a'*40, 'b'*40)
+        self.assertEqual(run.call_args_list[1].args[:4], ('git', 'fetch', '--no-tags', release.FORGEJO_GIT_URL))
+        self.assertIn('Authorization: Basic ', run.call_args_list[1].kwargs['env']['GIT_CONFIG_VALUE_1'])
+        self.assertEqual(ancestor.call_args_list, [call('a'*40, 'd'*40), call('a'*40, 'b'*40)])
         self.assertEqual(publish.call_args.args[2:], ('feature/demo', 'a'*40, '19700101-aaaaaaaa'))
 
+    def test_rewritten_history_stops_before_publish(self):
+        api = Mock(token='synthetic')
+        api.request.return_value = {'login': 'eezd'}
+        api.repo.return_value = {'commit': {'id': 'd'*40}}
+        with patch.object(manual, 'release_context', return_value=self.context), \
+             patch.object(manual, 'client', return_value=api), \
+             patch.object(manual, 'run', return_value='a'*40), \
+             patch.object(manual, 'ancestor', return_value=False), patch.object(manual, 'publish') as publish:
+            with self.assertRaisesRegex(ValueError, 'no longer reachable'):
+                manual.execute()
+        publish.assert_not_called()
+
     def test_untrusted_control_ref_stops_before_api_access(self):
-        with patch.dict(os.environ, {'SOURCE_BRANCH': 'dev', 'SOURCE_SHA': 'a'*40, 'CONTROL_REF': 'refs/heads/dev'}), \
-             patch.object(manual, 'client') as client:
+        with patch.dict(os.environ, {'CONTROL_REF': 'refs/heads/dev'}), patch.object(manual, 'client') as client:
             with self.assertRaisesRegex(ValueError, 'must run from main'):
                 manual.execute()
         client.assert_not_called()
+
+    def test_context_must_match_current_actions_identity_and_inputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary)/'context.json'
+            path.write_text(json.dumps(self.context))
+            with patch.dict(os.environ, {'CONTROL_REF': 'refs/heads/main', 'CONTROL_SHA': 'c'*40,
+                                         'CI_RUN_ID': '123', 'RELEASE_CONTEXT': str(path)}):
+                self.assertEqual(manual.release_context(), self.context)
+                for key, value in [('CI_RUN_ID', '124'), ('CONTROL_SHA', 'd'*40)]:
+                    with patch.dict(os.environ, {key: value}), self.assertRaises(ValueError):
+                        manual.release_context()
+                bad = copy.deepcopy(self.context)
+                bad['release_inputs']['source_sha'] = ''
+                path.write_text(json.dumps(bad))
+                with self.assertRaisesRegex(ValueError, 'inputs differ'):
+                    manual.release_context()
+
 
 
 class OCIBuildTests(unittest.TestCase):
@@ -412,12 +492,17 @@ class ArtifactTests(unittest.TestCase):
             with patch.object(manual.Path, 'resolve', return_value=root/'source'), \
                  patch.object(manual.subprocess, 'run', side_effect=process), \
                  patch.object(manual, 'build_oci', side_effect=build_oci), patch.object(manual, 'run') as run, \
-                 patch.dict(os.environ, {'CI_RUN_ID': '123', 'REQUEST_ID': 'fixture-request',
-                                         'FORGEJO_RELEASE_TOKEN': 'fixture', 'GITHUB_TOKEN': 'fixture'}):
+                 patch.object(manual, 'release_context', return_value={**record, 'release_run_id': 123,
+                     'release_request_id': '00000000-0000-4000-8000-000000000123', 'control_sha': 'c'*40,
+                     'source_branch_head': 'a'*40, 'release_inputs': {'source_branch': 'dev', 'source_sha': ''}}), \
+                 patch.dict(os.environ, {'CI_RUN_ID': '123', 'FORGEJO_RELEASE_TOKEN': 'fixture', 'GITHUB_TOKEN': 'fixture'}):
                 manual.prepare_artifacts(cache, record)
             run.assert_called_once_with('docker', 'load', '--input', str(cache/'candidate.oci'))
             self.assertFalse((cache/'checkpoint.json').exists())
             build = json.loads((cache/'build.json').read_text())
             self.assertEqual(build['image'], {'digest': value, 'ref': release.FORGEJO_IMAGE+':'+record['version'], 'platforms': platforms})
+            self.assertEqual(build['schema'], 5)
+            self.assertEqual(build['control_sha'], 'c'*40)
+            self.assertEqual(build['release_inputs'], {'source_branch': 'dev', 'source_sha': ''})
             self.assertEqual(build['release_run_id'], 123)
             self.assertEqual({p['name']: p['sha256'] for p in build['packages']}, {n: f['sha256'] for n, f in files.items()})

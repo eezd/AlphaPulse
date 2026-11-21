@@ -2,6 +2,7 @@
 import datetime
 from collections import deque
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -22,6 +23,27 @@ VERSION = re.compile(r'\d{8}-[0-9a-f]{8}')
 SHA = re.compile(r'[0-9a-f]{64}')
 CONTROL = Path(__file__).resolve().parents[1]
 TERMINAL = {'success', 'failure', 'cancelled', 'skipped'}
+_spec = importlib.util.spec_from_file_location('release_resolver', CONTROL/'scripts/resolve-release.py')
+resolver = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(resolver)
+
+
+def release_context():
+    require(os.environ.get('CONTROL_REF') == 'refs/heads/main', 'Control workflow must run from main')
+    context = json.loads(Path(os.environ['RELEASE_CONTEXT']).read_text())
+    require(context['schema'] == 1 and context['control_sha'] == os.environ.get('CONTROL_SHA')
+            and resolver.SHA.fullmatch(context['control_sha'])
+            and type(context['release_run_id']) is int and context['release_run_id'] > 0
+            and str(context['release_run_id']) == os.environ.get('CI_RUN_ID'), 'Release context Actions identity differs')
+    require(resolver.SHA.fullmatch(context['source_sha']) and resolver.SHA.fullmatch(context['source_branch_head'])
+            and VERSION.fullmatch(context['version']) and context['version'].endswith(context['source_sha'][:8]),
+            'Release context source identity differs')
+    inputs = resolver.normalize_inputs(context['release_inputs'])
+    require(inputs == context['release_inputs'] and inputs['source_branch'] == context['source_branch']
+            and (inputs['source_sha'] or context['source_branch_head']) == context['source_sha'],
+            'Release context inputs differ')
+    require(str(resolver.uuid.UUID(context['release_request_id'])) == context['release_request_id'], 'Invalid release request UUID')
+    return context
 
 
 def ancestor(a, b):
@@ -180,8 +202,13 @@ def prepare_artifacts(cache, record):
         subprocess.run([sys.executable, str(CONTROL/'scripts/smoke-release.py'), local], check=True)
     finally:
         subprocess.run(['docker', 'image', 'rm', local], check=False)
-    metadata.update(schema=4, source_sha=commit, source_branch=record['source_branch'], previous_tag=record['previous_tag'],
-                    release_run_id=int(os.environ['CI_RUN_ID']), release_request_id=os.environ['REQUEST_ID'],
+    context = release_context()
+    require(context['source_sha'] == commit and context['version'] == version
+            and context['source_branch'] == record['source_branch'], 'Artifact release context differs')
+    metadata.update(schema=5, source_sha=commit, source_branch=record['source_branch'], previous_tag=record['previous_tag'],
+                    release_run_id=context['release_run_id'], release_request_id=context['release_request_id'],
+                    release_inputs=context['release_inputs'], control_sha=context['control_sha'],
+                    source_branch_head=context['source_branch_head'],
                     packages=[{'name': name, 'sha256': info['sha256']} for name, info in sorted(metadata['files'].items())],
                     image={'ref': FORGEJO_IMAGE+':'+version, 'digest': value,
                            'platforms': {f'{m["platform"]["os"]}/{m["platform"]["architecture"]}': m['digest'] for m in manifests}})
@@ -198,7 +225,7 @@ def check_incomplete(api, release, branch, commit, version):
     require(COMPLETE not in names and 'build.json' in names and len(names) == len(set(names))
             and set(names) <= published_files(version), 'Incomplete release requires manual reconciliation')
     build = json.loads(api.asset_bytes(release, 'build.json'))
-    require(build['version'] == version and build['source_sha'] == commit and build['schema'] == 4
+    require(build['version'] == version and build['source_sha'] == commit and build['schema'] in (4, 5)
             and build['source_branch'] == branch and build['image']['ref'] == FORGEJO_IMAGE+':'+version,
             'Unproven incomplete build identity')
     run_id = build['release_run_id']
@@ -207,9 +234,22 @@ def check_incomplete(api, release, branch, commit, version):
     require(previous['id'] == run_id and previous['status'] in TERMINAL
             and previous['trigger_event'] == 'workflow_dispatch' and previous['workflow_id'] == 'release.yml',
             'Previous release run has not terminated or is unproven')
-    inputs = json.loads(previous['event_payload'])['inputs']
-    require(inputs == {'source_sha': commit, 'source_branch': build['source_branch'],
-                       'request_id': build['release_request_id']}, 'Previous release inputs differ')
+    event = json.loads(previous['event_payload'])
+    inputs = event['inputs']
+    if build['schema'] == 4:
+        require(inputs == {'source_sha': commit, 'source_branch': build['source_branch'],
+                           'request_id': build['release_request_id']}, 'Previous release inputs differ')
+    else:
+        require(event.get('ref') == 'refs/heads/main' and resolver.SHA.fullmatch(build['control_sha'])
+                and previous.get('commit_sha') == build['control_sha'], 'Previous control provenance differs')
+        normalized = resolver.normalize_inputs(inputs)
+        require(normalized == build['release_inputs'] and normalized['source_branch'] == branch
+                and resolver.SHA.fullmatch(build['source_branch_head'])
+                and (normalized['source_sha'] or build['source_branch_head']) == commit,
+                'Previous release inputs differ')
+        require(str(resolver.uuid.UUID(build['release_request_id'])) == build['release_request_id'],
+                'Invalid previous release request UUID')
+        require(ancestor(commit, build['source_branch_head']), 'Previous source branch history differs')
     value = registry_digest(FORGEJO_IMAGE, version)
     require(value is None or value == build['image']['digest'], 'Unproven incomplete image identity')
     return build, value
@@ -281,9 +321,9 @@ def publish(api, cache, branch, commit, version):
 
 
 def execute():
-    branch, commit = os.environ['SOURCE_BRANCH'], os.environ['SOURCE_SHA']
-    require(re.fullmatch('[0-9a-f]{40}', commit), 'Expected full source SHA')
-    require(os.environ['CONTROL_REF'] == 'refs/heads/main', 'Control workflow must run from main')
+    context = release_context()
+    branch, commit = context['source_branch'], context['source_sha']
+    require(run('git', '-C', 'source', 'rev-parse', 'HEAD') == commit, 'Candidate checkout differs from frozen SHA')
     api = client()
     require(api.request('/user')['login'] == 'eezd', 'Unexpected publishing identity')
     head = api.repo('/branches/'+urllib.parse.quote(branch, safe=''))['commit']['id']
@@ -292,6 +332,10 @@ def execute():
     require(ancestor(commit, head), 'Source SHA is no longer reachable from the requested branch')
     timestamp = int(run('git', 'show', '-s', '--format=%ct', commit))
     version = datetime.datetime.fromtimestamp(timestamp, datetime.timezone.utc).strftime('%Y%m%d')+'-'+commit[:8]
+    require(ancestor(commit, context['source_branch_head']), 'Frozen source is outside resolved branch history')
+    require(version == context['version'], 'Frozen version differs from source commit date')
+    print(json.dumps({'version': version, 'source_sha': commit, 'control_sha': context['control_sha'],
+                      'release_run_id': context['release_run_id'], 'release_request_id': context['release_request_id']}), flush=True)
     with tempfile.TemporaryDirectory(prefix='alphapulse-release-') as temporary:
         publish(api, Path(temporary), branch, commit, version)
 

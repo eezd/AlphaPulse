@@ -1,19 +1,20 @@
 name: Manual release
-run-name: Release ${{ inputs.source_branch }} (${{ inputs.request_id }})
+run-name: Release ${{ inputs.source_branch }}
 on:
   workflow_dispatch:
     inputs:
       source_branch:
+        description: Remote source branch (frozen when execution starts)
         required: true
+        default: main
         type: string
       source_sha:
-        required: true
-        type: string
-      request_id:
-        required: true
+        description: Optional full SHA; leave empty for branch HEAD
+        required: false
+        default: ''
         type: string
 concurrency:
-  group: alphapulse-release
+  group: alphapulse-delivery
   cancel-in-progress: false
 jobs:
   release:
@@ -27,11 +28,6 @@ jobs:
         with:
           ref: ${{ forgejo.sha }}
           fetch-depth: 0
-          persist-credentials: false
-      - uses: https://github.com/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          ref: ${{ inputs.source_sha }}
-          path: source
           persist-credentials: false
       - name: Install release tools
         run: |
@@ -47,24 +43,40 @@ jobs:
           uv python install 3.13 --no-bin
           corepack enable
           corepack prepare pnpm@12.11.2 --activate
-      - name: Build and publish fixed source once
+      - name: Resolve source once
+        id: source
         env:
           SOURCE_BRANCH: ${{ inputs.source_branch }}
           SOURCE_SHA: ${{ inputs.source_sha }}
           CONTROL_REF: ${{ forgejo.ref }}
-          REQUEST_ID: ${{ inputs.request_id }}
+          CONTROL_SHA: ${{ forgejo.sha }}
+          CI_RUN_ID: ${{ forgejo.run_id }}
+          FORGEJO_RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          RELEASE_CONTEXT: ${{ runner.temp }}/alphapulse-release-${{ forgejo.run_id }}-${{ forgejo.run_attempt }}.json
+        run: python3 scripts/resolve-release.py
+      - uses: https://github.com/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ steps.source.outputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - name: Build and publish fixed source once
+        env:
+          CONTROL_REF: ${{ forgejo.ref }}
+          CONTROL_SHA: ${{ forgejo.sha }}
+          RELEASE_CONTEXT: ${{ runner.temp }}/alphapulse-release-${{ forgejo.run_id }}-${{ forgejo.run_attempt }}.json
           FORGEJO_API_URL: ${{ forgejo.server_url }}/api/v1
           FORGEJO_RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           CI_RUN_ID: ${{ forgejo.run_id }}
           CI_RESOURCE_LABEL: io.alphapulse.ci.run=release-${{ forgejo.run_id }}-${{ forgejo.run_attempt }}
-          DOCKER_CONFIG: /tmp/alphapulse-release-auth
+          DOCKER_CONFIG: ${{ runner.temp }}/alphapulse-release-auth-${{ forgejo.run_id }}-${{ forgejo.run_attempt }}
         run: |
           mkdir -m 700 -p "$DOCKER_CONFIG"
           uv run --no-project --managed-python --no-python-downloads --python 3.13 python scripts/manual-release.py
       - name: Clean only this run
         if: always()
         env:
-          DOCKER_CONFIG: /tmp/alphapulse-release-auth
+          DOCKER_CONFIG: ${{ runner.temp }}/alphapulse-release-auth-${{ forgejo.run_id }}-${{ forgejo.run_attempt }}
         run: |
           docker buildx rm "alphapulse-release-${{ forgejo.run_id }}" || true
-          rm -rf /tmp/alphapulse-release-auth
+          rm -rf -- "$DOCKER_CONFIG"
+          rm -f -- "${{ runner.temp }}/alphapulse-release-${{ forgejo.run_id }}-${{ forgejo.run_attempt }}.json"

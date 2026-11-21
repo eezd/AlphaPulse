@@ -45,8 +45,8 @@
 | 交付脚本测试 | `python3 -m unittest discover -s scripts/tests -q` | 具体脚本 Ruff 检查集合以 `scripts/native.py:build()` 为准 |
 | 集成验收 | `scripts/smoke_briefing_keywords.py`、`scripts/smoke_research_admission.py`、`scripts/smoke_briefings.py` 等相关入口 | 会写数据库／Redis，部分测试重置数据；先读脚本，使用独占临时 PG18／Redis8、合成凭据和替身模型 |
 | 原生构建及部署 | `bash /srv/AlphaPulse/start.sh` → `scripts/native.py:main()` | **构建后会维护排空并切换六个服务**；不是普通开发命令，需部署授权。`build()` 单独调用不激活，但会安装依赖、写构建产物和浏览器目录 |
-| 正式发布 | `bash /srv/AlphaPulse/release.sh <remote-branch>` | 固定远端 SHA，仅触发 Forgejo 正式发布；不部署本机，需发布授权 |
-| 对外同步 | `bash /srv/AlphaPulse/sysnc-github.sh` | 操作者单独运行，向 GitHub／GHCR 同步获准的分支、TAG 和已验收正式产物；不重建、不强推、不删历史 |
+| 正式发布 | Forgejo Actions → `Manual release` → Run workflow（main 控制分支） | 来源分支默认 main，SHA 可选；执行时冻结 SHA，仅发布 Forgejo，不部署本机，需发布授权 |
+| 对外同步 | Forgejo Actions → `Manual GitHub sync` → Run workflow（main 控制分支） | 独立手动同步获准分支、TAG 和已验收原件至 GitHub／GHCR；不重建、不强推、不删历史 |
 
 - **最小验收**：按改动范围完成相关测试；进入原生候选必须通过上述后端、前端与交付检查。数据库／准入／队列变更还需隔离迁移和对应集成验收；页面变更检查桌面 1440px 与移动端 390px 的主要交互及溢出。
 - **质量验证**：结构和逐字证据通过不代表语义准确；替身模型、保存输出重放、合成案例和真实模型评审分别记录。真实模型评审须限定样本及调用范围，不能把未知用量记为零或把 Token 下降当质量提升。
@@ -63,7 +63,7 @@
 - **测试与生产**：生产 worker 可持续产生付费模型请求及已配置的故障通知。启动 worker、启用 AI／研究来源、批量重试／补报、发布 SKILL 或运行真实模型评测都要核实当次授权，不得用测试或修复名义隐式触发。当前通知范围为运维故障，不能顺带启用新闻／价格推送。
 - **迁移与恢复**：生产数据清理、迁移前须按对应 runbook 做私有完整备份，并将实际备份恢复到隔离数据库核验。保留历史 Alembic 链，不为清理退役代码删除迁移或历史审计。加法 schema 也不等于任意旧代码可回退，核实 `scripts/maintenance.py` 的兼容对。
 - **部署与回滚**：原生六个系统级 unit 以 root 运行，不依赖专用服务账号。服务为 `api`、`crawler`、`market`、`calendar`、`news-risk`、`jin10-calendar`（unit 前缀 `alphapulse-`，其中 `news-risk` 运行新 `alphapulse.briefings.worker`）。生产 API／网页共用 `127.0.0.1:21005`。脚本不自动备份或迁移数据库；失败恢复不恢复数据库内容或 SKILL 指针。`runtime/deployment.pending.json` 是恢复证据，不得直接删除以绕过检查。
-- **工作区与发布范围**：本目录存在跨任务未提交改动，且部分已随原生构建上线；不能仅凭 Git dirty 状态判定待发布内容。定向发布以实际运行构建为基线，冻结文件范围及摘要，防止 `start.sh` 打包整个工作区混入其他任务。新版 `.forgejo/workflows/release.yml` 在目标 Forgejo 完成接入和验收后，普通 push／tag 只更新代码；发布和 GitHub 同步各自手动执行。在新版提交尚未生效的远端，仍须盘点并防范旧自动镜像任务。正式发布使用 `FORGEJO_TOKEN`／Actions Secret `RELEASE_TOKEN`（映射为进程变量 `FORGEJO_RELEASE_TOKEN`），不隐式复用旧 Gitea 凭据；缺少仓库、Runner 或权限时只阻塞远端步骤。发布原件仅临时构建，完成版本不可覆盖；未完成版必须证明原 SHA、终止的旧任务与产物身份后精确清理并全量重建，不使用 Generic 暂存或持久检查点。
+- **工作区与发布范围**：本目录存在跨任务未提交改动，且部分已随原生构建上线；不能仅凭 Git dirty 状态判定待发布内容。定向发布以实际运行构建为基线，冻结文件范围及摘要，防止 `start.sh` 打包整个工作区混入其他任务。新版 `.forgejo/workflows/release.yml` 在目标 Forgejo 完成接入和验收后，普通 push／tag 只更新代码；发布和 GitHub 同步各自手动执行。在新版提交尚未生效的远端，仍须盘点并防范旧自动镜像任务。正式发布和同步仅由可信 main 上的两个手动 Actions 工作流执行，共享 `alphapulse-delivery` 并发组，`cancel-in-progress: false`；不提供本地发布／同步客户端。发布输入为来源分支及可选完整 SHA，SHA 留空在任务执行时冻结分支 HEAD，UUID 自动生成。Actions Secret `RELEASE_TOKEN` 在发布步骤映射为 `FORGEJO_RELEASE_TOKEN`，同步步骤映射为 `FORGEJO_TOKEN`；仅同步步骤持有 `MIRROR_TOKEN` 并映射为 `GITHUB_TOKEN`。控制器只接受环境凭据，不读取 HOME Token、宿主 Git helper 或 Registry 登录文件；Git／Registry 分别使用本次运行的临时 0700／0600 认证配置，Git 使用精确 HTTPS 仓库路径，Registry 使用 stdin 登录，结束清理。测试必须隔离 HOME 和凭据、模拟 API；不隐式复用旧 Gitea 凭据；缺少仓库、Runner 或权限时只阻塞远端步骤。发布原件仅临时构建，完成版本不可覆盖；未完成版必须证明原 SHA、终止的旧任务与产物身份后精确清理并全量重建，不使用 Generic 暂存或持久检查点。
 
 ## 项目记忆与接续
 

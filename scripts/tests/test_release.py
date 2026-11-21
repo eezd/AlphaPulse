@@ -1,15 +1,20 @@
-"""Release baseline, remote-only dispatch and client failure contracts."""
+"""Release baseline, Actions source resolution and credential isolation contracts."""
 import importlib.util
+import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
-sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-spec=importlib.util.spec_from_file_location('manual',Path(__file__).resolve().parents[1]/'manual-release.py')
-manual=importlib.util.module_from_spec(spec)
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+spec = importlib.util.spec_from_file_location('manual', Path(__file__).resolve().parents[1]/'manual-release.py')
+manual = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(manual)
+resolver = manual.resolver
+
 
 class SelectionTests(unittest.TestCase):
     def setUp(self):
@@ -52,7 +57,6 @@ class SelectionTests(unittest.TestCase):
     def test_merge_graph_uses_parent_distance_instead_of_commit_count(self):
         selected = manual.select_baseline([self.record('A'), self.record('B'), self.record('X')], 'dev', self.nodes['T'])
         self.assertEqual(selected['source_sha'], self.nodes['A'])
-        # This graph deliberately makes commit-set counting prefer the wrong baseline.
         self.assertGreater(int(self.git('rev-list', '--count', self.nodes['A']+'..'+self.nodes['T'])),
                            int(self.git('rev-list', '--count', self.nodes['B']+'..'+self.nodes['T'])))
 
@@ -88,93 +92,93 @@ class ClientTests(unittest.TestCase):
 
     def test_workflow_secret_mapping_uses_a_legal_forgejo_name(self):
         import re
-        workflow = (Path(__file__).resolve().parents[2] / '.forgejo/workflows/release.yml').read_text()
+        workflow = (Path(__file__).resolve().parents[2]/'.forgejo/workflows/release.yml').read_text()
         mappings = dict(re.findall(r'(?m)^\s+(\w+):\s+\$\{\{\s*secrets\.(\w+)\s*\}\}', workflow))
         self.assertEqual(mappings['FORGEJO_RELEASE_TOKEN'], 'RELEASE_TOKEN')
+        self.assertNotIn('GITHUB_TOKEN', mappings)
         for name in mappings.values():
             self.assertRegex(name, r'(?i)^[A-Z_][A-Z0-9_]*$')
             self.assertNotRegex(name, r'(?i)^(FORGEJO_|GITEA_|GITHUB_|[0-9])')
 
     def test_missing_account_secret_fails_before_network_access(self):
-        import os
         import release
         with patch.dict(os.environ, {'FORGEJO_RELEASE_TOKEN': ''}), patch.object(release, 'API') as api:
             with self.assertRaisesRegex(ValueError, 'RELEASE_TOKEN.*FORGEJO_RELEASE_TOKEN'):
                 release.client()
             api.assert_not_called()
 
-    def test_release_outside_repo_requires_explicit_branch(self):
-        client=Path(__file__).resolve().parents[2]/'release.sh'
-        with tempfile.TemporaryDirectory() as d:
-            result=subprocess.run(['bash',str(client)],cwd=d,capture_output=True)
-            self.assertEqual(result.returncode,2)
-    def test_release_outside_repo_uses_no_local_git(self):
-        import os
-        client=Path(__file__).resolve().parents[2]/'release.sh'
-        with tempfile.TemporaryDirectory() as d:
-            env=dict(os.environ);env.pop('FORGEJO_TOKEN',None)
-            result=subprocess.run(['bash',str(client),'feature/example'],cwd=d,env=env,capture_output=True,text=True)
-            self.assertEqual(result.returncode,1)
-            self.assertIn('FORGEJO_TOKEN',result.stderr)
 
-class RemoteClientTests(unittest.TestCase):
-    def invoke_client(self, *, bad_sha=False, bad_hash=False, draft=False, dispatch_error=False, statuses=None):
-        import contextlib,hashlib,io,json,os,urllib.error,urllib.request
-        client=(Path(__file__).resolve().parents[2]/'release.sh').read_text().split("<<'PY'\n",1)[1].rsplit('\nPY',1)[0]
-        sha='a'*40;version='20261109-'+sha[:8];calls=[]
-        build = {'source_sha': 'b'*40 if bad_sha else sha, 'version': version}
-        marker = {'source_sha': sha, 'version': version,
-                  'build_sha256': 'b'*64 if bad_hash else hashlib.sha256(json.dumps(build).encode()).hexdigest()}
-        class Response:
-            def __init__(self,value):self.value=value
-            def __enter__(self):return self
-            def __exit__(self,*args):return False
-            def read(self):return json.dumps(self.value).encode()
-        pending = iter(statuses or ['success'])
-        def open_request(request,**kw):
-            url=request.full_url;calls.append(request)
-            if '/branches/' in url:return Response({'commit':{'id':sha}})
-            if '/git/commits/' in url:return Response({'commit':{'committer':{'date':'2026-11-09T10:00:00Z'}}})
-            if '/dispatches' in url:
-                if dispatch_error:raise urllib.error.URLError('uncertain post')
-                return Response({'id':123, 'run_number':7})
-            if '/actions/runs/' in url:return Response({'status': next(pending)})
-            if '/releases/tags/' in url:
-                return Response({'tag_name': version, 'draft': draft, 'prerelease': False, 'assets': [
-                    {'name': name, 'browser_download_url': 'https://git.134333.xyz/download/'+name}
-                    for name in ('build.json', 'release-complete.json')]})
-            if '/download/build.json' in url:return Response(build)
-            if '/download/release-complete.json' in url:return Response(marker)
-            raise AssertionError(url)
-        from unittest.mock import Mock
-        opener=Mock();opener.open.side_effect=open_request
-        output=io.StringIO();code=0
-        with patch.object(sys,'argv',['release.sh','feature/demo']),patch.dict(os.environ,{'FORGEJO_TOKEN':'fixture-only'}),patch.object(urllib.request,'build_opener',return_value=opener),patch('time.sleep'),contextlib.redirect_stdout(output),contextlib.redirect_stderr(output):
-            try:exec(compile(client,'release-client','exec'),{})
-            except SystemExit as error:code=error.code
-        return code,calls,output.getvalue()
-    def test_dispatch_pins_sha_and_trusted_main(self):
-        import json
-        code,calls,output=self.invoke_client()
-        self.assertEqual(code,0,output)
-        posts=[r for r in calls if r.data]
-        self.assertEqual(len(posts),1)
-        body=json.loads(posts[0].data)
-        self.assertEqual(body['ref'],'refs/heads/main')
-        self.assertTrue(body['return_run_info'])
-        self.assertTrue(any('/actions/runs/123' in r.full_url for r in calls))
-        self.assertIn('/actions/runs/7', output)
-        self.assertEqual(body['inputs']['source_branch'],'feature/demo')
-        self.assertEqual(body['inputs']['source_sha'],'a'*40)
-    def test_forgejo_pending_statuses_are_polled_until_success(self):
-        code, calls, output = self.invoke_client(statuses=['unknown', 'waiting', 'blocked', 'running', 'success'])
-        self.assertEqual(code, 0, output)
-        self.assertEqual(sum('/actions/runs/' in r.full_url for r in calls), 5)
+class ResolverTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.home = Path(temporary.name)
+        self.env = {'HOME': str(self.home), 'SOURCE_BRANCH': 'feature/demo', 'SOURCE_SHA': '',
+                    'CONTROL_REF': 'refs/heads/main', 'CONTROL_SHA': 'c'*40, 'CI_RUN_ID': '123',
+                    'FORGEJO_RELEASE_TOKEN': 'synthetic-secret', 'RELEASE_CONTEXT': str(self.home/'context.json'),
+                    'GITHUB_OUTPUT': str(self.home/'output')}
+        self.addCleanup(patch.stopall)
+        patch.dict(os.environ, self.env, clear=True).start()
+        self.head = 'a'*40
+        self.requests = patch.object(resolver, 'request', side_effect=self.response).start()
 
-    def test_draft_release_cannot_succeed(self):self.assertEqual(self.invoke_client(draft=True)[0],1)
-    def test_wrong_metadata_sha_cannot_succeed(self):self.assertEqual(self.invoke_client(bad_sha=True)[0],1)
-    def test_wrong_completion_hash_cannot_succeed(self):self.assertEqual(self.invoke_client(bad_hash=True)[0],1)
-    def test_uncertain_dispatch_is_never_reposted(self):
-        code,calls,_=self.invoke_client(dispatch_error=True)
-        self.assertEqual(code,1)
-        self.assertEqual(sum(bool(r.data) for r in calls),1)
+    def response(self, path, token):
+        self.assertEqual(token, 'synthetic-secret')
+        if '/branches/' in path:
+            return {'commit': {'id': self.head}}
+        return {'commit': {'committer': {'date': '2026-11-09T23:00:00-05:00'}}}
+
+    def test_empty_sha_resolves_execution_time_head_once_with_utc_date(self):
+        self.head = 'b'*40  # A queued request resolves only now, not at button click.
+        context = resolver.resolve()
+        self.assertEqual(context['source_sha'], 'b'*40)
+        self.assertEqual(context['version'], '20261110-bbbbbbbb')
+        self.assertEqual(context['release_inputs'], {'source_branch': 'feature/demo', 'source_sha': ''})
+        self.assertEqual(self.requests.call_count, 2)
+        self.assertIn('/branches/feature%2Fdemo', self.requests.call_args_list[0].args[0])
+        self.assertEqual(str(resolver.uuid.UUID(context['release_request_id'])), context['release_request_id'])
+        self.head = 'd'*40
+        self.assertEqual(context['source_branch_head'], 'b'*40)
+
+    def test_explicit_sha_is_fixed_independently_of_current_head(self):
+        os.environ['SOURCE_SHA'] = 'd'*40
+        context = resolver.resolve()
+        self.assertEqual(context['source_sha'], 'd'*40)
+        self.assertEqual(context['source_branch_head'], 'a'*40)
+        self.assertTrue(self.requests.call_args.args[0].endswith('/git/commits/'+'d'*40))
+
+    def test_bad_input_or_ci_identity_stops_before_api(self):
+        for key, value in [('SOURCE_BRANCH', '-bad'), ('SOURCE_BRANCH', 'main bad'), ('SOURCE_SHA', 'HEAD'),
+                           ('SOURCE_SHA', 'a'*39), ('CONTROL_REF', 'refs/heads/dev'), ('CI_RUN_ID', '0')]:
+            with self.subTest(key=key, value=value), patch.dict(os.environ, {key: value}):
+                self.requests.reset_mock()
+                with self.assertRaises(ValueError):
+                    resolver.resolve()
+                self.requests.assert_not_called()
+
+    def test_missing_secret_never_falls_back_to_home(self):
+        token = self.home/'.config/forgejo/token'
+        token.parent.mkdir(parents=True)
+        token.write_text('must-not-read')
+        with patch.dict(os.environ, {'FORGEJO_RELEASE_TOKEN': ''}), patch.object(resolver.Path, 'read_text') as read:
+            with self.assertRaisesRegex(ValueError, 'RELEASE_TOKEN'):
+                resolver.resolve()
+            self.requests.assert_not_called()
+            read.assert_not_called()
+
+    def test_outputs_contain_frozen_identity_not_tokens(self):
+        import contextlib
+        import io
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            resolver.main()
+        context = json.loads((self.home/'context.json').read_text())
+        self.assertEqual(context['source_sha'], 'a'*40)
+        self.assertIn('source_sha='+'a'*40, (self.home/'output').read_text())
+        self.assertNotIn('synthetic-secret', output.getvalue())
+
+    def test_missing_branch_lookup_propagates_without_dispatch(self):
+        self.requests.side_effect = ValueError('Forgejo source lookup failed: HTTP 404')
+        with self.assertRaisesRegex(ValueError, 'HTTP 404'):
+            resolver.resolve()
+        self.assertEqual(self.requests.call_count, 1)

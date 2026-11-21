@@ -16,23 +16,29 @@ class NativeTests(unittest.TestCase):
             root = Path(tmp)
             for directory in ('backend', 'web', 'scripts', '.forgejo/workflows'):
                 (root/directory).mkdir(parents=True)
-            workflow = root/'.forgejo/workflows/release.yml'
-            workflow.write_text('on: workflow_dispatch\n')
-            for name in ('start.sh', 'stop.sh', 'status.sh', 'release.sh', 'sysnc-github.sh'):
+            for name in ('release.yml', 'sync-github.yml'):
+                (root/'.forgejo/workflows'/name).write_text('on: workflow_dispatch\n')
+            for name in ('start.sh', 'stop.sh', 'status.sh'):
                 (root/name).write_text('#!/bin/sh\n')
 
             def process(args, **kwargs):
                 if args == ['pnpm', 'build']:
                     (kwargs['cwd']/'dist').mkdir()
                 if args[:3] == ['python3', '-m', 'unittest']:
-                    self.assertEqual((kwargs['cwd']/'.forgejo/workflows/release.yml').read_bytes(), workflow.read_bytes())
+                    for name in ('release.yml', 'sync-github.yml'):
+                        self.assertEqual((kwargs['cwd']/'.forgejo/workflows'/name).read_bytes(),
+                                         (root/'.forgejo/workflows'/name).read_bytes())
 
             with patch.object(native, 'ROOT', root), patch.object(native, 'RUNTIME', root/'runtime'), \
                  patch.object(native, 'identity', return_value={'source_sha': 'a'*40, 'dirty': True}), \
                  patch.object(native, 'run', return_value='1794224694'), \
                  patch.object(native.subprocess, 'run', side_effect=process):
                 candidate = native.build()
-            self.assertEqual((candidate/'.forgejo/workflows/release.yml').read_bytes(), workflow.read_bytes())
+            for name in ('release.yml', 'sync-github.yml'):
+                self.assertEqual((candidate/'.forgejo/workflows'/name).read_bytes(),
+                                 (root/'.forgejo/workflows'/name).read_bytes())
+            for name in ('release.sh', 'sysnc-github.sh'):
+                self.assertFalse((candidate/name).exists())
 
     def test_schema_compatibility_allows_only_explicit_predecessors(self):
         import runpy
