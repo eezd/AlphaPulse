@@ -373,6 +373,7 @@ class Version:
         build = json.loads((self.path / BUILD).read_bytes())
         completion = json.loads((self.path / COMPLETE).read_bytes())
         self.sha = build['source_sha']
+        self.source_branch = build['source_branch']
         require(SHA.fullmatch(self.sha) and tag.endswith('-' + self.sha[:8]) and
                 snapshot.commit('refs/tags/' + tag) == self.sha and
                 build['version'] == completion['version'] == tag and completion['source_sha'] == self.sha and
@@ -447,6 +448,48 @@ class Version:
         print(f'{self.tag}：GitHub Release 与镜像已验收', flush=True)
 
 
+def select_latest(versions, snapshot):
+    """按 main 祖先关系选择；不按版本名、日期或同步迭代顺序提升。"""
+    records = [version for version in versions if version.source_branch == 'main']
+    if not records:
+        return None
+    head = snapshot.heads['refs/heads/main']
+    require(all(snapshot.ancestor(version.sha, head) for version in records),
+            '已完成 main 版本不在当前 main 历史中')
+    candidates = [version for version in records
+                  if all(snapshot.ancestor(other.sha, version.sha) for other in records)]
+    require(len(candidates) == 1, '已完成 main 版本没有唯一的最新祖先')
+    return candidates[0]
+
+
+def check_latest(versions, latest, authfile):
+    # 写入前证明现有别名；未知／dev 镜像不能被静默覆盖。
+    if latest is None:
+        return
+    for repository in (FORGEJO_IMAGE, latest.target_image.rsplit(':', 1)[0]):
+        raw = read_manifest(repository + ':latest', authfile, allow_missing=True)
+        if raw is not None:
+            value = 'sha256:' + hashlib.sha256(raw).hexdigest()
+            record = next((version for version in versions
+                           if version.source_branch == 'main' and version.image['digest'] == value), None)
+            require(record is not None, '现有 latest 不是已验收的 main 镜像')
+            verify_image(repository + ':latest', record.image, authfile)
+
+
+def promote_latest(latest, authfile):
+    if latest is None:
+        return
+    source = FORGEJO_IMAGE + '@' + latest.image['digest']
+    for repository in (FORGEJO_IMAGE, latest.target_image.rsplit(':', 1)[0]):
+        reference = repository + ':latest'
+        raw = read_manifest(reference, authfile, allow_missing=True)
+        if raw is None or 'sha256:' + hashlib.sha256(raw).hexdigest() != latest.image['digest']:
+            run(['skopeo', 'copy', '--all', '--preserve-digests', '--authfile', authfile,
+                 'docker://' + source, 'docker://' + reference], '更新 OCI latest')
+        verify_image(reference, latest.image, authfile)
+    print(f'两端 OCI latest 已验收：{latest.tag}', flush=True)
+
+
 def sync(directory, source, target, authfile):
     settings = target.json('', '读取 GitHub 仓库')
     require(settings.get('full_name', '').lower() == f'{GITHUB_OWNER}/{GITHUB_REPO}'.lower() and
@@ -493,6 +536,8 @@ def sync(directory, source, target, authfile):
             refs[ref] = sha
         elif tag not in releases:
             print(f'跳过尚无验收 Release 的版本 TAG：{tag!r}', flush=True)
+    latest = select_latest(versions, snapshot)
+    check_latest(versions, latest, authfile)
     changes = snapshot.changes(refs, dest_refs)
     if USE_LFS == 'true':
         snapshot.lfs(sorted(refs))
@@ -507,6 +552,7 @@ def sync(directory, source, target, authfile):
         print(f'{version.tag}：开始同步正式产物', flush=True)
         version.sync(target)
     require(not gaps, f'仍有 {len(gaps)} 个正式版本未同步；需核实并补录原始发布证据')
+    promote_latest(latest, authfile)
     print(f'GitHub 手动同步完成，已验收 {len(versions)} 个正式版本', flush=True)
 
 

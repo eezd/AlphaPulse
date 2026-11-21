@@ -320,6 +320,30 @@ def publish(api, cache, branch, commit, version):
     print('Published to Forgejo', version)
 
 
+def promote_latest(api, branch):
+    """Only advance the mutable OCI alias to the newest completed main ancestor."""
+    if branch != 'main':
+        return
+    records = [record for record in complete_history(api) if record['source_branch'] == 'main']
+    head = run('git', 'rev-parse', 'refs/remotes/origin/main')
+    require(records and all(ancestor(record['source_sha'], head) for record in records),
+            'Completed main release is outside current main history')
+    candidates = [record for record in records
+                  if all(ancestor(other['source_sha'], record['source_sha']) for other in records)]
+    require(len(candidates) == 1, 'Completed main releases do not have a unique newest ancestor')
+    latest = candidates[0]
+    current = registry_digest(FORGEJO_IMAGE, 'latest')
+    require(current is None or any(record['image_digest'] == current for record in records),
+            'Existing latest is not a proven completed main image')
+    verify_completed_record(api, api.release(latest['version']), latest)
+    if current != latest['image_digest']:
+        run('skopeo', 'copy', '--all', '--preserve-digests', '--authfile', os.environ['DOCKER_CONFIG']+'/config.json',
+            'docker://'+FORGEJO_IMAGE+'@'+latest['image_digest'], 'docker://'+FORGEJO_IMAGE+':latest')
+    require(image_digest(FORGEJO_IMAGE+':latest') == latest['image_digest'], 'Latest image differs')
+    verify_anonymous(FORGEJO_IMAGE+':latest')
+    print('Verified Forgejo OCI latest ->', latest['version'])
+
+
 def execute():
     context = release_context()
     branch, commit = context['source_branch'], context['source_sha']
@@ -338,6 +362,7 @@ def execute():
                       'release_run_id': context['release_run_id'], 'release_request_id': context['release_request_id']}), flush=True)
     with tempfile.TemporaryDirectory(prefix='alphapulse-release-') as temporary:
         publish(api, Path(temporary), branch, commit, version)
+    promote_latest(api, branch)
 
 
 if __name__ == '__main__':

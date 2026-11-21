@@ -324,7 +324,7 @@ class SyncTests(unittest.TestCase):
         self.next_id += 1
         return self.next_id
 
-    def add_version(self, sha):
+    def add_version(self, sha, branch='main'):
         tag = '20261108-' + sha[:8]
         self.git('tag', tag, sha)
         packages = {f'project_{tag}_{os_name}_{arch}.{ext}': f'{tag}/{os_name}/{arch}'.encode()
@@ -333,13 +333,13 @@ class SyncTests(unittest.TestCase):
         platforms = {}
         manifests = []
         for arch in ('amd64', 'arm64'):
-            raw = json.dumps({'schemaVersion': 2, 'architecture': arch}).encode()
+            raw = json.dumps({'schemaVersion': 2, 'architecture': arch, 'revision': sha}).encode()
             platforms['linux/' + arch] = digest(raw)
             manifests.append({'platform': {'os': 'linux', 'architecture': arch}, 'digest': digest(raw)})
             self.manifests[SOURCE_IMAGE + '@' + digest(raw)] = raw
         top = json.dumps({'schemaVersion': 2, 'manifests': manifests}).encode()
         self.manifests[SOURCE_IMAGE + ':' + tag] = self.manifests[SOURCE_IMAGE + '@' + digest(top)] = top
-        build = json.dumps({'version': tag, 'source_branch': 'main', 'source_sha': sha, 'previous_tag': None,
+        build = json.dumps({'version': tag, 'source_branch': branch, 'source_sha': sha, 'previous_tag': None,
                             'packages': [{'name': name, 'sha256': sha256(body)} for name, body in packages.items()],
                             'image': {'ref': SOURCE_IMAGE + ':' + tag, 'digest': digest(top),
                                       'platforms': platforms}}).encode()
@@ -465,7 +465,10 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(self.refs(), refs)
         self.assertEqual(self.lfs[:2], [['fetch', '--all', 'source', *sorted(refs)],
                                         ['push', '--all', 'destination', *sorted(refs)]])
-        self.assertEqual(len(self.oci_writes), 2)
+        self.assertEqual(set(self.oci_writes), {SOURCE_IMAGE + ':latest', TARGET_IMAGE + ':latest',
+                         *(TARGET_IMAGE + ':20261108-' + sha[:8] for sha in (self.first, self.second))})
+        self.assertEqual(self.manifests[SOURCE_IMAGE + ':latest'], self.manifests[SOURCE_IMAGE + ':20261108-' + self.second[:8]])
+        self.assertEqual(self.manifests[TARGET_IMAGE + ':latest'], self.manifests[SOURCE_IMAGE + ':latest'])
         self.assertEqual(len(self.dst_assets), 16)
         self.assertFalse(any(release['draft'] for release in self.dst_releases.values()))
         self.assertNotIn('release-complete.json', {asset['name'] for asset in self.dst_assets.values()})
@@ -476,6 +479,47 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(self.http_writes, [])
         self.assertEqual(self.oci_writes, [])
         self.assertIn('更新 0 项', self.output)
+
+    def test_latest_ignores_dev_and_historical_iteration_order(self):
+        self.git('switch', 'dev')
+        newer_dev = self.commit('new dev')
+        self.add_version(newer_dev, branch='dev')
+        self.git('-c', 'push.followTags=false', 'push', self.source, '--all')
+        self.git('push', self.source, '--tags')
+        self.releases = dict(reversed(list(self.releases.items())))
+        self.sync()
+        expected = self.manifests[SOURCE_IMAGE + ':20261108-' + self.second[:8]]
+        self.assertEqual(self.manifests[SOURCE_IMAGE + ':latest'], expected)
+        self.assertEqual(self.manifests[TARGET_IMAGE + ':latest'], expected)
+        self.oci_writes.clear()
+        self.sync()
+        self.assertEqual(self.oci_writes, [])
+        self.assertNotIn('refs/tags/latest', self.refs())
+
+    def test_unknown_latest_stops_before_any_target_write(self):
+        for repository in (SOURCE_IMAGE, TARGET_IMAGE):
+            with self.subTest(repository=repository):
+                self.manifests[repository + ':latest'] = b'unknown'
+                with self.assertRaisesRegex(RuntimeError, 'latest'):
+                    self.sync()
+                self.assertEqual(self.http_writes, [])
+                self.assertEqual(self.oci_writes, [])
+                self.assertEqual(self.refs(), set())
+                del self.manifests[repository + ':latest']
+
+    def test_latest_ancestry_conflict_stops_before_writes(self):
+        self.git('switch', '-c', 'fork', self.first)
+        fork = self.commit('fork')
+        self.add_version(fork)
+        self.git('switch', 'main')
+        self.git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+                 'merge', '--no-ff', 'fork', '-m', 'merge')
+        self.git('-c', 'push.followTags=false', 'push', self.source, '--all')
+        self.git('push', self.source, '--tags')
+        with self.assertRaisesRegex(RuntimeError, '唯一'):
+            self.sync()
+        self.assertEqual(self.http_writes, [])
+        self.assertEqual(self.oci_writes, [])
 
     def test_fast_forward_leaves_target_only_ref_and_excludes_dev(self):
         self.scope['BRANCHES'] = ['main']
