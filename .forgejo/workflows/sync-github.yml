@@ -17,7 +17,6 @@ jobs:
       CONTROL_REF: ${{ forgejo.ref }}
       CI_RUN_ID: ${{ forgejo.run_id }}
       CI_RUN_ATTEMPT: ${{ forgejo.run_attempt }}
-      CI_AUTH_DIR: ${{ runner.temp }}/alphapulse-sync-${{ forgejo.run_id }}-${{ forgejo.run_attempt }}
     steps:
       - name: Check out trusted control code
         uses: https://github.com/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -34,11 +33,14 @@ jobs:
           fi
       - name: Sync verified originals to GitHub and GHCR
         env:
+          CI_AUTH_DIR: ${{ runner.temp }}/alphapulse-sync-${{ forgejo.run_id }}-${{ forgejo.run_attempt }}
           FORGEJO_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.MIRROR_TOKEN }}
         run: python3 scripts/sync-github.py
       - name: Remove this run's authentication files
         if: ${{ always() }}
+        env:
+          CI_AUTH_DIR: ${{ runner.temp }}/alphapulse-sync-${{ forgejo.run_id }}-${{ forgejo.run_attempt }}
         run: |
           python3 - <<'PY'
           import os

@@ -666,9 +666,14 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('        run: python3 scripts/sync-github.py\n', sync)
         self.assertIn("      CONTROL_REF: ${{ forgejo.ref }}\n"
                       "      CI_RUN_ID: ${{ forgejo.run_id }}\n"
-                      "      CI_RUN_ATTEMPT: ${{ forgejo.run_attempt }}\n"
-                      "      CI_AUTH_DIR: ${{ runner.temp }}/alphapulse-sync-${{ forgejo.run_id }}-${{ forgejo.run_attempt }}\n",
+                      "      CI_RUN_ATTEMPT: ${{ forgejo.run_attempt }}\n",
                       self.workflow)
+        # Forgejo Runner forbids runner context in job env; it is available in step env.
+        job_env = self.workflow.split('    env:\n', 1)[1].split('    steps:', 1)[0]
+        self.assertNotIn('runner.', job_env)
+        auth_line = '          CI_AUTH_DIR: ${{ runner.temp }}/alphapulse-sync-${{ forgejo.run_id }}-${{ forgejo.run_attempt }}\n'
+        self.assertIn(auth_line, sync)
+        self.assertIn('        env:\n'+auth_line, steps[4])
         self.assertIn('        if: ${{ always() }}\n', steps[4])
         self.assertFalse((ASSET.parents[1] / 'sysnc-github.sh').exists())
 
