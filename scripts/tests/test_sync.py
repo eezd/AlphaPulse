@@ -364,13 +364,15 @@ class SyncTests(unittest.TestCase):
                                          stderr=b'manifest unknown' if content is None else b'')
                 with patch('subprocess.run', return_value=result):
                     return self.original_run(args, phase, **kwargs)
-            self.assertEqual(args[1:4], ['copy', '--all', '--preserve-digests'])
+            mode = '--multi-arch=index-only' if ref == SOURCE_IMAGE + ':latest' else '--all'
+            self.assertEqual(args[1:4], ['copy', mode, '--preserve-digests'])
             src = args[-2].removeprefix('docker://')
             self.assertTrue(src.startswith(SOURCE_IMAGE + '@sha256:'))
             top = self.manifests[ref] = self.manifests[src]
-            for item in json.loads(top)['manifests']:
-                suffix = '@' + item['digest']
-                self.manifests[TARGET_IMAGE + suffix] = self.manifests[SOURCE_IMAGE + suffix]
+            if mode == '--all':
+                for item in json.loads(top)['manifests']:
+                    suffix = '@' + item['digest']
+                    self.manifests[TARGET_IMAGE + suffix] = self.manifests[SOURCE_IMAGE + suffix]
             self.oci_writes.append(ref)
             return None
         if 'lfs' in args and args[0] == 'git':
@@ -456,6 +458,124 @@ class SyncTests(unittest.TestCase):
 
     def refs(self):
         return set(self.git('--git-dir=' + str(self.target), 'for-each-ref', '--format=%(refname)').splitlines())
+
+    def readable_versions(self):
+        for record in self.releases.values():
+            if record['draft'] or record['prerelease']:
+                continue
+            assets = {asset['name']: asset['id'] for asset in record['assets']}
+            build = json.loads(self.src_assets[assets['build.json']])
+            image = build['image']
+            image['architecture_tags'] = {platform: record['tag_name']+'-'+platform.split('/')[1]
+                                           for platform in image['platforms']}
+            for platform, tag in image['architecture_tags'].items():
+                self.manifests[SOURCE_IMAGE+':'+tag] = self.manifests[SOURCE_IMAGE+'@'+image['platforms'][platform]]
+            raw = json.dumps(build).encode()
+            self.src_assets[assets['build.json']] = raw
+            self.src_assets[assets['release-complete.json']] = json.dumps({
+                'version': build['version'], 'source_sha': build['source_sha'], 'build_sha256': sha256(raw)}).encode()
+
+    def test_readable_source_tags_are_verified_without_architecture_aliases_on_ghcr(self):
+        self.readable_versions()
+        self.sync()
+        self.assertFalse(any(ref.endswith(('-amd64', '-arm64')) for ref in self.oci_writes))
+        self.assertEqual(len(self.oci_writes), 4)
+        self.oci_writes.clear()
+        self.sync()
+        self.assertEqual(self.oci_writes, [])
+
+    def test_missing_or_swapped_source_architecture_tag_stops_before_writes(self):
+        self.readable_versions()
+        tag = '20261108-'+self.first[:8]
+        for arch in ('amd64', 'arm64'):
+            ref = SOURCE_IMAGE+':'+tag+'-'+arch
+            raw = self.manifests.pop(ref)
+            try:
+                with self.subTest(arch=arch), self.assertRaisesRegex(RuntimeError, '读取 OCI 清单失败'):
+                    self.sync()
+                self.assertEqual((self.http_writes, self.oci_writes, self.refs()), ([], [], set()))
+            finally:
+                self.manifests[ref] = raw
+        self.manifests[SOURCE_IMAGE+':'+tag+'-arm64'] = self.manifests[SOURCE_IMAGE+':'+tag+'-amd64']
+        with self.assertRaisesRegex(RuntimeError, '架构标签摘要冲突'):
+            self.sync()
+        self.assertEqual((self.http_writes, self.oci_writes, self.refs()), ([], [], set()))
+
+    def test_anonymous_source_child_tag_denied_stops_before_writes(self):
+        self.readable_versions()
+        def private_tag(args, phase, **kwargs):
+            if kwargs.get('anonymous_home') and args[-1].endswith('-arm64'):
+                result = SimpleNamespace(returncode=2, stdout=b'', stderr=b'unauthorized')
+                with patch('subprocess.run', return_value=result):
+                    return self.original_run(args, phase, **kwargs)
+            return self.run_tool(args, phase, **kwargs)
+        with patch.dict(self.scope, run=private_tag), self.assertRaisesRegex(RuntimeError, 'Forgejo 来源版本公开分发验收失败') as failure:
+            self.sync()
+        self.assertIsNotNone(failure.exception.__cause__)
+        self.assertNotIn('Change visibility', str(failure.exception))
+        self.assertEqual((self.http_writes, self.oci_writes, self.refs()), ([], [], set()))
+
+    def test_anonymous_ghcr_arm64_denied_does_not_complete_target_release(self):
+        def private_child(args, phase, **kwargs):
+            if kwargs.get('anonymous_home') and args[-1].startswith('docker://'+TARGET_IMAGE+'@'):
+                result = SimpleNamespace(returncode=2, stdout=b'', stderr=b'unauthorized')
+                with patch('subprocess.run', return_value=result):
+                    return self.original_run(args, phase, **kwargs)
+            return self.run_tool(args, phase, **kwargs)
+        with patch.dict(self.scope, run=private_child), self.assertRaisesRegex(RuntimeError, 'GHCR 版本公开分发验收失败') as failure:
+            self.sync()
+        message = str(failure.exception)
+        for expected in ('公开分发待验收', TARGET_IMAGE, 'https://github.com/owner?tab=packages',
+                         '若该包仍为 private', 'Change visibility → Public', '复用已上传原件、只补缺项'):
+            self.assertIn(expected, message)
+        self.assertNotIn('unauthorized', message + self.output)
+        self.assertIsNotNone(failure.exception.__cause__)
+        self.assertTrue(all(record['draft'] for record in self.dst_releases.values()))
+        self.assertFalse(any(method == 'PATCH' for method, _ in self.http_writes))
+        self.assertFalse(any(ref.endswith(':latest') for ref in self.oci_writes))
+        assets, copies = set(self.dst_assets), list(self.oci_writes)
+        self.http_writes.clear()
+        self.oci_writes.clear()
+        self.sync()
+        self.assertTrue(assets <= self.dst_assets.keys())
+        self.assertTrue(set(copies).isdisjoint(self.oci_writes))
+        self.assertEqual(len(self.dst_assets), 16)
+        self.assertFalse(any(record['draft'] for record in self.dst_releases.values()))
+
+    def test_anonymous_latest_failure_never_prints_acceptance(self):
+        self.sync()
+        self.oci_writes.clear()
+        for repository, label in ((SOURCE_IMAGE, 'Forgejo'), (TARGET_IMAGE, 'GHCR')):
+            def private_latest(args, phase, repository=repository, **kwargs):
+                if kwargs.get('anonymous_home') and args[-1] == 'docker://'+repository+':latest':
+                    result = SimpleNamespace(returncode=2, stdout=b'', stderr=b'synthetic-secret denied')
+                    with patch('subprocess.run', return_value=result):
+                        return self.original_run(args, phase, **kwargs)
+                return self.run_tool(args, phase, **kwargs)
+            with self.subTest(registry=label), patch.dict(self.scope, run=private_latest), \
+                    self.assertRaisesRegex(RuntimeError, label+' latest 公开分发验收失败'):
+                self.sync()
+            self.assertNotIn('两端 OCI latest 已验收', self.output)
+            self.assertEqual(self.oci_writes, [])
+
+    def test_anonymous_failure_preserves_cause_without_leaking_transport_text(self):
+        cause = ValueError('synthetic-secret malformed manifest')
+        verifier = Mock(side_effect=cause)
+        with patch.dict(self.scope, verify_image=verifier), \
+                self.assertRaisesRegex(RuntimeError, 'GHCR 版本公开分发验收失败') as failure:
+            self.scope['verify_public_image'](TARGET_IMAGE+':fixture', {}, phase='GHCR 版本公开分发验收')
+        self.assertIs(failure.exception.__cause__, cause)
+        self.assertNotIn('synthetic-secret', str(failure.exception))
+        self.assertIn('清单摘要', str(failure.exception))
+        self.assertIn('若该包仍为 private', str(failure.exception))
+        directory = Path(verifier.call_args.kwargs['anonymous_home'])
+        self.assertFalse(directory.exists())
+
+    def test_anonymous_runtime_ignores_logged_in_registry_and_home(self):
+        with tempfile.TemporaryDirectory(dir=self.root) as home:
+            result = self.original_run(['sh', '-c', 'printf "%s\\n" "$HOME" "$DOCKER_CONFIG" "$REGISTRY_AUTH_FILE" "$GIT_CONFIG_GLOBAL"'],
+                                       '模拟匿名环境', anonymous_home=home)
+        self.assertEqual(result.stdout.decode().splitlines(), [home, home, home+'/registry.json', '/dev/null'])
 
     def test_batch_then_no_writes(self):
         self.scope['USE_LFS'] = 'true'

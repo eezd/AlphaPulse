@@ -64,6 +64,7 @@ class ReleaseImageTests(unittest.TestCase):
         self.environments = []
         self.auth_contents = []
         self.auth_modes = []
+        self.tagged = {}
         self.fail_reference = None
         self.failure = None
         self.refresh_index()
@@ -100,6 +101,8 @@ class ReleaseImageTests(unittest.TestCase):
             raise self.failure
         if ref in (self.reference, self.repository + '@' + content_digest(self.raw)):
             return self.raw
+        if ref in self.tagged:
+            return self.tagged[ref]
         self.assertTrue(ref.startswith(self.repository + '@'))
         return self.children[ref.split('@')[1]]
 
@@ -108,6 +111,50 @@ class ReleaseImageTests(unittest.TestCase):
         self.assertEqual({args[-1] for args in self.calls[1:]},
                          {'docker://' + self.repository + '@' + digest for digest in self.children})
         self.assertEqual(len(set(self.authfiles)), 1)
+
+    def readable_tags(self):
+        self.expected['architecture_tags'] = {platform: 'version-'+platform.split('/')[1]
+                                              for platform in self.expected['platforms']}
+        self.tagged = {self.repository+':'+tag: self.children[self.expected['platforms'][platform]]
+                       for platform, tag in self.expected['architecture_tags'].items()}
+
+    def test_readable_versions_verify_three_tags_and_both_children_in_both_auth_modes(self):
+        self.readable_tags()
+        for anonymous in (False, True):
+            with self.subTest(anonymous=anonymous):
+                self.calls.clear()
+                verify = release.verify_anonymous if anonymous else release.image_digest
+                self.assertEqual(verify(self.reference, self.expected), self.expected['digest'])
+                self.assertEqual({call[-1] for call in self.calls},
+                                 {'docker://'+ref for ref in (self.reference, *self.tagged,
+                                  *(self.repository+'@'+value for value in self.children))})
+                self.assertEqual(len(self.calls), 5)
+                self.assertEqual(self.auth_contents[-1], {'auths': {}} if anonymous else
+                                 {'auths': {'registry.invalid': {'auth': 'synthetic'}}})
+
+    def test_missing_swapped_or_corrupt_readable_tags_fail_even_when_index_is_valid(self):
+        for anonymous in (False, True):
+            for mutation in ('missing-amd64', 'missing-arm64', 'swapped', 'corrupt'):
+                with self.subTest(anonymous=anonymous, mutation=mutation):
+                    self.readable_tags()
+                    if mutation.startswith('missing-'):
+                        self.fail_reference = self.repository+':version-'+mutation.removeprefix('missing-')
+                        self.failure = subprocess.CalledProcessError(1, ['skopeo'], stderr=b'manifest unknown')
+                    elif mutation == 'swapped':
+                        values = list(self.tagged.values())
+                        self.tagged = dict(zip(self.tagged, reversed(values), strict=True))
+                    else:
+                        self.tagged[self.repository+':version-arm64'] += b' '
+                    verify = release.verify_anonymous if anonymous else release.image_digest
+                    with self.assertRaises((ValueError, subprocess.CalledProcessError)):
+                        verify(self.reference, self.expected)
+                    self.fail_reference = None
+
+    def test_readable_tag_mapping_cannot_redirect_verification_to_other_versions(self):
+        self.readable_tags()
+        self.expected['architecture_tags']['linux/arm64'] = 'unrelated-arm64'
+        with self.assertRaisesRegex(ValueError, 'tag mapping differs'):
+            release.verify_anonymous(self.reference, self.expected)
 
     def test_authenticated_digest_verifies_index_and_both_raw_children(self):
         self.assertEqual(release.image_digest(self.reference), self.expected['digest'])

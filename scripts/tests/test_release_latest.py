@@ -36,7 +36,7 @@ class LatestTests(unittest.TestCase):
         if args[:2] == ('git', 'rev-parse'):
             return 'head'
         self.assertEqual(args[0], 'skopeo')
-        self.assertEqual(args[1:4], ('copy', '--all', '--preserve-digests'))
+        self.assertEqual(args[1:4], ('copy', '--multi-arch=index-only', '--preserve-digests'))
         self.assertEqual(args[-2:], ('docker://'+manual.FORGEJO_IMAGE+'@new', 'docker://'+manual.FORGEJO_IMAGE+':latest'))
         self.current = 'new'
 

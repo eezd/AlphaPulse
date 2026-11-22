@@ -242,11 +242,19 @@ def _verified_image_digest(reference, *, expected=None, anonymous=False):
             require(isinstance(child_manifest, dict) and child_manifest.get('schemaVersion') == 2
                     and isinstance(child_manifest.get('config'), dict)
                     and isinstance(child_manifest.get('layers'), list), 'Invalid image manifest: ' + name)
+        if expected is not None and 'architecture_tags' in expected:
+            version = expected['ref'].rsplit(':', 1)[1]
+            tags = {name: version + '-' + name.split('/')[1] for name in platforms}
+            require(expected['architecture_tags'] == tags, 'Image architecture tag mapping differs')
+            for name, tag in tags.items():
+                raw = read_manifest(repository + ':' + tag)
+                require('sha256:' + hashlib.sha256(raw).hexdigest() == platforms[name],
+                        'Image architecture tag digest differs: ' + name)
         return value
 
 
-def image_digest(reference):
-    return _verified_image_digest(reference)
+def image_digest(reference, expected=None):
+    return _verified_image_digest(reference, expected=expected)
 
 
 def verify_anonymous(image, expected=None):

@@ -203,7 +203,7 @@ class Runtime:
         self.config = directory / 'gitconfig'
         self.authfile = directory / 'registry.json'
 
-    def run(self, args, phase, *, cwd=None, allowed=(0,), input=None):
+    def run(self, args, phase, *, cwd=None, allowed=(0,), input=None, anonymous_home=None):
         # 不继承宿主 HOME、Git 配置、credential helper、askpass 或 API Secret。
         environment = {
             'PATH': os.environ.get('PATH', os.defpath), 'HOME': str(self.directory),
@@ -211,6 +211,11 @@ class Runtime:
             'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_SYSTEM': '/dev/null',
             'GIT_CONFIG_GLOBAL': str(self.config), 'REGISTRY_AUTH_FILE': str(self.authfile),
         }
+        if anonymous_home is not None:
+            environment.update(HOME=anonymous_home, XDG_CONFIG_HOME=anonymous_home,
+                               XDG_RUNTIME_DIR=anonymous_home, DOCKER_CONFIG=anonymous_home,
+                               GIT_CONFIG_GLOBAL='/dev/null',
+                               REGISTRY_AUTH_FILE=str(Path(anonymous_home) / 'registry.json'))
         result = subprocess.run(args, cwd=cwd or self.directory, input=input, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, env=environment)
         require(result.returncode in allowed, f'{phase}失败（退出码 {result.returncode}）')
@@ -314,10 +319,10 @@ class Snapshot:
         self.git('lfs', 'push', '--all', 'destination', *refs, phase='补齐 GitHub LFS 对象')
 
 
-def read_manifest(ref, authfile, *, allow_missing=False):
+def read_manifest(ref, authfile, *, allow_missing=False, anonymous_home=None):
     # Skopeo 1.18 在目标清单缺失时也可能返回 2，仍须按 Registry 错误分类。
     result = run(['skopeo', 'inspect', '--raw', '--authfile', authfile, 'docker://' + ref],
-                 '读取 OCI 清单', allowed=(0, 1, 2))
+                 '读取 OCI 清单', allowed=(0, 1, 2), anonymous_home=anonymous_home)
     if result.returncode != 0:
         # 首次复制时版本清单或整个包尚不存在；认证、限流等错误不视为缺失。
         if allow_missing and any(code in result.stderr.lower() for code in (b'manifest unknown', b'name unknown')):
@@ -326,8 +331,8 @@ def read_manifest(ref, authfile, *, allow_missing=False):
     return result.stdout
 
 
-def verify_image(ref, image, authfile, *, allow_missing=False):
-    raw = read_manifest(ref, authfile, allow_missing=allow_missing)
+def verify_image(ref, image, authfile, *, allow_missing=False, version_tags=False, anonymous_home=None):
+    raw = read_manifest(ref, authfile, allow_missing=allow_missing, anonymous_home=anonymous_home)
     if raw is None:
         return False
     digest = 'sha256:' + hashlib.sha256(raw).hexdigest()
@@ -339,9 +344,35 @@ def verify_image(ref, image, authfile, *, allow_missing=False):
                    and m.get('platform', {}).get('architecture') == arch]
         require(matches == [expected], 'OCI 架构摘要冲突：' + platform)
         repository = ref.rsplit('@', 1)[0] if '@' in ref else ref.rsplit(':', 1)[0]
-        child = read_manifest(repository + '@' + expected, authfile)
+        child = read_manifest(repository + '@' + expected, authfile, anonymous_home=anonymous_home)
         require('sha256:' + hashlib.sha256(child).hexdigest() == expected, 'OCI 子清单摘要冲突：' + platform)
+    if version_tags and 'architecture_tags' in image:
+        version = image['ref'].rsplit(':', 1)[1]
+        tags = {platform: version + '-' + platform.split('/')[1] for platform in PLATFORMS}
+        require(image['architecture_tags'] == tags, 'OCI 架构标签不符合版本契约')
+        for platform, tag in tags.items():
+            child = read_manifest(repository + ':' + tag, authfile, anonymous_home=anonymous_home)
+            require('sha256:' + hashlib.sha256(child).hexdigest() == image['platforms'][platform],
+                    'OCI 架构标签摘要冲突：' + platform)
     return True
+
+
+def verify_public_image(ref, image, *, version_tags=False, phase='镜像公开分发验收'):
+    try:
+        with tempfile.TemporaryDirectory(prefix='alphapulse-sync-anonymous-') as directory:
+            authfile = Path(directory) / 'registry.json'
+            Runtime.write_private(authfile, '{"auths": {}}\n')
+            verify_image(ref, image, str(authfile), version_tags=version_tags, anonymous_home=directory)
+    except Exception as error:
+        message = (f'{phase}失败（匿名）：{ref}；公开分发待验收，不能报告完成；'
+                   '请核对匿名访问、清单摘要及 Registry 状态')
+        if ref.startswith('ghcr.io/'):
+            message += (f'；目标包 ghcr.io/{GITHUB_OWNER.lower()}/{GITHUB_REPO.lower()}，'
+                        f'包入口：https://github.com/{GITHUB_OWNER}?tab=packages；'
+                        '若该包仍为 private，请经授权选择该包 → Package settings → Danger Zone → '
+                        'Change visibility → Public，再重跑同步以复用已上传原件、只补缺项；'
+                        '不会自动更改可见性、重建或覆盖版本')
+        raise RuntimeError(message) from error
 
 
 def package_names(tag):
@@ -400,7 +431,8 @@ class Version:
         self.authfile = authfile
         self.source_image = FORGEJO_IMAGE + '@' + self.image['digest']
         self.target_image = f'ghcr.io/{GITHUB_OWNER.lower()}/{GITHUB_REPO.lower()}:{tag}'
-        verify_image(self.image['ref'], self.image, self.authfile)
+        verify_image(self.image['ref'], self.image, self.authfile, version_tags=True)
+        verify_public_image(self.image['ref'], self.image, version_tags=True, phase='Forgejo 来源版本公开分发验收')
         self.image_exists = verify_image(self.target_image, self.image, self.authfile, allow_missing=True)
         self.missing = set(self.hashes)
         if self.target is not None:
@@ -440,6 +472,7 @@ class Version:
                  'docker://' + self.source_image, 'docker://' + self.target_image], '复制 GHCR 镜像')
             verify_image(self.target_image, self.image, self.authfile)
             print(f'{self.tag}：已验证 GHCR 多架构镜像', flush=True)
+        verify_public_image(self.target_image, self.image, phase='GHCR 版本公开分发验收')
         if release['draft']:
             published = target.json(self.target_path, '发布 GitHub 草稿', method='PATCH',
                                     payload={'draft': False, 'make_latest': 'false'})
@@ -484,9 +517,12 @@ def promote_latest(latest, authfile):
         reference = repository + ':latest'
         raw = read_manifest(reference, authfile, allow_missing=True)
         if raw is None or 'sha256:' + hashlib.sha256(raw).hexdigest() != latest.image['digest']:
-            run(['skopeo', 'copy', '--all', '--preserve-digests', '--authfile', authfile,
+            mode = '--multi-arch=index-only' if repository == FORGEJO_IMAGE else '--all'
+            run(['skopeo', 'copy', mode, '--preserve-digests', '--authfile', authfile,
                  'docker://' + source, 'docker://' + reference], '更新 OCI latest')
         verify_image(reference, latest.image, authfile)
+        registry = 'Forgejo' if repository == FORGEJO_IMAGE else 'GHCR'
+        verify_public_image(reference, latest.image, phase=registry + ' latest 公开分发验收')
     print(f'两端 OCI latest 已验收：{latest.tag}', flush=True)
 
 

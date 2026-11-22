@@ -131,7 +131,7 @@ def verify_completed_record(api, release, record):
     for name, sha in record['assets'].items():
         require(hashlib.sha256(api.asset_bytes(release, name)).hexdigest() == sha, 'Published asset differs: '+name)
     reference = FORGEJO_IMAGE+':'+record['version']
-    require(image_digest(reference) == record['image_digest'], 'Forgejo image differs')
+    require(image_digest(reference, record['image']) == record['image_digest'], 'Forgejo image differs')
     verify_anonymous(reference, record['image'])
 
 
@@ -206,10 +206,26 @@ def prepare_artifacts(cache, record):
                     source_branch_head=context['source_branch_head'],
                     packages=[{'name': name, 'sha256': info['sha256']} for name, info in sorted(metadata['files'].items())],
                     image={'ref': FORGEJO_IMAGE+':'+version, 'digest': value,
+                           'architecture_tags': {f'linux/{arch}': version+'-'+arch for arch in ('amd64', 'arm64')},
                            'platforms': {f'{m["platform"]["os"]}/{m["platform"]["architecture"]}': m['digest'] for m in manifests}})
     metadata['validation'].update(linux_images='amd64 native and arm64 emulated build, import and browser launch',
                                  isolated_business='Linux amd64 API, browser UI, SSE, WebSocket, migration and queue tests; synthetic data, no model calls')
     write_json(cache/'build.json', metadata)
+
+
+def version_images(version):
+    return {tag: registry_digest(FORGEJO_IMAGE, tag)
+            for tag in (version, version+'-amd64', version+'-arm64')}
+
+
+def incomplete_identity(api, release, build, images):
+    # Download counters and API list ordering are not publication identity.
+    fields = ('id', 'tag_name', 'name', 'target_commitish', 'body', 'draft', 'prerelease',
+              'created_at', 'published_at')
+    assets = [{key: asset.get(key) for key in ('id', 'uuid', 'name', 'size', 'created_at', 'browser_download_url')}
+              for asset in api.assets(release)]
+    return {'release': {key: release.get(key) for key in fields}, 'build': build,
+            'assets': sorted(assets, key=lambda asset: asset['name']), 'images': images}
 
 
 def check_incomplete(api, release, branch, commit, version):
@@ -245,9 +261,13 @@ def check_incomplete(api, release, branch, commit, version):
         require(str(resolver.uuid.UUID(build['release_request_id'])) == build['release_request_id'],
                 'Invalid previous release request UUID')
         require(ancestor(commit, build['source_branch_head']), 'Previous source branch history differs')
-    value = registry_digest(FORGEJO_IMAGE, version)
-    require(value is None or value == build['image']['digest'], 'Unproven incomplete image identity')
-    return build, value
+    values = version_images(version)
+    expected = {version: build['image']['digest'],
+                **{version+'-'+arch: build['image'].get('platforms', {}).get('linux/'+arch)
+                   for arch in ('amd64', 'arm64')}}
+    require(all(value is None or value == expected[tag] for tag, value in values.items()),
+            'Unproven incomplete image identity')
+    return build, values
 
 
 def publish(api, cache, branch, commit, version):
@@ -262,10 +282,11 @@ def publish(api, cache, branch, commit, version):
         return
     if release:
         require(existing is not None, 'Incomplete release tag is missing')
-        build, _ = check_incomplete(api, release, branch, commit, version)
+        build, images = check_incomplete(api, release, branch, commit, version)
+        identity = incomplete_identity(api, release, build, images)
         previous_tag, notes = build['previous_tag'], release['body']
     else:
-        require(registry_digest(FORGEJO_IMAGE, version) is None, 'Unproven existing image version')
+        require(all(value is None for value in version_images(version).values()), 'Unproven existing image version')
         previous = select_baseline(complete_history(api), branch, commit)
         previous_tag, notes = (previous['version'] if previous else None), release_notes(previous, commit)
     record = {'source_branch': branch, 'source_sha': commit, 'version': version,
@@ -278,14 +299,20 @@ def publish(api, cache, branch, commit, version):
                   assets={name: digest(cache/name) for name in files})
     if release:
         current = api.release(version)
-        require(current['id'] == release['id'] and completed_record(api, current) is None, 'Release changed during build')
-        _, value = check_incomplete(api, current, branch, commit, version)
-        if value is not None:
-            api.request('/packages/eezd/container/alphapulse/'+version, method='DELETE')
-            require(registry_digest(FORGEJO_IMAGE, version) is None, 'Image deletion was not confirmed')
+        require(current is not None and current['id'] == release['id']
+                and completed_record(api, current) is None, 'Release changed during build')
+        build, values = check_incomplete(api, current, branch, commit, version)
+        require(incomplete_identity(api, current, build, values) == identity, 'Incomplete identity changed during build')
+        require(api.repo('/git/commits/'+version)['sha'] == commit, 'Retained tag changed during build')
+        for tag, value in values.items():
+            if value is not None:
+                require(registry_digest(FORGEJO_IMAGE, tag) == value, 'Image changed before deletion: '+tag)
+                api.request('/packages/eezd/container/alphapulse/'+tag, method='DELETE')
+                require(registry_digest(FORGEJO_IMAGE, tag) is None, 'Image deletion was not confirmed')
         api.repo('/releases/'+str(release['id']), method='DELETE')
         require(api.release(version) is None, 'Release deletion was not confirmed')
         require(api.repo('/git/commits/'+version)['sha'] == commit, 'Cleanup changed the retained tag')
+    require(all(value is None for value in version_images(version).values()), 'Image appeared during build')
     if existing is None:
         run('git', '-c', 'user.name=eezd', '-c', 'user.email=eezd@outlook.com', 'tag', '-a', version, commit, '-m', 'AlphaPulse '+version)
         run('git', 'push', FORGEJO_GIT_URL, 'refs/tags/'+version, env=git_env(api))
@@ -297,10 +324,15 @@ def publish(api, cache, branch, commit, version):
     for name in sorted(files - {'build.json'}):
         api.upload(release, cache/name)
     reference = FORGEJO_IMAGE+':'+version
-    require(registry_digest(FORGEJO_IMAGE, version) is None, 'Image appeared during build')
-    run('skopeo', 'copy', '--all', '--preserve-digests', '--authfile', os.environ['DOCKER_CONFIG']+'/config.json',
+    require(all(value is None for value in version_images(version).values()), 'Image appeared during build')
+    auth = os.environ['DOCKER_CONFIG']+'/config.json'
+    for arch in ('amd64', 'arm64'):
+        run('skopeo', '--override-os', 'linux', '--override-arch', arch, 'copy', '--preserve-digests',
+            '--authfile', auth, 'oci-archive:'+str(cache/'candidate.oci'), 'docker://'+reference+'-'+arch)
+    run('skopeo', 'copy', '--multi-arch=index-only', '--preserve-digests', '--authfile', auth,
         'oci-archive:'+str(cache/'candidate.oci'), 'docker://'+reference)
-    require(image_digest(reference) == record['image_digest'], 'Uploaded image differs')
+    require(image_digest(reference, record['image']) == record['image_digest'], 'Uploaded image differs')
+    verify_anonymous(reference, record['image'])
     require(sorted(a['name'] for a in api.assets(release)) == sorted(files), 'Draft asset set differs')
     for name, checksum in record['assets'].items():
         require(hashlib.sha256(api.asset_bytes(release, name)).hexdigest() == checksum, 'Uploaded asset differs: '+name)
@@ -336,7 +368,7 @@ def promote_latest(api, branch):
             'Existing latest is not a proven completed main image')
     verify_completed_record(api, api.release(latest['version']), latest)
     if current != latest['image_digest']:
-        run('skopeo', 'copy', '--all', '--preserve-digests', '--authfile', os.environ['DOCKER_CONFIG']+'/config.json',
+        run('skopeo', 'copy', '--multi-arch=index-only', '--preserve-digests', '--authfile', os.environ['DOCKER_CONFIG']+'/config.json',
             'docker://'+FORGEJO_IMAGE+'@'+latest['image_digest'], 'docker://'+FORGEJO_IMAGE+':latest')
     require(image_digest(FORGEJO_IMAGE+':latest') == latest['image_digest'], 'Latest image differs')
     verify_anonymous(FORGEJO_IMAGE+':latest', latest['image'])
