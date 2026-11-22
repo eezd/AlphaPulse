@@ -104,20 +104,25 @@ def test_rss_rejects_html_instead_of_reporting_empty_success(app_env):
     ("50%_profit", None, [11]),
     ("比特币 ETF", None, []),
 ])
-def test_news_search_matches_topics_across_languages_and_keeps_literal_queries(app_env, query, sources, expected):
+def test_news_search_matches_topics_across_languages_and_keeps_literal_queries(app_env, monkeypatch, query, sources, expected):
+    from alphapulse.api import news
     from alphapulse.api.news import news_filters
     from alphapulse.models import NewsItem
+    from sqlalchemy import false
+    # 旧多语言正文契约继续在 SQLite 验证；JSONB 关键词路径在隔离 PostgreSQL 验收。
+    monkeypatch.setattr(news, 'keyword_match', lambda *args: false())
     engine = create_engine("sqlite://")
     try:
         with engine.begin() as connection:
+            connection.execute(text("CREATE TABLE briefing_analyses (id INTEGER, news_id INTEGER, state TEXT, keywords TEXT)"))
             connection.execute(text("CREATE TABLE news_items (id INTEGER, source_code TEXT, title TEXT, content_text TEXT)"))
             connection.execute(text("INSERT INTO news_items VALUES (:id, :source, :title, :body)"), [
                 {"id": i, "source": source, "title": title, "body": body}
                 for i, source, title, body in [
-                    (1, "wscn_live", "比特币消息", ""), (2, "coindesk", "Bitcoin market update", ""),
+                    (1, "wscn_news", "比特币消息", ""), (2, "coindesk", "Bitcoin market update", ""),
                     (3, "coindesk", "Network update", "Ethereum update"),
-                    (4, "wscn_live", "美联储声明", ""), (5, "fed", "Federal Reserve statement", ""),
-                    (6, "bls", "Consumer Price Index", ""), (7, "wscn_live", "消费者价格指数公布", ""),
+                    (4, "wscn_news", "美联储声明", ""), (5, "fed", "Federal Reserve statement", ""),
+                    (6, "bls", "Consumer Price Index", ""), (7, "wscn_news", "消费者价格指数公布", ""),
                     (8, "bls", "Employment Situation", ""), (9, "bea", "Gross Domestic Product", ""),
                     (10, "bea", "Personal Income and Outlays", "Personal consumption expenditures"),
                     (11, "coindesk", "50%_profit", ""), (12, "coindesk", "50xxx_profit", ""),

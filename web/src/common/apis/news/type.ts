@@ -1,4 +1,21 @@
+export type ContentStatus = "full" | "excerpt" | "metadata" | "extraction_failed"
+
+export interface ResearchArticleMetadata {
+  publisher_code: string
+  publisher_name: string
+  bylines: { name: string, profile_url: string | null, organization: string | null }[]
+  canonical_url: string
+  original_url: string | null
+  language: string | null
+  section: string | null
+  content_status: ContentStatus
+  access_status: "public" | "paywall" | "forbidden" | "unknown"
+  attachments: { url: string, title: string | null, status: "link_only" }[]
+}
+
 export interface NewsBrief {
+  analysis_admission?: { mode: "collect_only" | "archive" | "report", reason: string }
+  research?: ResearchArticleMetadata | null
   id: number
   source_code: string
   url: string
@@ -15,11 +32,13 @@ export interface NewsBrief {
   revision_no: number
   bookmarked?: boolean
   keywords?: { canonical: string }[]
-  events?: { id: number, title: string }[]
-  risk?: { state: string, stars: number | null, summary: string | null, verification: string | null } | null
+  analysis?: { id: number, version_no: number, state: string, source_changed: boolean, importance_stars: number | null, importance_score: number | null, result: { summary: string } | null } | null
 }
 
 export interface NewsQuery {
+  research_only?: boolean
+  author?: string
+  content_status?: ContentStatus
   processing_state?: string
   bookmarked?: boolean
   sort?: "asc" | "desc"

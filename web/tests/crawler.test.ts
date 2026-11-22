@@ -1,7 +1,7 @@
 import type { SourceInfo } from "../src/common/apis/crawler/type.ts"
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { collectionGaps, sourceStatus } from "../src/pages/crawler/sourceStatus.ts"
+import { collectionGaps, historyStatus, sourceStatus } from "../src/pages/crawler/sourceStatus.ts"
 
 test("crawler status distinguishes process health from collection results", () => {
   const source: SourceInfo = {
@@ -39,6 +39,14 @@ test("crawler status distinguishes process health from collection results", () =
   assert.equal(sourceStatus({ ...source, enabled: false, consecutive_failures: 3 }).text, "已停用")
   assert.equal(sourceStatus({ ...source, configuration_error: "待配置 CRAWLER_CONTACT_EMAIL" }).type, "warning")
   assert.equal(sourceStatus({ ...source, process: null }).text, "采集进程未运行")
+})
+
+test("crawler history status distinguishes public list exhaustion from reaching the target", () => {
+  const source = { last_error: null, history_target: "2024-12-31T16:00:00Z", history_position: "2026-11-13T07:43:33Z", history_done: true }
+  assert.equal(historyStatus(source), "公开列表到底，未到目标日")
+  assert.equal(historyStatus({ ...source, history_position: "2024-12-31T15:00:00Z" }), "历史回补完成")
+  assert.equal(historyStatus({ ...source, history_done: false }), "回补至 2026-11-13T07:43:33Z")
+  assert.equal(historyStatus({ ...source, last_error: "请求失败" }), "请求失败")
 })
 
 test("gap details retain reasons, exhausted state and legacy records while collecting", () => {

@@ -11,17 +11,16 @@ let closed = false
 async function refresh() {
   try {
     const rows = await listProviderAvailabilityApi()
-    if (closed) return
-    scope.assertCurrent()
-    states.value = rows.filter(row => row.state !== "normal")
+    if (closed || !scope.isCurrent()) return
+    states.value = rows.filter(row => row.state === "waiting")
     failed.value = false
   } catch (error) {
-    if (!closed) {
+    if (!closed && scope.isCurrent()) {
       failed.value = true
       console.error(error)
     }
   } finally {
-    if (!closed) timer = setTimeout(refresh, 5000)
+    if (!closed && scope.isCurrent()) timer = setTimeout(refresh, 5000)
   }
 }
 onMounted(refresh)
@@ -34,7 +33,7 @@ onBeforeUnmount(() => {
 <template>
   <el-alert v-if="failed" class="mb-3" type="warning" :closable="false" title="模型接入状态读取失败" />
   <el-alert v-for="row in states" :key="row.provider_id" class="mb-3" type="warning" :closable="false">
-    {{ row.name }}：{{ row.state === 'probing' ? '正在单请求试探恢复' : '接入暂时不可用，等待恢复' }}。
-    下次尝试 {{ row.retry_at ? new Date(row.retry_at).toLocaleString() : '—' }}；等待期间保留任务。
+    {{ row.name }}：部分请求正在等待重试；其他请求独立执行。
+    最早下次尝试 {{ row.retry_at ? new Date(row.retry_at).toLocaleString() : '—' }}；等待期间保留任务。
   </el-alert>
 </template>

@@ -9,14 +9,18 @@ from sqlalchemy import delete, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from alphapulse.api.research_metadata import ContentStatus, ResearchArticleMetadata
+from alphapulse.core.research_sources import SOURCES as RESEARCH_SOURCES
 from alphapulse.api.response import ApiResponse, success
 from alphapulse.core.auth import AuthSession, require_admin
 from alphapulse.core.streams import session_events
 from alphapulse.core.db import get_session
 from alphapulse.core.redis import redis
 from alphapulse.crawler.events import NEWS_CHANNEL
-from alphapulse.models import NewsBookmark, NewsItem, NewsRevision
-from alphapulse.news_research.models import Event, Membership, Package
+from alphapulse.models import NewsBookmark, NewsItem, NewsRevision, Source
+from alphapulse.briefings import admission
+from alphapulse.briefings.models import Analysis
+from alphapulse.briefings.queries import keyword_match
 
 router = APIRouter(prefix="/api/news", tags=["news"], dependencies=[Depends(require_admin)])
 
@@ -35,11 +39,9 @@ NEWS_KEYWORDS = (
 )
 
 
-class NewsRiskBrief(BaseModel):
-    state: str
-    stars: int | None = None
-    summary: str | None = None
-    verification: str | None = None
+class AnalysisAdmission(BaseModel):
+    mode: Literal['collect_only', 'archive', 'report']
+    reason: str
 
 
 class NewsBrief(BaseModel):
@@ -55,10 +57,11 @@ class NewsBrief(BaseModel):
     published_at: datetime
     first_seen_at: datetime
     revision_no: int
-    risk: NewsRiskBrief | None = None
     bookmarked: bool = False
     keywords: list = Field(default_factory=list)
-    events: list = Field(default_factory=list)
+    analysis: dict | None = None
+    analysis_admission: AnalysisAdmission
+    research: ResearchArticleMetadata | None = None
     published_at_precision: str | None = None
     published_date: str | None = None
 
@@ -85,9 +88,17 @@ class Revision(BaseModel):
     captured_at: datetime
 
 
-def news_filters(source: list[str] | None, q: str | None, start: datetime | None, end: datetime | None) -> list:
+def news_filters(source: list[str] | None, q: str | None, start: datetime | None, end: datetime | None,
+                 *, research_only: bool = False, author: str | None = None, content_status: ContentStatus | None = None) -> list:
     """新闻列表和 Chat 检索工具共用的筛选条件"""
     conditions = []
+    if research_only:
+        conditions.append(NewsItem.source_code.in_(RESEARCH_SOURCES))
+    if author:
+        escaped = author.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+        conditions.append(NewsItem.author.ilike(f'%{escaped}%', escape='\\'))
+    if content_status:
+        conditions.append(NewsItem.extra['research']['content_status'].as_string() == content_status)
     if source:
         conditions.append(NewsItem.source_code.in_(source))
     if q:
@@ -103,6 +114,8 @@ def news_filters(source: list[str] | None, q: str | None, start: datetime | None
             escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             pattern = f"%{escaped}%"
             matches.extend((NewsItem.title.ilike(pattern, escape="\\"), NewsItem.content_text.ilike(pattern, escape="\\")))
+        matches.append(select(Analysis.id).where(Analysis.news_id == NewsItem.id, Analysis.state == 'done',
+                       keyword_match(Analysis.keywords, q)).correlate(NewsItem).exists())
         conditions.append(or_(*matches))
     if start:
         conditions.append(NewsItem.published_at >= start)
@@ -125,42 +138,48 @@ async def list_news(
     processing_state: str | None = None,
     bookmarked: bool = False,
     sort: Literal['asc', 'desc'] = 'desc',
+    research_only: bool = False,
+    author: str | None = None,
+    content_status: ContentStatus | None = None,
 ) -> ApiResponse[NewsPage]:
-    conditions = news_filters(source, q, start, end)
+    conditions = news_filters(source, q, start, end, research_only=research_only, author=author, content_status=content_status)
     if ids is not None:
         conditions.append(NewsItem.id.in_(ids))
     mine = select(NewsBookmark.news_id).where(NewsBookmark.username == principal.username)
     if bookmarked:
         conditions.append(NewsItem.id.in_(mine))
     if processing_state:
-        current = (Package.news_id == NewsItem.id) & (Package.content_hash == NewsItem.content_hash)
-        if processing_state == 'unprocessed':
-            conditions.append(~select(Package.id).where(current).correlate(NewsItem).exists())
-        elif processing_state == 'failed':
-            conditions.append(select(Package.id).where(current, Package.state.in_(['index_failed', 'assign_failed'])).correlate(NewsItem).exists())
-        elif processing_state in ['index_pending', 'index_processing', 'assign_pending', 'assign_processing', 'done']:
-            conditions.append(select(Package.id).where(current, Package.state == processing_state).correlate(NewsItem).exists())
+        if processing_state in ('pending', 'processing', 'interrupted', 'failed', 'done'):
+            latest_state = (select(Analysis.state).where(Analysis.news_id == NewsItem.id)
+                            .order_by(Analysis.version_no.desc()).limit(1).correlate(NewsItem).scalar_subquery())
+            conditions.append(latest_state.in_(('failed', 'interrupted')) if processing_state == 'failed'
+                              else latest_state == processing_state)
+        elif processing_state == 'unprocessed':
+            conditions.append(~select(Analysis.id).where(Analysis.news_id == NewsItem.id).correlate(NewsItem).exists())
         else:
             raise HTTPException(422, '未知处理状态')
     total = await session.scalar(select(func.count()).select_from(NewsItem).where(*conditions))
     rows = (await session.execute(
-        select(NewsItem, func.left(NewsItem.content_text, EXCERPT_LENGTH).label("excerpt"), Package)
-        .outerjoin(Package, (Package.news_id == NewsItem.id) & (Package.content_hash == NewsItem.content_hash))
+        select(NewsItem, func.left(NewsItem.content_text, EXCERPT_LENGTH).label("excerpt"))
         .where(*conditions)
         .order_by(NewsItem.published_at.asc() if sort == "asc" else NewsItem.published_at.desc(), NewsItem.id.asc() if sort == "asc" else NewsItem.id.desc())
         .offset((page - 1) * limit)
         .limit(limit)
     )).all()
 
-    saved = set(await session.scalars(mine.where(NewsBookmark.news_id.in_([n.id for n, _, _ in rows]))))
-    package_ids = [p.id for _, _, p in rows if p]
-    links = {}
-    for pid, eid, title in await session.execute(select(Membership.package_id, Event.id, Event.title).join(Event, Event.id == Membership.event_id).where(Membership.package_id.in_(package_ids))):
-        links.setdefault(pid, []).append({'id': eid, 'title': title})
+    saved = set(await session.scalars(mine.where(NewsBookmark.news_id.in_([n.id for n, _ in rows]))))
+    latest = {row.news_id: row for row in await session.scalars(select(Analysis).where(
+        Analysis.news_id.in_([item.id for item, _ in rows])).distinct(Analysis.news_id)
+        .order_by(Analysis.news_id, Analysis.version_no.desc()))}
+    sources = {source.code: source for source in await session.scalars(select(Source).where(
+        Source.code.in_({news.source_code for news, _ in rows})))}
     items = []
-    for news, excerpt, package in rows:
-        risk = {'state': package.state} if package else None
-        items.append(NewsBrief.model_validate({**news.__dict__, 'excerpt': excerpt, 'risk': risk, 'bookmarked': news.id in saved, 'keywords': package.keywords if package else [], 'events': links.get(package.id, []) if package else [], 'published_at_precision': news.extra.get('published_at_precision'), 'published_date': news.extra.get('published_date')}))
+    for news, excerpt in rows:
+        items.append(NewsBrief.model_validate({**news.__dict__, 'excerpt': excerpt, 'bookmarked': news.id in saved,
+            'keywords': latest[news.id].keywords if news.id in latest else [],
+            'analysis_admission': admission.view(news, sources.get(news.source_code)),
+            'analysis': analysis_projection(latest.get(news.id), news), 'research': news.extra.get('research'),
+            'published_at_precision': news.extra.get('published_at_precision'), 'published_date': news.extra.get('published_date')}))
     return success(NewsPage(items=items, total=total))
 
 
@@ -178,12 +197,27 @@ async def _stream_news() -> AsyncIterator[ServerSentEvent]:
                 yield ServerSentEvent(raw_data=message["data"], event="news")
 
 
+def analysis_projection(row, news):
+    if row is None:
+        return None
+    return {'id': row.id, 'version_no': row.version_no, 'state': row.state, 'source_revision': row.source_revision,
+            'source_changed': row.source_revision is not None and row.source_revision != news.revision_no,
+            'importance_stars': row.importance_stars, 'importance_score': row.importance_score,
+            'result': row.output, 'error': row.error, 'time_basis': row.time_basis}
+
+
 @router.get("/{news_id}")
 async def get_news(news_id: int, session: Annotated[AsyncSession, Depends(get_session)]) -> ApiResponse[NewsDetail]:
     news = await session.get(NewsItem, news_id)
     if news is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "新闻不存在")
-    return success(NewsDetail.model_validate({**news.__dict__, "excerpt": news.content_text[:EXCERPT_LENGTH], "published_at_precision": news.extra.get("published_at_precision"), "published_date": news.extra.get("published_date")}))
+    analysis = await session.scalar(select(Analysis).where(Analysis.news_id == news.id)
+                                    .order_by(Analysis.version_no.desc()).limit(1))
+    return success(NewsDetail.model_validate({**news.__dict__, "excerpt": news.content_text[:EXCERPT_LENGTH],
+        'analysis_admission': admission.view(news, await session.get(Source, news.source_code)),
+        'research': news.extra.get('research'),
+        'analysis': analysis_projection(analysis, news), 'keywords': analysis.keywords if analysis else [],
+        "published_at_precision": news.extra.get("published_at_precision"), "published_date": news.extra.get("published_date")}))
 
 
 @router.get("/{news_id}/revisions")

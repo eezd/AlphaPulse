@@ -52,7 +52,7 @@ test("quote snapshots reject old data; trades deduplicate and sort; changing sym
   assert.equal((subscriptions.at(-1) as any).symbol, "ETHUSDT")
 })
 
-const globals = { ...vue, onMounted() {}, onBeforeUnmount() {}, onBeforeRouteLeave() {}, useRoute: () => ({ query: {} }), setInterval() {}, clearInterval() {}, ElMessage: { warning() {} } }
+const globals = { ...vue, onMounted() {}, onBeforeUnmount() {}, onBeforeRouteLeave() {}, useRoute: () => ({ query: {} }), useRouter: () => ({ replace() {} }), setInterval() {}, clearInterval() {}, ElMessage: { warning() {} } }
 
 test("market fullscreen includes body popups and can exit fullscreen", async () => {
   const calls: string[] = []
@@ -181,58 +181,6 @@ test("bookmark failures preserve state, old sessions are ignored, and removing a
   assert.deepEqual(writes, [[1, false], [1, false], [1, false]])
   assert.equal(feed.items.value.length, 0)
   assert.equal(feed.total.value, 0)
-})
-
-test("research export binds conclusions and original sources to the successful version", async () => {
-  const request = Promise.withResolvers<any>()
-  const downloads: string[] = []
-  const calls: unknown[] = []
-  let fail = false
-  const load = moduleLoader({
-    "@@/apis/news-research": { getEventVersionApi: (...args: unknown[]) => {
-      calls.push(args)
-      if (fail) throw new Error("版本读取失败")
-      return request.promise
-    } },
-    "@@/apis/settings": {},
-    "@@/apis/skills": {},
-    "@@/utils/export": { downloadText: (_name: string, content: string) => downloads.push(content) },
-    "@/pinia/stores/user": { useUserStore: () => vue.reactive({ sessionVersion: 1 }) }
-  }, globals)
-  const page = load("@/pages/home/index.vue").default.setup({}, { expose() {} })
-  const result = { title: "已核验事件", summary: "已核验结论", importance_stars: 4, risk_stars: 3, confidence: "中", facts: "事实", reasoning: "判断", verification: "核验", asset_impacts: "影响", opinions: "意见", counter_evidence: "反证", uncertainty: "待确认", watchpoints: "观察", timeline_points: [] }
-  page.opened.value = true
-  page.detail.value = { id: 1, title: "当前事件", revision: 2, state: "pending", result: { ...result, summary: "不能使用当前缓存结论" }, packages: [{ id: 1, news_id: 1, title: "已修订标题", url: "https://example.invalid/revised" }, { id: 2, news_id: 2, title: "新报道", url: "https://example.invalid/new" }], versions: [{ id: 11, revision: 2, state: "failed", result: null }, { id: 10, revision: 1, state: "done", result }] }
-  const exporting = page.exportReport()
-  await page.exportReport()
-  assert.deepEqual(calls, [[1, 10]])
-  request.resolve({ id: 10, revision: 1, result, packages: [{ id: 1, news_id: 1 }], articles: [{ id: 1, title: "研究时原始标题", url: "https://example.invalid/original" }] })
-  await exporting
-  const report = downloads[0]
-  assert.match(report, /成功研究版本 #10 · 研究修订 1/)
-  assert.match(report, /当前事件修订 2/)
-  assert.match(report, /新增或修订材料尚未由本报告核验/)
-  assert.match(report, /已核验结论/)
-  assert.doesNotMatch(report, /不能使用当前缓存结论|已修订标题/)
-  const [included, additional] = report.split("## 当前事件其他新闻包（未纳入本版研究）")
-  assert.match(included, /研究时原始标题/)
-  assert.doesNotMatch(included, /新报道/)
-  assert.match(additional, /新报道/)
-  assert.equal(page.exportingReport.value, false)
-
-  const closed = page.exportReport()
-  page.opened.value = false
-  await closed
-  assert.equal(downloads.length, 1)
-  page.opened.value = true
-  page.detail.value.versions = []
-  await page.exportReport()
-  assert.equal(calls.length, 2)
-  page.detail.value.versions = [{ id: 10, revision: 1, state: "done", result }]
-  fail = true
-  await assert.rejects(page.exportReport(), /版本读取失败/)
-  assert.equal(page.exportingReport.value, false)
-  assert.equal(downloads.length, 1)
 })
 
 test("status-filter polling replaces rows and totals, continues on empty/done lists and rejects obsolete results", async () => {

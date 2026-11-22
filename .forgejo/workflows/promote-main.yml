@@ -1,0 +1,41 @@
+name: Manual promote dev to main (AlphaPulse)
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: alphapulse-delivery
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    if: ${{ forgejo.ref == 'refs/heads/main' }}
+    runs-on: docker
+    container:
+      image: node:24-bookworm
+    env:
+      CONTROL_EVENT: ${{ forgejo.event_name }}
+      CONTROL_REF: ${{ forgejo.ref }}
+      CONTROL_SHA: ${{ forgejo.sha }}
+      CI_RUN_ID: ${{ forgejo.run_id }}
+      CI_RUN_ATTEMPT: ${{ forgejo.run_attempt }}
+    steps:
+      - name: Check out trusted control code
+        uses: https://github.com/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ forgejo.sha }}
+          persist-credentials: false
+      - name: Install promotion tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends python3 git ca-certificates
+      - name: Fast-forward frozen dev to main
+        env:
+          CI_AUTH_DIR: ${{ runner.temp }}/alphapulse-promote-${{ forgejo.run_id }}-${{ forgejo.run_attempt }}
+          FORGEJO_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: python3 scripts/promote-main.py
+      - name: Remove this run's authentication files
+        if: ${{ always() }}
+        env:
+          CI_AUTH_DIR: ${{ runner.temp }}/alphapulse-promote-${{ forgejo.run_id }}-${{ forgejo.run_attempt }}
+        run: python3 -c "import runpy; runpy.run_path('scripts/promote-main.py')['cleanup_auth']()"

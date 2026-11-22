@@ -1,0 +1,16 @@
+# Trusted tools only. Candidate/control Git trees are copied into a created container,
+# never sent as an image build context or mounted from the Runner filesystem.
+FROM ghcr.io/astral-sh/uv:0.13.6 AS uv
+FROM node:24.22.3-bookworm
+COPY --from=uv /uv /uvx /usr/local/bin/
+ENV UV_PYTHON_INSTALL_DIR=/opt/python UV_PYTHON_PREFERENCE=only-managed
+RUN uv python install 3.13 --no-bin \
+    && chmod -R a+rX /opt/python \
+    && corepack enable \
+    && corepack prepare pnpm@12.11.2 --activate \
+    && useradd --create-home --uid 10001 candidate \
+    && mkdir /work /control \
+    && chown candidate:candidate /work
+USER 10001:10001
+ENV HOME=/home/candidate
+WORKDIR /work

@@ -1,0 +1,25 @@
+{
+  "snapshot_date": "2026-11-15",
+  "sources": {
+    "sec.json": {
+      "url": "https://www.sec.gov/files/company_tickers.json",
+      "sha256": "29e8eee5a85a68e837628b0e9623870af68db41e5427a154d17fe3b1af0a1b9a"
+    },
+    "en-territories.json": {
+      "url": "https://raw.githubusercontent.com/unicode-org/cldr-json/48.0.0/cldr-json/cldr-localenames-full/main/en/territories.json",
+      "sha256": "158c1d575308f7e46912edbeda435c8fe2ef5dad280798231f3a432e406b1807"
+    },
+    "zh-territories.json": {
+      "url": "https://raw.githubusercontent.com/unicode-org/cldr-json/48.0.0/cldr-json/cldr-localenames-full/main/zh/territories.json",
+      "sha256": "18f1426f1e8981a671517a4857a8d4e56060909906c4cfd9b9a43a8a18b9ab6f"
+    },
+    "en-currencies.json": {
+      "url": "https://raw.githubusercontent.com/unicode-org/cldr-json/48.0.0/cldr-json/cldr-numbers-full/main/en/currencies.json",
+      "sha256": "a6c41b28f4035f65ae698b53a66866982b4ff49bc0de7e840f91d2c6e6bdc23b"
+    },
+    "zh-currencies.json": {
+      "url": "https://raw.githubusercontent.com/unicode-org/cldr-json/48.0.0/cldr-json/cldr-numbers-full/main/zh/currencies.json",
+      "sha256": "c23b7df1982deae53121f6665e3c27059c1e47640b167c3ce0e3bf5a64d13c8d"
+    }
+  }
+}

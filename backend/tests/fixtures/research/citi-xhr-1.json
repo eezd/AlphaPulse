@@ -1,0 +1,327 @@
+{
+  "code": 200,
+  "data": {
+    "content": [
+      {
+        "attachment": "[{\"name\":\"Transcript \",\"link\":\"/rcs/citigpa/storage/public/Episode-92-TRANSCRIPT-LatAm-11-3-26.pdf\",\"isPromptPopup\":false}]",
+        "bcmaTags": [
+          "research",
+          "geopolitics",
+          "trade",
+          "monetary-policy"
+        ],
+        "campaign": false,
+        "clientBusinessType": "CitiResearch",
+        "defaultImage": "6af602d1a54c482ff1753da2",
+        "destinationLink": null,
+        "href": "e92-latin-america-room-to-run-risks-to-watch",
+        "id": "6af60510a54c482ff1753da6",
+        "insightType": "Podcast",
+        "largeThumbnailImage": null,
+        "mainSeriesLink": [
+          {
+            "seriesName": "Research @ Citi Podcast",
+            "seriesLink": "https://www.citigroup.com/global/insights/research-citi-podcasts"
+          }
+        ],
+        "podCastDuration": null,
+        "publishGmt": "2026-11-12T00:00:00.000+00:00",
+        "relatedType": null,
+        "source": null,
+        "summary": "Rob Rowe sits down with Ernesto Revilla and Luis Costa to discuss Latin America's prospects, with their conversation covering everything from elections and El Niño to monetary policy and trade. What should investors watch for as this optimistic growth story plays out?",
+        "tag": null,
+        "thumbnailImage": "68d2ed709400c51f2a8d8fc8",
+        "title": "E92: Latin America: Room to Run, Risks to Watch",
+        "topic": "Global Markets and Economy",
+        "url": "https://www.citigroup.com/global/insights/e92-latin-america-room-to-run-risks-to-watch",
+        "videoLink": "https://www.citivelocity.com/cv-content-web/eppublic/wrap/epfcms/html/1_d2e3kje4",
+        "videoOnly": false
+      },
+      {
+        "attachment": "[{\"name\":\"Transcript\",\"link\":\"/rcs/citigpa/storage/public/citi-services-EP6-Industry-Perspectives-Podcast-Transcript.pdf\",\"isPromptPopup\":false}]",
+        "bcmaTags": [
+          "services",
+          "investor-services",
+          "regulations",
+          "geopolitics",
+          "government",
+          "international-markets",
+          "macroeconomics"
+        ],
+        "campaign": false,
+        "clientBusinessType": "SecuritiesServices",
+        "defaultImage": "6af5dd2f3d6d39b2e593f1ce",
+        "destinationLink": null,
+        "href": "industry-perspectives-episode-6",
+        "id": "6af5ddf16a288aa5503895e4",
+        "insightType": "Podcast",
+        "largeThumbnailImage": null,
+        "mainSeriesLink": [
+          {
+            "seriesName": "Industry Perspectives",
+            "seriesLink": "https://www.citigroup.com/global/insights/industry-perspectives"
+          }
+        ],
+        "podCastDuration": null,
+        "publishGmt": "2026-11-12T00:00:00.000+00:00",
+        "relatedType": null,
+        "source": null,
+        "summary": "Episode 6: GROWTH – Mega Trends - Challenges and Opportunities",
+        "tag": null,
+        "thumbnailImage": "6af5dc0ca54c482ff1753cfc",
+        "title": "Industry Perspectives Episode 6",
+        "topic": "Global Markets and Economy",
+        "url": "https://www.citigroup.com/global/insights/industry-perspectives-episode-6",
+        "videoLink": "https://youtu.be/C3Fv1Hl9_Ac",
+        "videoOnly": false
+      },
+      {
+        "attachment": "[{\"name\":\"Transcript\",\"link\":\"/rcs/citigpa/storage/public/Reassessing-the-Balance-of-Risks-Transcript.pdf\",\"isPromptPopup\":false}]",
+        "bcmaTags": [
+          "research",
+          "global-equities",
+          "geopolitics",
+          "markets"
+        ],
+        "campaign": false,
+        "clientBusinessType": "CitiResearch",
+        "defaultImage": "6af3472aa54c482ff17516a9",
+        "destinationLink": null,
+        "href": "markets-edition-reassessing-the-balance-of-risks",
+        "id": "6af35325fefd1aca2388028a",
+        "insightType": "Podcast",
+        "largeThumbnailImage": null,
+        "mainSeriesLink": [
+          {
+            "seriesName": "Research @ Citi Podcast",
+            "seriesLink": "https://www.citigroup.com/global/insights/research-citi-podcasts"
+          }
+        ],
+        "podCastDuration": null,
+        "publishGmt": "2026-11-10T00:00:00.000+00:00",
+        "relatedType": null,
+        "source": null,
+        "summary": "Beata Manthey and David Groman assess the last few weeks in equities, with AI volatility, the U.S. midterms and geopolitics all moving markets. They look at how our strategies have changed and what investors should be watching from here on out.",
+        "tag": null,
+        "thumbnailImage": "68d2ed709400c51f2a8d8fc8",
+        "title": "Markets Edition: Reassessing the Balance of Risks ",
+        "topic": "Global Markets and Economy",
+        "url": "https://www.citigroup.com/global/insights/markets-edition-reassessing-the-balance-of-risks",
+        "videoLink": "https://youtu.be/hz5z12jmJUE?si=sU2KfD3LdZCQ1cg-",
+        "videoOnly": false
+      },
+      {
+        "attachment": "[{\"name\":\"Download the PDF\",\"link\":\"/rcs/citigpa/storage/public/citi-services-pix-commercial-adoption-instant-payments.pdf\",\"isPromptPopup\":false}]",
+        "bcmaTags": [
+          "services",
+          "payments"
+        ],
+        "campaign": false,
+        "clientBusinessType": "Services",
+        "defaultImage": "6af2406f3d6d39b2e593cc8a",
+        "destinationLink": null,
+        "href": "pix-commercial-adoption-instant-payments",
+        "id": "6af242e86a288aa550387315",
+        "insightType": "Article",
+        "largeThumbnailImage": null,
+        "mainSeriesLink": [],
+        "podCastDuration": null,
+        "publishGmt": "2026-11-10T00:00:00.000+00:00",
+        "relatedType": null,
+        "source": null,
+        "summary": "No longer just for person-to-person (P2P) transfers, real-time payments are going mainstream with commercial clients.",
+        "tag": null,
+        "thumbnailImage": "6af2406f3d6d39b2e593cc8a",
+        "title": "Pix Gets Down to Business",
+        "topic": "Business Strategies",
+        "url": "https://www.citigroup.com/global/insights/pix-commercial-adoption-instant-payments",
+        "videoLink": null,
+        "videoOnly": false
+      },
+      {
+        "attachment": "[{\"name\":\"Read the Report\",\"link\":\"/rcs/citigpa/storage/public/five-forces-reshaping-nonprofit-finance-leadership.pdf\",\"isPromptPopup\":false}]",
+        "bcmaTags": [
+          "commercial-banking",
+          "commercial-bank",
+          "philanthropy"
+        ],
+        "campaign": false,
+        "clientBusinessType": "BCMA",
+        "defaultImage": "6aecd028829c5fe00b67ac57",
+        "destinationLink": null,
+        "href": "five-forces-reshaping-nonprofit-finance-leadership",
+        "id": "6aecd14d829c5fe00b67ac9e",
+        "insightType": "Article",
+        "largeThumbnailImage": null,
+        "mainSeriesLink": [],
+        "podCastDuration": null,
+        "publishGmt": "2026-11-09T00:00:00.000+00:00",
+        "relatedType": null,
+        "source": null,
+        "summary": null,
+        "tag": null,
+        "thumbnailImage": "6aecd028829c5fe00b67ac57",
+        "title": "Five Forces Reshaping Nonprofit Finance and Leadership",
+        "topic": "Insights",
+        "url": "https://www.citigroup.com/global/insights/five-forces-reshaping-nonprofit-finance-leadership",
+        "videoLink": null,
+        "videoOnly": false
+      },
+      {
+        "attachment": "[{\"name\":\"Download Report\",\"link\":\"/rcs/citigpa/storage/public/global-readiness-building-foundation-international-scale.pdf\",\"isPromptPopup\":false}]",
+        "bcmaTags": [
+          "commercial-banking",
+          "commercial-bank",
+          "banking-international"
+        ],
+        "campaign": false,
+        "clientBusinessType": "BCMA",
+        "defaultImage": "6aeccd4c1def776844b37440",
+        "destinationLink": null,
+        "href": "global-readiness-building-foundation-international-scale",
+        "id": "6aecced06e87a5fa1fb5ea52",
+        "insightType": "Article",
+        "largeThumbnailImage": null,
+        "mainSeriesLink": [],
+        "podCastDuration": null,
+        "publishGmt": "2026-11-06T00:00:00.000+00:00",
+        "relatedType": null,
+        "source": null,
+        "summary": null,
+        "tag": null,
+        "thumbnailImage": "6aeccd4c1def776844b37440",
+        "title": "Global Readiness: Building the Foundation for International Scale",
+        "topic": "Insights",
+        "url": "https://www.citigroup.com/global/insights/global-readiness-building-foundation-international-scale",
+        "videoLink": null,
+        "videoOnly": false
+      },
+      {
+        "attachment": null,
+        "bcmaTags": [
+          "services",
+          "investor-services",
+          "ai",
+          "banking-services"
+        ],
+        "campaign": false,
+        "clientBusinessType": "Services",
+        "defaultImage": "6aeceea61def776844b37481",
+        "destinationLink": null,
+        "href": "intelligence-delivered-real-time-world",
+        "id": "6aecefdd1def776844b37552",
+        "insightType": "Article",
+        "largeThumbnailImage": null,
+        "mainSeriesLink": [],
+        "podCastDuration": null,
+        "publishGmt": "2026-11-06T00:00:00.000+00:00",
+        "relatedType": null,
+        "source": null,
+        "summary": "In today's markets, the challenge is no longer access to information. It is identifying what matters, understanding its implications and acting with confidence.",
+        "tag": null,
+        "thumbnailImage": null,
+        "title": "Intelligence Delivered for the Real-Time World",
+        "topic": "Technology & Innovation",
+        "url": "https://www.citigroup.com/global/insights/intelligence-delivered-real-time-world",
+        "videoLink": null,
+        "videoOnly": false
+      },
+      {
+        "attachment": null,
+        "bcmaTags": [
+          "services",
+          "investor-services",
+          "ai",
+          "banking-services"
+        ],
+        "campaign": false,
+        "clientBusinessType": "Services",
+        "defaultImage": "6aea1f216e87a5fa1fb5cd0a",
+        "destinationLink": null,
+        "href": "custody-plus-future-market-intelligence",
+        "id": "6aea2574829c5fe00b678923",
+        "insightType": "Article",
+        "largeThumbnailImage": null,
+        "mainSeriesLink": [],
+        "podCastDuration": null,
+        "publishGmt": "2026-11-05T00:00:00.000+00:00",
+        "relatedType": null,
+        "source": null,
+        "summary": "Accelerated settlement cycles, continuous trading models, digital assets and AI are reshaping the post-trade landscape. Clients increasingly need faster access to information, greater transparency and more flexibility in how they consume custody services.",
+        "tag": null,
+        "thumbnailImage": "6aea1f216e87a5fa1fb5cd0a",
+        "title": "Custody+ and the Future of Market Intelligence",
+        "topic": "Technology & Innovation",
+        "url": "https://www.citigroup.com/global/insights/custody-plus-future-market-intelligence",
+        "videoLink": null,
+        "videoOnly": false
+      },
+      {
+        "attachment": "[{\"name\":\"Transcript\",\"link\":\"/rcs/citigpa/storage/public/citi-services-EP5-Industry-Perspectives-Podcast-Transcript.pdf\",\"isPromptPopup\":false}]",
+        "bcmaTags": [
+          "services",
+          "investor-services",
+          "regulations",
+          "geopolitics",
+          "government",
+          "international-markets",
+          "macroeconomics"
+        ],
+        "campaign": false,
+        "clientBusinessType": "SecuritiesServices",
+        "defaultImage": "6aec81a808cfb979ef535067",
+        "destinationLink": null,
+        "href": "industry-perspectives-episode-5",
+        "id": "6ae8b73e08cfb979ef5321e0",
+        "insightType": "Podcast",
+        "largeThumbnailImage": null,
+        "mainSeriesLink": [
+          {
+            "seriesName": "Industry Perspectives",
+            "seriesLink": "https://www.citigroup.com/global/insights/industry-perspectives"
+          }
+        ],
+        "podCastDuration": null,
+        "publishGmt": "2026-11-05T00:00:00.000+00:00",
+        "relatedType": null,
+        "source": null,
+        "summary": "Episode 5: GROWTH – Trade, Inflation and Balance Sheets",
+        "tag": null,
+        "thumbnailImage": "6ae8a4b608cfb979ef5321c5",
+        "title": "Industry Perspectives Episode 5",
+        "topic": "Global Markets and Economy",
+        "url": "https://www.citigroup.com/global/insights/industry-perspectives-episode-5",
+        "videoLink": "https://youtu.be/hhAzU8EPl0U",
+        "videoOnly": false
+      }
+    ],
+    "empty": false,
+    "first": true,
+    "last": false,
+    "number": 0,
+    "numberOfElements": 9,
+    "pageable": {
+      "offset": 0,
+      "pageNumber": 0,
+      "pageSize": 9,
+      "paged": true,
+      "sort": {
+        "empty": true,
+        "sorted": false,
+        "unsorted": true
+      },
+      "unpaged": false
+    },
+    "size": 9,
+    "sort": {
+      "empty": true,
+      "sorted": false,
+      "unsorted": true
+    },
+    "totalElements": 10,
+    "totalPages": 2
+  },
+  "isShow": 0,
+  "msg": "success",
+  "success": 1
+}

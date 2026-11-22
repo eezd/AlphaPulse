@@ -97,6 +97,44 @@ test("模型表单按请求字段编辑；校验失败不请求，保存失败�
   assert.equal(page.saving.value, false)
 })
 
+test("新闻来源计数只接受最新响应，读取失败不伪装为零", async () => {
+  const pending: ReturnType<typeof Promise.withResolvers>[] = []
+  const notifications: boolean[] = []
+  let active = true
+  const load = moduleLoader({
+    "@@/apis/crawler": { listSourcesApi: (notify: boolean) => {
+      notifications.push(notify)
+      const request = Promise.withResolvers()
+      pending.push(request)
+      return request.promise
+    } },
+    "@@/composables/useSessionScope": { useSessionScope: () => ({ isCurrent: () => active }) },
+    "@@/utils/text": { formatTime: (value: string) => value },
+    "@element-plus/icons-vue": { Refresh: {}, Search: {} },
+    "./components/NewsDetail.vue": { default: {} },
+    "./composables/useNewsFeed": { useNewsFeed: () => ({}) }
+  }, globals)
+  const page = load("@/pages/news/index.vue").default.setup({}, { expose() {} })
+  const old = page.refreshSourceCounts()
+  const current = page.refreshSourceCounts()
+  pending[1].resolve({ sources: [{ code: "citi_insights", total_items: 12, today_new: 0 }] })
+  await current
+  pending[0].resolve({ sources: [{ code: "citi_insights", total_items: 1, today_new: 1 }] })
+  await old
+  assert.equal(page.sourceCounts.value.citi_insights.total_items, 12)
+  assert.equal(page.sourceCounts.value.citi_insights.today_new, 0)
+  const failing = page.refreshSourceCounts()
+  pending[2].reject(new Error("读取失败"))
+  await failing
+  assert.deepEqual(JSON.parse(JSON.stringify(page.sourceCounts.value)), {})
+  const stale = page.refreshSourceCounts()
+  active = false
+  pending[3].resolve({ sources: [{ code: "citi_insights", total_items: 99, today_new: 9 }] })
+  await stale
+  assert.deepEqual(notifications, [false, false, false, false])
+  assert.deepEqual(JSON.parse(JSON.stringify(page.sourceCounts.value)), {})
+})
+
 test("新闻搜索/页容量重置只有一次请求；失败区别于空数据且旧响应不覆盖新查询", async () => {
   const queries: { page: number }[] = []
   const pending: ReturnType<typeof Promise.withResolvers>[] = []
@@ -146,97 +184,6 @@ test("新闻搜索/页容量重置只有一次请求；失败区别于空数据�
   assert.equal(page.failed.value, true)
 })
 
-test("新闻 AI 详情绑定新闻修订版本，旧分析响应不能覆盖当前版本", async () => {
-  const requests: { params: unknown, response: ReturnType<typeof Promise.withResolvers> }[] = []
-  const props = vue.reactive({ newsId: 1, revision: 1 })
-  const user = { sessionVersion: 1 }
-  const load = moduleLoader({
-    "@@/apis/news-research": { listNewsPackagesApi: (id: number, revision: number) => {
-      const params = { news_id: id, revision_no: revision }
-      const response = Promise.withResolvers()
-      requests.push({ params, response })
-      return response.promise
-    } },
-    "@/pinia/stores/user": { useUserStore: () => user }
-  }, globals)
-  const page = load("@/pages/news/components/NewsRisk.vue").default.setup(props, { expose() {} })
-  props.revision = 2
-  await vue.nextTick()
-  assert.deepEqual(JSON.parse(JSON.stringify(requests[1].params)), { news_id: 1, revision_no: 2 })
-  requests[1].response.resolve([{ id: 2 }])
-  await setImmediate()
-  requests[0].response.resolve([{ id: 1 }])
-  await setImmediate()
-  assert.equal(page.summaries.value[0].id, 2)
-  props.newsId = 3
-  await vue.nextTick()
-  user.sessionVersion++
-  requests[2].response.resolve([{ id: 3 }])
-  await setImmediate()
-  assert.equal(page.summaries.value.length, 0)
-})
-
-test("新闻 AI 详情等待期间自动刷新，完成后停止；隐藏、旧会话和卸载不继续请求", async () => {
-  let tick = () => {}
-  let unmount = () => {}
-  let cleared = false
-  let state = "pending"
-  let requests = 0
-  const document = { hidden: false }
-  const user = { sessionVersion: 1 }
-  const load = moduleLoader({
-    "@@/apis/news-research": { listNewsPackagesApi: async () => {
-      requests++
-      return [{ state }]
-    } },
-    "@/pinia/stores/user": { useUserStore: () => user }
-  }, {
-    ...globals,
-    document,
-    onMounted(callback: () => void) {
-      callback()
-    },
-    onBeforeUnmount(callback: () => void) {
-      unmount = callback
-    },
-    setInterval(callback: () => void) {
-      tick = callback
-      return 1
-    },
-    clearInterval() {
-      cleared = true
-    }
-  })
-  const props = vue.reactive({ newsId: 1, revision: 1 })
-  const page = load("@/pages/news/components/NewsRisk.vue").default.setup(props, { expose() {} })
-  await setImmediate()
-  assert.equal(page.summaries.value[0].state, "pending")
-  document.hidden = true
-  tick()
-  assert.equal(requests, 1)
-  document.hidden = false
-  state = "done"
-  tick()
-  tick()
-  await setImmediate()
-  assert.equal(page.summaries.value[0].state, "done")
-  assert.equal(requests, 2)
-  tick()
-  assert.equal(requests, 2)
-  state = "pending"
-  props.revision++
-  await vue.nextTick()
-  await setImmediate()
-  user.sessionVersion++
-  tick()
-  assert.equal(requests, 3)
-  user.sessionVersion--
-  unmount()
-  tick()
-  assert.equal(requests, 3)
-  assert.equal(cleared, true)
-})
-
 test("新闻列表只更新可见条目的匹配版本评级，保留滚动与新消息提示并丢弃旧页结果", async () => {
   const queries: Record<string, unknown>[] = []
   const pending: ReturnType<typeof Promise.withResolvers>[] = []
@@ -259,16 +206,16 @@ test("新闻列表只更新可见条目的匹配版本评级，保留滚动与�
     scrolls++
   } }
   const initial = page.load()
-  pending[0].resolve({ items: [{ id: 1, revision_no: 1 }, { id: 2, revision_no: 1, risk: { state: "processing" } }], total: 120 })
+  pending[0].resolve({ items: [{ id: 1, revision_no: 1 }, { id: 2, revision_no: 1, analysis: { state: "processing" } }], total: 120 })
   await initial
   page.pendingCount.value = 7
   page.openedId.value = 1
   const refreshing = page.refreshRisk()
   assert.deepEqual(JSON.parse(JSON.stringify(queries[1])), { ids: [1, 2], limit: 100 })
-  pending[1].resolve({ items: [{ id: 1, revision_no: 1, risk: { state: "done", stars: 5 } }, { id: 2, revision_no: 2, risk: { state: "done", stars: 1 } }], total: 2 })
+  pending[1].resolve({ items: [{ id: 1, revision_no: 1, analysis: { state: "done", importance_stars: 5 } }, { id: 2, revision_no: 2, analysis: { state: "done", importance_stars: 1 } }], total: 2 })
   await refreshing
-  assert.equal(page.items.value[0].risk.stars, 5)
-  assert.equal(page.items.value[1].risk.state, "processing")
+  assert.equal(page.items.value[0].analysis.importance_stars, 5)
+  assert.equal(page.items.value[1].analysis.state, "processing")
   assert.equal(page.total.value, 120)
   assert.equal(page.pendingCount.value, 7)
   assert.equal(page.openedId.value, 1)
@@ -277,429 +224,14 @@ test("新闻列表只更新可见条目的匹配版本评级，保留滚动与�
   const current = page.load()
   pending[3].resolve({ items: [{ id: 3, revision_no: 1 }], total: 1 })
   await current
-  pending[2].resolve({ items: [{ id: 3, revision_no: 1, risk: { state: "done" } }], total: 1 })
+  pending[2].resolve({ items: [{ id: 3, revision_no: 1, analysis: { state: "done" } }], total: 1 })
   await old
-  assert.equal(page.items.value[0].risk, undefined)
+  assert.equal(page.items.value[0].analysis, undefined)
   const previous = page.refreshRisk()
   active = false
-  pending[4].resolve({ items: [{ id: 3, revision_no: 1, risk: { state: "done" } }], total: 1 })
+  pending[4].resolve({ items: [{ id: 3, revision_no: 1, analysis: { state: "done" } }], total: 1 })
   await previous
-  assert.equal(page.items.value[0].risk, undefined)
+  assert.equal(page.items.value[0].analysis, undefined)
   await page.refreshRisk()
   assert.equal(queries.length, 5)
-})
-
-function researchPage(api: Record<string, unknown> = {}, user = vue.reactive({ sessionVersion: 1 }), extra: Record<string, unknown> = {}, dependencies: Record<string, unknown> = {}) {
-  const load = moduleLoader({
-    "@@/apis/news-research": { getSettingsApi: async () => ({ config: {}, control_revision: 0, enabled: false, start_at: "2026-10-31T16:00:00Z" }), getCoverageApi: async (start_at: string) => ({ start_at, total: 0 }), listEventsApi: async () => ({ items: [], total: 0 }), listPackagesApi: async () => ({ items: [], total: 0 }), ...api },
-    "@@/apis/skills": { listSkillTreeApi: async () => [] },
-    "@@/apis/settings": { listProvidersApi: async () => [], listProviderModelsApi: async () => [] },
-    "@/pinia/stores/user": { useUserStore: () => user },
-    ...dependencies
-  }, { ...globals, clearInterval, ...extra })
-  return load("@/pages/home/index.vue").default.setup({}, { expose() {} })
-}
-
-test("回补时间按时区提交，刷新保留未提交的起点，核查不启用 AI", async () => {
-  const checked: string[] = []
-  const enabled: string[] = []
-  const page = researchPage({
-    getCoverageApi: async (start_at: string) => {
-      checked.push(start_at)
-      return { start_at, total: 10, missing: 4 }
-    },
-    enableApi: async (start_at: string) => {
-      enabled.push(start_at)
-      return { start_at, total: 10 }
-    }
-  })
-  await page.load()
-  assert.equal(page.startAt.value.toISOString(), "2026-10-31T16:00:00.000Z")
-  page.startAt.value = new Date("2026-10-01T00:00:00+08:00")
-  await page.load()
-  assert.equal(page.startAt.value.toISOString(), "2026-09-30T16:00:00.000Z")
-  assert.equal(checked.at(-1), "2026-09-30T16:00:00.000Z")
-  assert.equal(enabled.length, 0)
-  assert.equal(page.coverage.value.missing, 4)
-  await page.enable()
-  assert.deepEqual(enabled, [undefined])
-})
-
-test("其他标签页启用后按实际起点核查，暂停后恢复草稿并丢弃旧范围响应", async () => {
-  let server = { config: {}, control_revision: 0, enabled: false, start_at: "2026-10-31T16:00:00Z" }
-  const pending = Promise.withResolvers()
-  const checked: string[] = []
-  let delayDraft = true
-  const draft = "2026-10-01T00:00:00.000Z"
-  const actual = "2026-11-05T00:00:00.000Z"
-  const page = researchPage({
-    getSettingsApi: async () => ({ ...server }),
-    getCoverageApi: async (start_at: string) => {
-      checked.push(start_at)
-      if (start_at === draft && delayDraft) {
-        delayDraft = false
-        return pending.promise
-      }
-      return { start_at, total: 5 }
-    }
-  })
-  await page.load()
-  page.selectedStartAt.value = new Date(draft)
-  const old = page.checkCoverage()
-  server = { ...server, enabled: true, start_at: actual }
-  await page.load()
-  assert.equal(page.enabled.value, true)
-  assert.equal(page.selectedStartAt.value.toISOString(), actual)
-  assert.equal(page.coverage.value.start_at, actual)
-  assert.equal(page.startAt.value.toISOString(), draft)
-  pending.resolve({ start_at: draft, total: 999 })
-  await old
-  assert.equal(page.coverage.value.start_at, actual)
-  assert.equal(page.coverage.value.total, 5)
-  server.enabled = false
-  await page.load()
-  assert.equal(page.selectedStartAt.value.toISOString(), draft)
-  assert.equal(page.coverage.value.start_at, draft)
-  assert.equal(page.savedStartAt.value.toISOString(), actual)
-  assert.deepEqual(checked, ["2026-10-31T16:00:00.000Z", draft, actual, draft])
-})
-
-test("回补核查丢弃旧时间、旧会话及卸载后的结果，失败可重试", async () => {
-  const pending: ReturnType<typeof Promise.withResolvers>[] = []
-  const user = vue.reactive({ sessionVersion: 1 })
-  let unmount = () => {}
-  const page = researchPage({ getCoverageApi: () => {
-    const p = Promise.withResolvers()
-    pending.push(p)
-    return p.promise
-  } }, user, { onBeforeUnmount: (fn: () => void) => unmount = fn })
-  page.startAt.value = new Date("2026-10-01T00:00:00Z")
-  const old = page.checkCoverage()
-  page.startAt.value = new Date("2026-10-02T00:00:00Z")
-  const current = page.checkCoverage()
-  pending[1].resolve({ total: 2 })
-  await current
-  pending[0].resolve({ total: 1 })
-  await old
-  assert.equal(page.coverage.value.total, 2)
-  const failed = page.checkCoverage()
-  pending[2].reject(new Error("核查失败"))
-  await failed
-  assert.equal(page.coverageError.value, true)
-  const retry = page.checkCoverage()
-  pending[3].resolve({ total: 3 })
-  await retry
-  assert.equal(page.coverage.value.total, 3)
-  assert.equal(page.coverageError.value, false)
-  const inactive = page.checkCoverage()
-  unmount()
-  pending[4].resolve({ total: 4 })
-  await inactive
-  assert.equal(page.coverage.value, null)
-  await page.checkCoverage()
-  assert.equal(pending.length, 5)
-  user.sessionVersion++
-  await vue.nextTick()
-  assert.equal(page.coverage.value, null)
-  assert.equal(page.startAt.value, null)
-})
-
-test("切换会话后，旧回补核查不能恢复统计结果", async () => {
-  const pending = Promise.withResolvers()
-  const user = vue.reactive({ sessionVersion: 1 })
-  const page = researchPage({ getCoverageApi: () => pending.promise }, user)
-  page.startAt.value = new Date("2026-10-01T00:00:00Z")
-  const old = page.checkCoverage()
-  user.sessionVersion++
-  await vue.nextTick()
-  pending.resolve({ total: 999 })
-  await old
-  assert.equal(page.coverage.value, null)
-  assert.equal(page.startAt.value, null)
-})
-
-test("回补时间无效或晚于当前时间时禁止保存", async () => {
-  let calls = 0
-  const errors: string[] = []
-  const page = researchPage({ saveSettingsApi: async () => calls++ }, undefined, { ElMessage: { error: (message: string) => errors.push(message) } })
-  for (const value of [null, new Date("invalid"), new Date(Date.now() + 86400000)]) {
-    page.startAt.value = value
-    await page.save()
-  }
-  assert.equal(calls, 0)
-  assert.equal(errors.length, 3)
-})
-
-test("两阶段首页保留新查询结果，旧会话与卸载后的响应不写回", async () => {
-  const pending: ReturnType<typeof Promise.withResolvers>[] = []
-  const user = vue.reactive({ sessionVersion: 1 })
-  let unmount = () => {}
-  const page = researchPage({ listEventsApi: () => {
-    const p = Promise.withResolvers()
-    pending.push(p)
-    return p.promise
-  } }, user, { onBeforeUnmount: (fn: () => void) => unmount = fn })
-  const first = page.load()
-  const second = page.load()
-  pending[1].resolve({ items: [{ id: 2 }], total: 1 })
-  await second
-  pending[0].resolve({ items: [{ id: 1 }], total: 1 })
-  await first
-  assert.equal(page.events.value[0].id, 2)
-  const old = page.load()
-  user.sessionVersion++
-  await vue.nextTick()
-  pending[2].resolve({ items: [{ id: 3 }], total: 1 })
-  await old
-  assert.equal(page.events.value.length, 0)
-  unmount()
-  await page.load()
-  assert.equal(pending.length, 3)
-})
-
-for (const stage of ["index", "research"] as const) {
-  test(`${stage} 模型列表保持手填值并拒绝旧配置与关闭后的响应`, async () => {
-    const pending: ReturnType<typeof Promise.withResolvers>[] = []
-    const page = researchPage({}, undefined, {}, { "@@/apis/settings": { listProvidersApi: async () => [], listProviderModelsApi: () => {
-      const p = Promise.withResolvers()
-      pending.push(p)
-      return p.promise
-    } } })
-    page.config.value[stage].model = "manual"
-    page.settingsOpened.value = true
-    page.config.value[stage].provider_id = 1
-    await vue.nextTick()
-    page.config.value[stage].provider_id = 2
-    await vue.nextTick()
-    pending[1].resolve(["new"])
-    await setImmediate()
-    pending[0].resolve(["old"])
-    await setImmediate()
-    assert.deepEqual(Array.from(page.modelOptions.value[stage]), ["new"])
-    assert.equal(page.config.value[stage].model, "manual")
-    const closed = page.loadModels(stage)
-    page.settingsOpened.value = false
-    await vue.nextTick()
-    pending[2].resolve(["closed"])
-    await closed
-    assert.equal(page.modelOptions.value[stage].length, 0)
-  })
-}
-
-test("事件与包详情丢弃旧请求和关闭后响应，失败可重新读取", async () => {
-  for (const kind of ["Event", "Package"]) {
-    const pending: ReturnType<typeof Promise.withResolvers>[] = []
-    const page = researchPage({ [`get${kind}Api`]: () => {
-      const p = Promise.withResolvers()
-      pending.push(p)
-      return p.promise
-    } })
-    const first = page[`open${kind}`](1)
-    const second = page[`open${kind}`](2)
-    pending[1].resolve({ id: 2 })
-    await second
-    pending[0].resolve({ id: 1 })
-    await first
-    const ref = kind === "Event" ? page.detail : page.packageDetail
-    assert.equal(ref.value.id, 2)
-    const closed = page[`open${kind}`](3)
-    ;(kind === "Event" ? page.opened : page.packageOpened).value = false
-    await vue.nextTick()
-    pending[2].resolve({ id: 3 })
-    await closed
-    assert.equal(ref.value, null)
-    const failed = page[`open${kind}`](4)
-    pending[3].reject(new Error("unavailable"))
-    await failed
-    assert.equal((kind === "Event" ? page.detailError : page.packageError).value, true)
-    const retry = page[`open${kind}`](4)
-    pending[4].resolve({ id: 4 })
-    await retry
-    assert.equal(ref.value.id, 4)
-  }
-})
-
-test("两阶段保存各自思考强度，不提交第三阶段配置", async () => {
-  let saved: any
-  const page = researchPage({ saveSettingsApi: async (data: unknown) => {
-    saved = JSON.parse(JSON.stringify(data))
-  } })
-  await page.load()
-  page.config.value.index.reasoning_effort = "low"
-  page.config.value.research.reasoning_effort = "high"
-  await page.save()
-  assert.equal(saved.index.reasoning_effort, "low")
-  assert.equal(saved.research.reasoning_effort, "high")
-  assert.equal(Object.keys(saved).length, 5)
-  assert.equal(saved.start_at, "2026-10-31T16:00:00.000Z")
-  assert.equal(saved.base_revision, 0)
-  page.config.value.research.reasoning_effort = null
-  await page.save()
-  assert.equal(saved.research.reasoning_effort, null)
-  assert.equal(saved.index.reasoning_effort, "low")
-})
-
-test("Skill 草稿的旧会话响应不能替换当前列表或提示成功", async () => {
-  const pending = Promise.withResolvers()
-  const user = vue.reactive({ sessionVersion: 1 })
-  let notices = 0
-  const page = researchPage({ createSkillsApi: async () => ({ index: 1, research: 2 }) }, user, { ElMessage: { success() {
-    notices++
-  } } }, { "@@/apis/skills": { listSkillTreeApi: () => pending.promise } })
-  const old = page.prepareSkills()
-  await setImmediate()
-  user.sessionVersion++
-  await vue.nextTick()
-  page.skills.value = [{ id: 9 }]
-  pending.resolve([{ id: 1, scope: "news", kind: "skill" }])
-  await old
-  assert.equal(page.skills.value[0].id, 9)
-  assert.equal(notices, 0)
-})
-
-test("两阶段操作拒绝重复提交和旧会话操作，失败保留配置草稿", async () => {
-  const user = vue.reactive({ sessionVersion: 1 })
-  const pending = Promise.withResolvers()
-  let calls = 0
-  const page = researchPage({ saveSettingsApi: () => {
-    calls++
-    return pending.promise
-  } }, user)
-  await page.load()
-  page.config.value.index.model = "draft"
-  const first = page.save()
-  await page.save()
-  assert.equal(calls, 1)
-  pending.reject(new Error("save failed"))
-  await assert.rejects(first, /save failed/)
-  assert.equal(page.config.value.index.model, "draft")
-  assert.equal(page.busy.value, false)
-  user.sessionVersion++
-  await vue.nextTick()
-  await page.save()
-  assert.equal(calls, 1)
-})
-
-test("事件与新闻包分别分页查询，不调用第三阶段", async () => {
-  const queries: string[] = []
-  const page = researchPage({ listEventsApi: async () => {
-    queries.push("events")
-    return { items: [{ id: 1 }], total: 31 }
-  }, listPackagesApi: async () => {
-    queries.push("packages")
-    return { items: [{ id: 2 }], total: 30 }
-  } })
-  await page.load()
-  assert.equal(page.events.value[0].id, 1)
-  page.tab.value = "packages"
-  await vue.nextTick()
-  await setImmediate()
-  assert.equal(page.packages.value[0].id, 2)
-  assert.equal(page.total.value, 30)
-  assert.deepEqual(queries, ["events", "packages"])
-})
-
-for (const kind of ["Event", "Package"] as const) {
-  test(`${kind} 重试后刷新详情，轮询恢复读取失败并丢弃关闭后的响应`, async () => {
-    let state = "failed"
-    let reads = 0
-    let writes = 0
-    let failRead = false
-    const deferred = Promise.withResolvers()
-    let delay = false
-    const page = researchPage({
-      [`get${kind}Api`]: async (id: number) => {
-        reads++
-        if (delay) return deferred.promise
-        if (failRead) throw new Error("GET failed")
-        return { id, state, error: state === "failed" ? "Old error" : null, versions: state === "done" ? [1] : [] }
-      },
-      [`retry${kind}Api`]: async () => {
-        writes++
-        state = "pending"
-      }
-    })
-    const detail = kind === "Event" ? page.detail : page.packageDetail
-    const opened = kind === "Event" ? page.opened : page.packageOpened
-    const error = kind === "Event" ? page.detailError : page.packageError
-    await page[`open${kind}`](7)
-    await page[`retry${kind}`]()
-    assert.equal(detail.value.state, "pending")
-    assert.equal(detail.value.error, null)
-    state = "done"
-    failRead = true
-    await page.refresh()
-    assert.equal(detail.value.state, "pending")
-    assert.equal(error.value, true)
-    failRead = false
-    await page.refresh()
-    assert.equal(detail.value.state, "done")
-    assert.equal(detail.value.versions.length, 1)
-    assert.equal(error.value, false)
-    delay = true
-    const pending = page.refresh()
-    await setImmediate()
-    const count = reads
-    await page.refresh()
-    assert.equal(reads, count)
-    opened.value = false
-    await vue.nextTick()
-    deferred.resolve({ id: 7, state: "failed" })
-    await pending
-    assert.equal(detail.value.state, "done")
-    assert.equal(writes, 1)
-  })
-}
-
-test("固定版本读取丢弃旧请求及旧会话响应", async () => {
-  const first = Promise.withResolvers<any>()
-  const second = Promise.withResolvers<any>()
-  const user = vue.reactive({ sessionVersion: 1 })
-  const page = researchPage({ getEventVersionApi: (_event: number, version: number) => version === 1 ? first.promise : second.promise }, user)
-  const a = page.openVersion(8, 1)
-  const b = page.openVersion(8, 2)
-  second.resolve({ id: 2 })
-  await b
-  first.resolve({ id: 1 })
-  await a
-  assert.equal(page.versionDetail.value.id, 2)
-  user.sessionVersion++
-  await vue.nextTick()
-  assert.equal(page.versionDetail.value, null)
-  assert.equal(page.versionOpened.value, false)
-})
-
-test("侧栏时间统一使用北京时间，保存时间与配置版本但启用不提交草稿", async () => {
-  let saved: any
-  let enableArgs: unknown[] = []
-  const page = researchPage({
-    getSettingsApi: async () => ({ config: {}, enabled: true, control_revision: 7, start_at: "2026-11-04T16:00:00Z" }),
-    saveSettingsApi: async (value: unknown) => {
-      saved = value
-    },
-    enableApi: async (...args: unknown[]) => {
-      enableArgs = args
-    }
-  })
-  await page.settings()
-  assert.equal(page.startText.value, "2026-11-05 00:00:00")
-  page.startText.value = "2026-10-20 00:00:00"
-  await page.load()
-  assert.equal(page.startText.value, "2026-10-20 00:00:00")
-  await page.save()
-  assert.equal(saved.start_at, "2026-10-19T16:00:00.000Z")
-  assert.equal(saved.base_revision, 7)
-  await page.enable()
-  assert.deepEqual(enableArgs, [])
-})
-
-test("动态队列显示共享容量、阶段执行数并保留低并发原因", async () => {
-  const queue = { running: 1, capacity: 8, running_by_stage: { index: 0, assign: 1, research: 0 }, draining: false, realtime: { missing: 2 }, backfill: { assign_pending: 12 }, events: { realtime: {}, backfill: { aggregating: 5 } }, idle_reasons: ["assignment_serial", "aggregation"] }
-  const page = researchPage({ getSettingsApi: async () => ({ config: {}, control_revision: 1, enabled: true, start_at: "2026-11-04T16:00:00Z", queue, batch: null }) })
-  await page.load()
-  assert.deepEqual(page.queue.value, queue)
-  assert.equal(page.idleReasonLabels.assignment_serial, "事件归属串行处理中")
-  assert.equal(page.idleReasonLabels.aggregation, "等待事件聚合窗口")
-  assert.equal(page.idleReasonLabels.waiting_previous, "等待上一轮研究完成")
-  assert.equal("batch" in page, false)
 })

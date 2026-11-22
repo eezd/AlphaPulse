@@ -136,12 +136,64 @@ def test_provider_model_catalog_http_contract(app_env, monkeypatch, failure):
     asyncio.run(check())
 
 
-def test_delete_provider_rejects_two_stage_binding_even_when_paused(app_env, monkeypatch):
+@pytest.mark.parametrize('stage', ['analysis', 'period', 'daily'])
+def test_delete_provider_rejects_briefing_binding_even_when_paused(app_env, monkeypatch, stage):
     from fastapi import HTTPException
     from alphapulse.api import settings
-    session=SimpleNamespace(scalar=AsyncMock(return_value=SimpleNamespace(enabled=False)),delete=AsyncMock())
+    session=SimpleNamespace(scalar=AsyncMock(return_value=SimpleNamespace(enabled=False, config={stage: {'provider_id': 1}})),delete=AsyncMock())
     monkeypatch.setattr(settings,'get_provider',AsyncMock(return_value=SimpleNamespace(id=1)))
     with pytest.raises(HTTPException) as error:
         asyncio.run(settings.delete_provider(1,session))
     assert error.value.status_code==409
     session.delete.assert_not_awaited()
+
+
+@pytest.mark.parametrize('protocol', ['openai', 'anthropic'])
+def test_connection_diagnostic_sends_once_without_waiting(app_env, monkeypatch, protocol):
+    from alphapulse.api import settings
+    from alphapulse.ai import llm, recovery
+    calls = []
+    async def adapter(*args):
+        calls.append(args)
+        sdk = llm.openai if protocol == 'openai' else llm.anthropic
+        raise sdk.APITimeoutError(request=httpx.Request('POST', 'https://example.invalid'))
+        yield
+    monkeypatch.setattr(llm, '_stream_' + protocol, adapter)
+    monkeypatch.setattr(settings, 'get_provider', AsyncMock(return_value=SimpleNamespace(
+        protocol=protocol, reasoning_effort=None)))
+    wait = AsyncMock()
+    monkeypatch.setattr(llm, '_wait_local', wait)
+    async def run():
+        result = await settings.test_provider(1, None)
+        assert not result.data.ok and '超时' in result.data.error
+        assert llm.fail_fast.get() is False
+    asyncio.run(run())
+    assert len(calls) == 1
+    wait.assert_not_awaited()
+    recovery.mark_waiting.assert_not_awaited()
+
+
+@pytest.mark.parametrize('failed', [False, True])
+def test_provider_availability_keeps_envelope_and_explicit_read_failure(app_env, monkeypatch, failed):
+    from fastapi import FastAPI
+    from alphapulse.api import settings
+    from alphapulse.ai import recovery
+    from redis.exceptions import RedisError
+    provider = SimpleNamespace(id=1, name='synthetic')
+    session = SimpleNamespace(scalars=AsyncMock(return_value=[provider]))
+    recovery.availability.return_value = dict(state='waiting', retry_at=1800, level=2)
+    if failed: recovery.availability.side_effect = RedisError('synthetic outage')
+    app = FastAPI()
+    app.include_router(settings.router)
+    app.dependency_overrides[settings.require_admin] = lambda: None
+    app.dependency_overrides[settings.get_session] = lambda: session
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test') as client:
+            response = await client.get('/api/settings/provider-availability')
+        assert response.status_code == (503 if failed else 200)
+        if not failed:
+            assert response.json()['data'] == [dict(provider_id=1, name='synthetic', state='waiting',
+                retry_at='1970-01-01T00:30:00+00:00', level=2)]
+        else:
+            assert '无法读取模型重试等待状态' in response.json()['detail']
+    asyncio.run(run())

@@ -3,7 +3,6 @@
 import argparse
 from datetime import UTC, datetime, timedelta
 import json
-from pathlib import Path
 import time
 from zoneinfo import ZoneInfo
 
@@ -25,10 +24,10 @@ import asyncio,json
 from sqlalchemy import select,func
 from alphapulse.core.db import SessionLocal,engine
 from alphapulse.models import Source,NewsItem
-from alphapulse.news_research.models import ResearchSettings
+from alphapulse.briefings.models import BriefingSettings
 async def main():
  async with SessionLocal() as s:
-  setting=await s.get(ResearchSettings,1)
+  setting=await s.get(BriefingSettings,1)
   rows=(await s.execute(select(NewsItem.source_code,func.count()).group_by(NewsItem.source_code))).all()
   print(json.dumps({'news_ai_enabled':bool(setting and setting.enabled),'news_counts':dict(rows)}))
  await engine.dispose()
@@ -103,7 +102,7 @@ def main():
     args = parser.parse_args()
     directory = deploy.INSTANCE / 'backfill-20250101'
     if not args.execute:
-        print(json.dumps({'start': BEGIN, 'exclude': ['wscn_live', 'wscn_news'], 'baseline': snapshot(),
+        print(json.dumps({'start': BEGIN, 'exclude': ['wscn_news'], 'baseline': snapshot(),
                           'state': str(directory / 'state.json')}, ensure_ascii=False))
         return
     directory.mkdir(exist_ok=True)

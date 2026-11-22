@@ -9,7 +9,7 @@ import { logRequestError } from "@/http/axios"
 import CalendarSourcePanel from "./components/CalendarSourcePanel.vue"
 import SourcePanel from "./components/SourcePanel.vue"
 import { useCrawlerLogs } from "./composables/useCrawlerLogs"
-import { sourceStatus } from "./sourceStatus"
+import { historyStatus, sourceStatus } from "./sourceStatus"
 
 const rssVisible = ref(false)
 const rssSaving = ref(false)
@@ -29,7 +29,7 @@ async function addRss() {
 }
 const sessionScope = useSessionScope()
 
-// 连续失败达到该次数时卡片告警
+// 连续失败达到该次数时提示告警
 const FAILURE_ALERT = 3
 const RESTART_TIMEOUT_MS = 60_000
 
@@ -39,15 +39,24 @@ const expandedLogs = ref(false)
 const failed = ref(false)
 const detailVisible = ref(false)
 const wide = ref(false)
-const sourceView = ref("cards")
+const compact = ref(false)
 let viewport: MediaQueryList
-const updateViewport = () => wide.value = viewport.matches
+let compactViewport: MediaQueryList
+function updateViewport() {
+  wide.value = viewport.matches
+  compact.value = compactViewport.matches
+}
 onMounted(() => {
   viewport = window.matchMedia("(min-width: 1380px)")
+  compactViewport = window.matchMedia("(max-width: 640px)")
   updateViewport()
   viewport.addEventListener("change", updateViewport)
+  compactViewport.addEventListener("change", updateViewport)
 })
-onBeforeUnmount(() => viewport?.removeEventListener("change", updateViewport))
+onBeforeUnmount(() => {
+  viewport?.removeEventListener("change", updateViewport)
+  compactViewport?.removeEventListener("change", updateViewport)
+})
 const detailCode = ref("")
 const detailKind = ref<"news" | "calendar">("news")
 const newsDetail = computed(() => detailKind.value === "news" ? info.value?.sources.find(s => s.code === detailCode.value) : undefined)
@@ -204,72 +213,46 @@ onMounted(async () => {
     </div>
     <div class="crawler-workspace" :class="{ 'with-detail': wide }">
       <div class="crawler-sources">
-        <el-radio-group v-model="sourceView" size="small" class="mb-2">
-          <el-radio-button value="cards">
-            来源卡片
-          </el-radio-button><el-radio-button value="table">
-            数据表格
-          </el-radio-button>
-        </el-radio-group>
         <el-card v-if="collector !== 'calendar'" shadow="never" body-class="p-0">
           <template #header>
             新闻来源 · {{ newsSources.length }}
           </template>
-          <div v-if="sourceView === 'cards'" class="source-cards">
-            <button v-for="source in newsSources" :key="source.code" class="source-card" :class="{ selected: detailCode === source.code, unhealthy: source.consecutive_failures >= FAILURE_ALERT }" @click="openDetail(source.code, 'news')">
-              <div class="flex items-center gap-2">
-                <b>{{ source.name }}</b><small>{{ source.code }}</small><div class="flex-1" /><el-tag size="small" :type="sourceStatus(source, restarting.has(source.code)).type">
-                  {{ sourceStatus(source, restarting.has(source.code)).text }}
-                </el-tag>
-              </div>
-              <div class="source-metrics">
-                <span>今日新增<b>{{ source.today_new }}</b></span><span>今日修订<b>{{ source.today_revised }}</b></span><span>累计收录<b>{{ source.total_items }}</b></span><span>采集频率<b>{{ source.interval_seconds }}s</b></span>
-              </div>
-              <div class="source-card-note">
-                最近成功 {{ source.last_success_at ? formatTime(source.last_success_at) : '尚无成功记录' }}<span v-if="source.consecutive_failures"> · 连续失败 {{ source.consecutive_failures }} 次</span>
-              </div>
-              <p v-if="source.last_error" class="source-card-error">
-                {{ source.last_error }}
-              </p><div v-else class="source-card-note">
-                {{ source.history_done ? '历史回补完成' : source.history_position ? `历史回补至 ${source.history_position}` : '选择来源查看配置和采集记录' }}
-              </div>
-            </button><el-empty v-if="!newsSources.length" description="没有符合条件的新闻来源" />
-          </div>
-          <el-table v-else :data="newsSources" size="small" @row-click="row => openDetail(row.code, 'news')">
-            <el-table-column prop="name" label="来源" min-width="170" />
-            <el-table-column label="地域" width="95">
+          <el-table :data="newsSources" size="small" @row-click="row => openDetail(row.code, 'news')">
+            <el-table-column prop="name" label="来源" :min-width="compact ? 138 : 170" />
+            <el-table-column prop="total_items" label="累计收录" :width="compact ? 88 : 95" />
+            <el-table-column v-if="!compact" label="地域" width="95">
               <template #default="{ row }">
                 {{ regions[row.region_code as keyof typeof regions] ?? row.region_code }}
               </template>
             </el-table-column>
-            <el-table-column label="状态" min-width="130">
+            <el-table-column v-if="!compact" label="状态" min-width="130">
               <template #default="{ row }">
                 <el-tag size="small" :type="sourceStatus(row as SourceInfo, restarting.has(row.code)).type">
                   {{ sourceStatus(row as SourceInfo, restarting.has(row.code)).text }}
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="频率" width="85">
+            <el-table-column v-if="!compact" label="频率" width="85">
               <template #default="{ row }">
                 {{ row.interval_seconds }} 秒
               </template>
             </el-table-column>
-            <el-table-column label="今日新增 / 修订" width="130">
+            <el-table-column v-if="!compact" label="今日新增 / 修订" width="130">
               <template #default="{ row }">
                 {{ row.today_new }} / {{ row.today_revised }}
               </template>
             </el-table-column>
-            <el-table-column label="最近成功" width="155">
+            <el-table-column v-if="!compact" label="最近成功" width="155">
               <template #default="{ row }">
                 {{ row.last_success_at ? formatTime(row.last_success_at) : '—' }}
               </template>
             </el-table-column>
-            <el-table-column label="异常 / 回补" min-width="230">
+            <el-table-column v-if="!compact" label="异常 / 回补" min-width="230">
               <template #default="{ row }">
-                <span :class="row.consecutive_failures >= FAILURE_ALERT ? 'text-red-600' : ''">{{ row.last_error || (row.history_done ? '历史回补完成' : row.history_position ? `回补至 ${row.history_position}` : '—') }}</span>
+                <span :class="row.consecutive_failures >= FAILURE_ALERT ? 'text-red-600' : ''">{{ historyStatus(row as SourceInfo) }}</span>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="80" fixed="right">
+            <el-table-column label="操作" :width="compact ? 64 : 80" fixed="right">
               <template #default="{ row }">
                 <el-button link type="primary" @click.stop="openDetail(row.code, 'news')">
                   详情
@@ -396,64 +379,5 @@ onMounted(async () => {
 .crawler-detail h2 {
   margin: 0 0 16px;
   font-size: 15px;
-}
-.source-cards {
-  max-height: 620px;
-  overflow: auto;
-  padding: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.source-card {
-  text-align: left;
-  width: 100%;
-  padding: 12px;
-  border: 1px solid #e2e8f0;
-  border-left: 3px solid #cbd5e1;
-  border-radius: 4px;
-  cursor: pointer;
-  background: white;
-  color: #334155;
-}
-.source-card:hover {
-  background: #f8fafc;
-}
-.source-card.selected {
-  border-color: #93b4ff;
-  background: #f8faff;
-}
-.source-card.unhealthy {
-  border-left-color: #dc2626;
-}
-.source-card small {
-  color: #94a3b8;
-  font-size: 10px;
-}
-.source-metrics {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  font-size: 10px;
-  color: #64748b;
-  margin: 10px 0;
-}
-.source-metrics b {
-  display: block;
-  color: #334155;
-  font-size: 14px;
-  margin-top: 3px;
-}
-.source-card-note {
-  color: #64748b;
-  font-size: 10px;
-  margin-top: 5px;
-}
-.source-card-error {
-  color: #dc2626;
-  font-size: 11px;
-  margin: 8px 0 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 </style>

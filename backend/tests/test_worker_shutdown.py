@@ -5,8 +5,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 
-def test_research_sigterm_drains_inflight_task(app_env):
-    from alphapulse.news_research import worker
+def test_research_sigterm_drains_inflight_task(app_env, briefing_worker_env):
+    from alphapulse.briefings import worker
 
     async def scenario():
         handlers = {}
@@ -25,10 +25,25 @@ def test_research_sigterm_drains_inflight_task(app_env):
         loop = asyncio.get_running_loop()
         with patch.object(loop, 'add_signal_handler', side_effect=lambda sig, callback: handlers.update({sig: callback})), \
              patch.object(worker, 'engine', engine), patch.object(worker, 'SessionLocal', return_value=session), \
-             patch.object(worker, 'recover_interrupted', new=AsyncMock()), \
-             patch.object(worker.scheduling, 'actions', new=AsyncMock(return_value=[('package', 1)])) as actions, \
-             patch.object(worker, 'process_package', side_effect=process):
+             patch.object(worker.service, 'recover', new=AsyncMock()), \
+             patch.object(worker, 'candidates', new=AsyncMock(return_value=[('analysis', 1, 'live')])) as actions, \
+             patch.object(worker.service, 'process_analysis', side_effect=process):
             await asyncio.wait_for(worker.run(), 2)
         assert finished == [True]
         assert actions.await_count == 1
     asyncio.run(scenario())
+
+
+def test_briefings_module_starts_worker_loop(app_env, monkeypatch):
+    import runpy
+    from alphapulse.briefings import worker
+
+    started = []
+
+    def capture(coroutine):
+        started.append(coroutine.cr_code.co_name)
+        coroutine.close()
+
+    monkeypatch.setattr(asyncio, 'run', capture)
+    runpy.run_path(worker.__file__, run_name='__main__')
+    assert started == ['run']

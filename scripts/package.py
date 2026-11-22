@@ -3,8 +3,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import zipfile
@@ -13,14 +15,16 @@ ROOT = Path.cwd()
 CONTROL = Path(__file__).resolve().parent
 version = os.environ['ALPHAPULSE_BUILD_VERSION']
 commit = os.environ['ALPHAPULSE_BUILD_SHA']
-assert subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() == commit
+# The trusted controller verifies both Git HEADs before exporting their trees into
+# this secret-free container. No Git database or Runner workspace is available here.
+assert re.fullmatch('[0-9a-f]{40}', commit) and re.fullmatch(r'\d{8}-[0-9a-f]{8}', version) and version.endswith(commit[:8])
 for command, directory in [(['uv', 'sync', '--locked', '--python', '3.13'], 'backend'),
                            (['uv', 'run', 'pytest', '-q'], 'backend'),
                            (['uvx', 'ruff==0.14.14', 'check', '--select', 'F,E9,B', 'src', 'tests'], 'backend'),
                            (['pnpm', 'install', '--frozen-lockfile'], 'web'), (['pnpm', 'lint:check'], 'web'),
                            (['pnpm', 'typecheck'], 'web'), (['pnpm', 'test'], 'web'), (['pnpm', 'build'], 'web')]:
     subprocess.run(command, cwd=ROOT/directory, check=True)
-subprocess.run(['python3', '-m', 'unittest', 'discover', '-s', str(CONTROL/'tests'), '-q'], check=True)
+subprocess.run([sys.executable, '-m', 'unittest', 'discover', '-s', str(CONTROL/'tests'), '-q'], check=True)
 (ROOT/'web/dist/version.json').write_text(json.dumps({'version': version, 'commit': commit}))
 platforms = {'linux/amd64': 'x86_64-unknown-linux-gnu', 'linux/arm64': 'aarch64-unknown-linux-gnu',
              'darwin/amd64': 'x86_64-apple-darwin', 'darwin/arm64': 'aarch64-apple-darwin',

@@ -1,0 +1,64 @@
+name: Manual GitHub sync
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: alphapulse-delivery
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: ${{ forgejo.ref == 'refs/heads/main' }}
+    runs-on: docker
+    container:
+      image: node:24-bookworm
+    env:
+      CONTROL_REF: ${{ forgejo.ref }}
+      CI_RUN_ID: ${{ forgejo.run_id }}
+      CI_RUN_ATTEMPT: ${{ forgejo.run_attempt }}
+    steps:
+      - name: Check out trusted control code
+        uses: https://github.com/actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ forgejo.sha }}
+          persist-credentials: false
+      - name: Install sync tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends python3 git skopeo ca-certificates
+          use_lfs=$(python3 -c "import runpy; print(runpy.run_path('scripts/sync-github.py')['USE_LFS'])")
+          if [ "$use_lfs" = true ]; then
+            apt-get install -y --no-install-recommends git-lfs
+          fi
+      - name: Sync verified originals to GitHub and GHCR
+        env:
+          CI_AUTH_DIR: ${{ runner.temp }}/alphapulse-sync-${{ forgejo.run_id }}-${{ forgejo.run_attempt }}
+          FORGEJO_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.MIRROR_TOKEN }}
+        run: python3 scripts/sync-github.py
+      - name: Remove this run's authentication files
+        if: ${{ always() }}
+        env:
+          CI_AUTH_DIR: ${{ runner.temp }}/alphapulse-sync-${{ forgejo.run_id }}-${{ forgejo.run_attempt }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import re
+          import shutil
+
+          run_id = os.environ['CI_RUN_ID']
+          attempt = os.environ['CI_RUN_ATTEMPT']
+          if not (re.fullmatch(r'[1-9][0-9]*', run_id) and re.fullmatch(r'[1-9][0-9]*', attempt)):
+              raise RuntimeError('Invalid CI run identity for auth cleanup')
+          parent = Path(os.environ['RUNNER_TEMP']).resolve()
+          path = Path(os.environ['CI_AUTH_DIR'])
+          expected = parent / f'alphapulse-sync-{run_id}-{attempt}'
+          if not (path.is_absolute() and path.parent.resolve() == parent and path.resolve() == expected):
+              raise RuntimeError('Auth cleanup path is outside this run/attempt')
+          if path.is_symlink():
+              raise RuntimeError('Refusing symlink auth cleanup')
+          if path.exists():
+              shutil.rmtree(path)
+          PY

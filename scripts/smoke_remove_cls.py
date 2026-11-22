@@ -8,20 +8,29 @@ from sqlalchemy.dialects.postgresql import JSONB
 from alphapulse.core.config import get_settings
 from alphapulse.core.db import engine
 from alphapulse.crawler.remove_cls import AI_TABLES, OPTIONAL_AI_TABLES, cleanup
-from alphapulse.models import NewsItem, Source
-import alphapulse.news_research.models  # noqa: F401
+from alphapulse.models import NewsItem
 
 
 async def main():
     assert get_settings().database_url.startswith('postgresql+asyncpg://ci:ci-only@')
-    assert get_settings().database_url.endswith('/ci')
+    assert get_settings().database_url.split('?', 1)[0].endswith(('/ci', '/cls_history_ci'))
     try:
         async with engine.connect() as connection:
             transaction = await connection.begin()
             try:
+                if await connection.scalar(text('SELECT version_num FROM alembic_version')) != 'c91234567890':
+                    for execute in (False, True):
+                        try:
+                            await cleanup(connection, execute)
+                        except RuntimeError as error:
+                            assert '仅允许 schema c91234567890' in str(error)
+                        else:
+                            raise AssertionError('历史清理器必须拒绝当前 schema')
+                    print('CLS historical cleanup refused on current schema')
+                    return
                 assert not await connection.scalar(text("SELECT count(*) FROM sources WHERE code IN ('cls_depth','cls_telegraph')"))
-                await connection.execute(insert(Source).values(code='cls_depth', name='CI CLS', list_url='https://example.com', interval_seconds=120))
-                for identity, source in ((9000001, 'cls_depth'), (9000002, 'wscn_live')):
+                await connection.execute(text("INSERT INTO sources (code,name,list_url,interval_seconds,enabled,backfill_hours,consecutive_failures) VALUES ('cls_depth','CI CLS','https://example.com',120,false,72,0)"))
+                for identity, source in ((9000001, 'cls_depth'), (9000002, 'wscn_news')):
                     await connection.execute(insert(NewsItem).values(id=identity, source_code=source, external_id='cleanup-ci',
                         url='https://example.com', published_at=datetime.now(UTC), content_hash=str(identity)))
                 assert set((await cleanup(connection))['absent_legacy_tables']) == set(OPTIONAL_AI_TABLES)
@@ -56,7 +65,7 @@ async def main():
                     await connection.execute(table.insert().values(**values))
                 await connection.execute(text("INSERT INTO raw_bodies VALUES (:shared,:body),(:exclusive,:body)"),
                     {'shared': 'a'*64, 'exclusive': 'b'*64, 'body': b'ci'})
-                for identity, source, digest in ((9000001,'cls_depth','a'*64),(9000002,'wscn_live','a'*64),(9000003,'cls_depth','b'*64)):
+                for identity, source, digest in ((9000001,'cls_depth','a'*64),(9000002,'wscn_news','a'*64),(9000003,'cls_depth','b'*64)):
                     await connection.execute(text('''INSERT INTO raw_responses
                         (id,source_code,url,method,status,headers,body_sha256) VALUES
                         (:id,:source,'https://example.com','GET',200,'{}',:digest)'''),

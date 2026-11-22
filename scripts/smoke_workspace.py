@@ -15,7 +15,8 @@ from alphapulse.core.db import SessionLocal
 from alphapulse.core.redis import redis
 from alphapulse.models import Kline, NewsBookmark, NewsItem, SkillNode, SkillVersion
 from alphapulse.market.worker import handle_message
-from alphapulse.news_research.models import Event, Membership, Package, Version
+from alphapulse.briefings.models import Analysis
+from alphapulse.briefings.service import article_snapshot
 
 
 async def main():
@@ -29,23 +30,15 @@ async def main():
                         published_at=now, content_hash='f' * 64)
         session.add(news)
         await session.flush()
-        package = Package(news_id=news.id, content_hash=news.content_hash, state='done',
-                          keywords=[{'canonical': '美联储', 'aliases': ['Federal Reserve'], 'quote': 'Federal Reserve'}])
-        result = {'title': news.title, 'summary': '美联储公布最新利率决定；当前样本用于验证事件、证据与时间线的展示。',
-                  'facts': '已收录公开声明。', 'reasoning': '依据已采集新闻原文。', 'verification': '本地证据核对。',
-                  'uncertainty': '未来政策路径仍存在不确定性。', 'opinions': '关注后续声明。',
-                  'counter_evidence': '尚无其他已采集反证。', 'watchpoints': '下一次会议。',
-                  'asset_impacts': '利率和美元资产。', 'importance_stars': 4, 'risk_stars': 3,
-                  'confidence': '中等', 'timeline_points': []}
-        event = Event(title=news.title, state='done', tags=['美联储'], result=result)
-        session.add_all([package, event])
-        await session.flush()
-        session.add(Membership(event_id=event.id, package_id=package.id, evidence='Federal Reserve',
-                               reason='同一利率决议', change_kind='new_fact'))
-        session.add(Version(event_id=event.id, revision=event.revision, state='done', output=result, rules={},
-                            input={'packages': [{'id': package.id, 'news_id': news.id}],
-                                   'articles': [{'id': news.id, 'title': news.title, 'summary': news.summary,
-                                                 'content': news.content_text, 'url': news.url}]}))
+        keywords = [{'canonical': '美联储', 'aliases': ['Federal Reserve'], 'quote': 'Federal Reserve'}]
+        session.add(Analysis(news_id=news.id, version_no=1, state='done', lane='live',
+                             effective_at=now, time_basis='published_at', source_revision=1, content_hash=news.content_hash,
+                             input=article_snapshot(news), keywords=keywords,
+                             importance_score=75, importance_stars=4, output={
+                                 'summary': '美联储政策样本', 'keywords': keywords, 'facts': [], 'impact': '关注政策路径',
+                                 'importance_score': 75, 'importance_reason': '影响市场',
+                                 'primary_region': {'code': 'US', 'name': '美国'}, 'related_regions': [],
+                                 'assets': [], 'uncertainties': [], 'scenarios': []}))
         session.add(NewsBookmark(username='another-user', news_id=news.id))
         skill = SkillNode(kind='skill', scope='shared', name='CI 研究规则')
         session.add(skill)
@@ -60,7 +53,7 @@ async def main():
                               close_time=start + (i + 1) * 900000 - 1, quote_volume=10000,
                               trades=10, taker_buy_base=50, taker_buy_quote=5000))
         await session.commit()
-        news_id, event_id = news.id, event.id
+        news_id = news.id
     origin = 'http://' + os.environ['SMOKE_WEB']
     output = Path('/tmp/alphapulse-ui')
     output.mkdir(exist_ok=True)
@@ -76,27 +69,27 @@ async def main():
                 assert (await client.put(f'/api/news/{news_id}/bookmark')).status_code == 200
             saved = (await client.get('/api/news', params={'ids': news_id, 'bookmarked': True})).json()['data']['items']
             assert len(saved) == 1 and saved[0]['keywords'][0]['canonical'] == '美联储'
-            assert saved[0]['events'][0]['id'] == event_id
+            assert saved[0]['analysis']['state'] == 'done'
             assert (await client.put('/api/news/9223372036854775807/bookmark')).status_code == 404
             assert (await client.get('/api/news', params={'sort': 'invalid'})).status_code == 422
             assert (await client.get('/api/news', params={'processing_state': 'invalid'})).status_code == 422
             assert (await client.get('/api/news', params={'ids': news_id, 'processing_state': 'done'})).json()['data']['total'] == 1
             async with SessionLocal() as session:
                 original = await session.get(NewsItem, news_id)
-                original.content_hash = 'e' * 64
+                original.content_hash, original.revision_no = 'e' * 64, 2
                 await session.commit()
-            assert (await client.get('/api/news', params={'ids': news_id, 'processing_state': 'done'})).json()['data']['total'] == 0
-            assert (await client.get('/api/news', params={'ids': news_id, 'processing_state': 'unprocessed'})).json()['data']['total'] == 1
+            unchanged = (await client.get('/api/news', params={'ids': news_id, 'processing_state': 'done'})).json()['data']
+            assert unchanged['total'] == 1 and unchanged['items'][0]['analysis']['source_changed']
+            assert (await client.get('/api/news', params={'ids': news_id, 'processing_state': 'unprocessed'})).json()['data']['total'] == 0
             async with SessionLocal() as session:
                 original = await session.get(NewsItem, news_id)
-                original.content_hash = 'f' * 64
+                original.content_hash, original.revision_no = 'f' * 64, 1
                 await session.commit()
             for _ in range(2):
                 assert (await client.delete(f'/api/news/{news_id}/bookmark')).status_code == 200
             async with SessionLocal() as session:
                 assert await session.scalar(select(NewsBookmark).where(NewsBookmark.username == 'another-user', NewsBookmark.news_id == news_id))
-            filtered = (await client.get('/api/risk/events', params={'q': '美联储', 'state': 'done', 'importance_min': 4})).json()['data']['items']
-            assert filtered and filtered[0]['package_count'] == 1 and filtered[0]['source_count'] == 1
+            assert (await client.get('/api/risk/events')).status_code == 404
             # All upstream feeds stay synthetic; real model/exchange calls are never enabled.
             await redis.set('ap:market:symbols:spot', json.dumps([
                 {'symbol': 'BTCUSDT', 'base': 'BTC', 'quote': 'USDT', 'price_precision': 2, 'volume_precision': 3}
@@ -134,7 +127,7 @@ async def main():
                     page.on('pageerror', lambda error: errors.append(str(error)))
                     await page.goto(origin + '/trading')
                     await page.get_by_role('heading', name='404', exact=True).wait_for()
-                    for route in ('home', 'news', 'calendar', 'crawler', 'market', 'chat', 'skills', 'settings'):
+                    for route in ('home', 'reports', 'news', 'calendar', 'crawler', 'market', 'chat', 'skills', 'settings'):
                         await page.goto(origin + '/' + route)
                         await page.locator('.terminal-shell').wait_for()
                         assert await page.locator('a[href="/trading"]').count() == 0
@@ -169,7 +162,9 @@ async def main():
                     await page.locator('aside.calendar-detail').get_by_text('事件详情与历史数据').wait_for()
                     await page.screenshot(path=str(output / 'calendar-detail.png'))
                     await page.goto(origin + '/crawler')
-                    await page.locator('.source-card').first.click()
+                    await page.locator('.crawler-sources .el-table__body .el-table__row').first.click()
+                    await page.get_by_role('columnheader', name='累计收录').wait_for()
+                    assert await page.locator('.source-card').count() == 0
                     await page.locator('.crawler-detail').get_by_text('最新入库', exact=False).first.wait_for()
                     await page.screenshot(path=str(output / 'crawler-detail.png'))
                     await page.goto(origin + f'/news?news={news_id}')
@@ -183,23 +178,17 @@ async def main():
                     await page.get_by_role('button', name='★ 已收藏', exact=True).first.wait_for()
                     await page.reload()
                     await page.get_by_role('button', name='★ 已收藏', exact=True).first.wait_for()
-                    await page.goto(origin + f'/home?event={event_id}')
-                    await page.get_by_role('tab', name='研究结论', exact=True).wait_for()
-                    async with page.expect_download() as download:
-                        await page.get_by_role('button', name='导出研究报告', exact=True).click()
-                    exported = await download.value
-                    report = Path(await exported.path()).read_text()
-                    assert '成功研究版本 #' in report and '本版本新闻来源（研究时快照）' in report
-                    assert news.url in report
-                    for name in ('主体时间线', '证据与新闻包', '版本历史'):
-                        await page.get_by_role('tab', name=name, exact=True).click()
-                    await page.screenshot(path=str(output / 'event-detail.png'), full_page=True)
+                    await page.goto(origin + '/history')
+                    await page.get_by_role('heading', name='404', exact=True).wait_for()
                     await page.set_viewport_size({'width': 390, 'height': 844})
-                    for route in ('news', 'market', 'skills', 'settings', 'calendar', 'home', 'crawler', 'chat'):
+                    for route in ('news', 'reports', 'market', 'skills', 'settings', 'calendar', 'home', 'crawler', 'chat'):
                         await page.goto(origin + '/' + route)
                         await page.locator('.terminal-shell').wait_for()
                         await page.wait_for_timeout(300)
                         assert await page.evaluate('document.documentElement.scrollWidth <= innerWidth'), 'mobile-' + route
+                        if route == 'crawler':
+                            header = await page.get_by_role('columnheader', name='累计收录').bounding_box()
+                            assert header and header['x'] >= 0 and header['x'] + header['width'] <= 390
                         await page.screenshot(path=str(output / ('mobile-' + route + '.png')), full_page=True)
                     await page.set_viewport_size({'width': 390, 'height': 844})
                     await page.goto(origin + '/market')
@@ -218,7 +207,7 @@ async def main():
         finally:
             await client.post('/api/auth/logout')
     await redis.aclose()
-    print('Workspace bookmarks, filters, event details, retired-page 404, login and eight desktop/mobile workspaces passed')
+    print('Workspace bookmarks, once-only analysis filters, raw-news export, retired-page 404, login and nine desktop/mobile workspaces passed')
 
 
 asyncio.run(main())

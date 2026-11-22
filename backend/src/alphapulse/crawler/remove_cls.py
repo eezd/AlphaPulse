@@ -10,7 +10,7 @@ from alphapulse.core.db import engine
 
 SOURCES = ('cls_depth', 'cls_telegraph')
 AI_TABLES = (
-    'news_research_batch_events', 'news_research_batch_packages', 'news_research_batches',
+    # 仅对应 c91234567890；后续批次表在该历史版本尚不存在。
     'news_research_references', 'news_research_versions', 'news_research_memberships',
     'news_research_attempts', 'news_research_packages', 'news_research_events',
     'news_ai_reprocess_targets', 'news_ai_reprocess_items', 'news_ai_reprocess_jobs',
@@ -49,6 +49,8 @@ async def protected_records(connection):
 
 
 async def cleanup(connection, execute=False):
+    if await connection.scalar(text('SELECT version_num FROM alembic_version')) != 'c91234567890':
+        raise RuntimeError('历史财联社清理仅允许 schema c91234567890；研究来源已重新接入，拒绝清理')
     params = {'sources': list(SOURCES)}
     optional = tuple([table for table in OPTIONAL_AI_TABLES
                      if await connection.scalar(text('SELECT to_regclass(:name)'), {'name': table})])

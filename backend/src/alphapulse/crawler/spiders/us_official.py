@@ -157,7 +157,8 @@ class USOfficialSpider(NewsSpider):
     def request_for(self, url, callback, lane, **meta):
         url = official_url(self.name, url)
         request = self.request(url, callback, lane=lane, official_source=self.name, **meta)
-        if self.name in ('sec', 'doj', 'congress'):
+        congress_document = self.name == 'congress' and meta.get('document', {}).get('kind') not in ('article', 'doj')
+        if self.name in ('sec', 'doj') or (self.name == 'congress' and not congress_document):
             request.meta['dont_retry'] = True
         request.priority = 10 if lane == 'realtime' else -10
         # Credentials never travel to document hosts or into persisted URLs.

@@ -6,8 +6,6 @@ import { downloadText } from "@@/utils/export"
 import { diffLines, formatTime, htmlToLines } from "@@/utils/text"
 import { Link } from "@element-plus/icons-vue"
 
-import NewsRisk from "./NewsRisk.vue"
-
 const props = defineProps<{ newsId: number | null }>()
 
 const sourceNames = useSourceNames()
@@ -93,7 +91,21 @@ function exportNews() {
           导出 Markdown
         </el-button>
       </div>
-      <NewsRisk :news-id="detail.id" :revision="detail.revision_no" />
+      <div v-if="detail.analysis_admission" class="text-sm text-slate-500">
+        {{ { collect_only: '仅采集', archive: '研究资料库', report: '参与报告' }[detail.analysis_admission.mode] }}：{{ detail.analysis_admission.reason }}
+      </div>
+      <div v-if="detail.analysis && (detail.analysis_admission?.mode !== 'collect_only' || !['pending', 'processing'].includes(detail.analysis.state))" class="rounded bg-sky-50 p-3">
+        <router-link :to="{ path: '/home', query: { analysis: detail.analysis.id } }">
+          单篇分析 v{{ detail.analysis.version_no }} · {{ detail.analysis.state }}
+        </router-link>
+        <p>{{ '★'.repeat(detail.analysis.importance_stars ?? 0) }} {{ detail.analysis.importance_score ?? '' }} · {{ detail.analysis.result?.summary }}</p>
+        <p v-if="detail.analysis.source_changed">
+          分析对应旧版原文
+        </p>
+        <el-tag v-for="word in detail.keywords ?? []" :key="word.canonical">
+          {{ word.canonical }}
+        </el-tag>
+      </div>
       <div class="flex flex-wrap items-center gap-2">
         <el-tag size="small">
           {{ sourceNames[detail.source_code] ?? detail.source_code }}
@@ -107,7 +119,7 @@ function exportNews() {
       </div>
       <div class="grid grid-cols-2 gap-x-6 gap-y-2 border border-slate-200 rounded-lg border-solid bg-slate-50 px-3 py-2 text-sm">
         <div>
-          <span class="label">发布时间</span><span class="num">{{ detail.published_at_precision === "date" ? `${detail.published_date}（仅日期）` : formatTime(detail.published_at, "YYYY-MM-DD HH:mm:ss") }}</span>
+          <span class="label">发布时间</span><span class="num">{{ detail.published_at_precision === "unknown" ? "发布时间未知" : detail.published_at_precision === "date" ? `${detail.published_date}（仅日期）` : formatTime(detail.published_at, "YYYY-MM-DD HH:mm:ss") }}</span>
         </div>
         <div>
           <span class="label">作者</span>{{ detail.author || "-" }}
@@ -123,6 +135,24 @@ function exportNews() {
           <el-link :href="detail.url" target="_blank" type="primary" :icon="Link">
             原文链接
           </el-link>
+        </div>
+      </div>
+      <div v-if="detail.research" class="research-metadata flex flex-col gap-2 text-sm">
+        <div>{{ detail.research.publisher_name }} · {{ { full: '网页全文', excerpt: '公开摘要', metadata: '仅元数据', extraction_failed: '正文提取失败' }[detail.research.content_status] }}</div>
+        <div v-for="byline in detail.research.bylines" :key="byline.name">
+          署名：{{ byline.name }}<span v-if="byline.organization"> · {{ byline.organization }}</span>
+        </div>
+        <el-alert v-if="detail.research.access_status !== 'public'" title="原站访问受限或状态未确认，当前展示已取得的公开内容。" type="warning" :closable="false" />
+        <p v-if="!detail.content_html">
+          {{ detail.summary }}
+        </p>
+        <el-link v-if="detail.research.original_url" :href="detail.research.original_url" target="_blank">
+          原始出处
+        </el-link>
+        <div v-for="attachment in detail.research.attachments" :key="attachment.url">
+          <el-link :href="attachment.url" target="_blank">
+            {{ attachment.title || '附件' }}
+          </el-link>（仅链接，未下载）
         </div>
       </div>
       <el-alert

@@ -5,8 +5,10 @@ from datetime import UTC, date, datetime, timedelta
 import json
 import os
 from pathlib import Path
+from unittest.mock import patch
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from alphapulse.calendar.jin10 import normalize
 from alphapulse.calendar.jin10_history import calendar_history
@@ -21,8 +23,61 @@ from alphapulse.models import EconomicRelease, EconomicRevision, RawResponse, So
 from alphapulse.models.jin10 import Jin10Connection, Jin10SyncDay
 
 
+async def verify_results_pool():
+    """Backlogged polling must leave connections for nested raw evidence writes."""
+    from alphapulse.calendar import worker as module
+
+    url = os.environ['DATABASE_URL']
+    assert url.startswith('postgresql+asyncpg://ci:ci-only@')
+    pool = create_async_engine(url, pool_size=1, max_overflow=4, pool_timeout=.2)
+    sessions = async_sessionmaker(pool, expire_on_commit=False)
+    now = datetime.now(UTC)
+    seen = set()
+    worker = module.CalendarWorker()
+
+    async def result_page(row):
+        # Match the separate evidence session used by CalendarWorker._fetch.
+        await asyncio.sleep(.03)
+        async with sessions() as session:
+            await save_raw(session, row.source, 'https://example.invalid/pool', 200, {}, b'isolated-calendar-pool', now)
+            await session.commit()
+        seen.add(row.id)
+        return None
+
+    worker.result_page = result_page
+    try:
+        async with sessions() as session:
+            session.add(Source(code='ci_pool', name='Calendar pool regression', list_url='https://example.invalid', interval_seconds=60, collector='calendar'))
+            rows = [EconomicRelease(source='ci_pool', external_id=f'pool:{index}', family='pool', title='Pool regression',
+                                    scheduled_at=now - timedelta(minutes=15), schedule_checked_at=now, schedule_url='https://example.invalid',
+                                    next_check_at=now - timedelta(seconds=1)) for index in range(8)]
+            session.add_all(rows)
+            await session.commit()
+            expected = {row.id for row in rows}
+        with patch.object(module, 'SessionLocal', sessions):
+            # One schedule transaction shares the real five-connection pool.
+            async with pool.connect() as reserved:
+                await reserved.execute(text('SELECT 1'))
+                async with asyncio.timeout(5):
+                    while not expected.issubset(seen):
+                        await worker.results()
+        async with sessions() as session:
+            persisted = list(await session.scalars(select(EconomicRelease).where(EconomicRelease.id.in_(expected))))
+            assert all(row.last_checked_at is not None and row.next_check_at > now for row in persisted)
+        print('Calendar backlog and nested evidence connection acceptance passed', flush=True)
+    finally:
+        await worker.http.aclose()
+        await worker.bls.aclose()
+        async with pool.begin() as connection:
+            for table in ('economic_releases', 'raw_responses', 'sources'):
+                column = 'source' if table == 'economic_releases' else 'source_code' if table == 'raw_responses' else 'code'
+                await connection.execute(text(f'DELETE FROM {table} WHERE {column}=:source'), {'source': 'ci_pool'})
+        await pool.dispose()
+
+
 async def verify():
     assert os.environ["DATABASE_URL"].startswith("postgresql+asyncpg://ci:ci-only@"), "Calendar acceptance requires the isolated CI database"
+    await verify_results_pool()
     fixture = json.loads((Path("tests/fixtures/calendar/jin10.json")).read_text())
     now = datetime(2026, 11, 5, tzinfo=UTC)
     connected = now - timedelta(days=1)
@@ -152,4 +207,5 @@ async def main():
         await engine.dispose()
 
 
-asyncio.run(main())
+if __name__ == '__main__':
+    asyncio.run(main())

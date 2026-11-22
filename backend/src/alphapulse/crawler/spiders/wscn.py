@@ -35,7 +35,7 @@ class WscnNewsSpider(NewsSpider):
 
     async def parse_list(self, response: Response):
         data = _api_data(response.json())
-        # 信息流里混有快讯，快讯由 wscn_live 负责
+        # 信息流混有快讯，仅采集文章。
         rows = [x["resource"] for x in data["items"] if x["resource_type"] == "article"]
         ids = [str(r["id"]) for r in rows]
         known = await self.known_items(ids)
@@ -90,46 +90,3 @@ class WscnNewsSpider(NewsSpider):
             is_paywalled=bool(a.get("is_need_pay")),
             extra={"source_name": a.get("source_name"), "is_priced": a.get("is_priced")},
         )
-
-
-class WscnLiveSpider(NewsSpider):
-    """华尔街见闻·快讯：列表即全文"""
-
-    name = "wscn_live"
-
-    def first_requests(self) -> list[Request]:
-        return [self.list_request("", 1)]
-
-    def list_request(self, cursor: str, page: int, **meta) -> Request:
-        return self.request(f"{API}/lives?channel=global-channel&limit=50&cursor={cursor}", self.parse_list, page=page, **meta)
-
-    def history_request(self, before: datetime) -> Request:
-        # cursor 为时间上界（秒）；接口只保留约最近 180 天，更早返回空
-        return self.list_request(str(int(before.timestamp())), 1, history=True)
-
-    async def parse_list(self, response: Response):
-        data = _api_data(response.json())
-        rows = data["items"]
-        # 先查已入库集合，再产出条目：否则管道可能先落库，导致误判为没有新条目而停止翻页
-        ids = [str(x["id"]) for x in rows]
-        known = await self.known_items(ids)
-        for x in rows:
-            yield self.item(
-                response,
-                external_id=str(x["id"]),
-                url=x["uri"],
-                title=x["title"],
-                summary="",
-                content_html=x["content"] + (x.get("content_more") or ""),
-                published_at=ts(x["display_time"]),
-                author=(x.get("author") or {}).get("display_name"),
-                tags=x.get("channels"),
-                extra={"score": x.get("score"), "symbols": x.get("symbols")},
-            )
-        page = response.meta["page"]
-        oldest = ts(min(x["display_time"] for x in rows)) if rows else None
-        if response.meta.get("history"):
-            if self.history_step(oldest):
-                yield self.list_request(data["next_cursor"], page + 1, history=True)
-        elif rows and self.should_continue(ids, known, oldest, page):
-            yield self.list_request(data["next_cursor"], page + 1)

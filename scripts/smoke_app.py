@@ -40,7 +40,7 @@ async def main():
         try:
             for path in ['/api/auth/me', '/api/news?q=CI', '/api/crawler/sources', '/api/market/symbols',
                          '/api/skills/tree', '/api/chat/session',
-                         '/api/risk/settings', '/api/risk/events', '/api/risk/packages',
+                         '/api/briefings/settings', '/api/briefings/reports', '/api/briefings/analyses',
                          '/api/calendar?start=' + now.strftime('%Y-%m-%d')]:
                 response = await client.get(path)
                 response.raise_for_status()
@@ -50,8 +50,8 @@ async def main():
                                  ('DELETE', '/api/settings/exchange'), ('POST', '/api/settings/exchange/test')]:
                 assert (await client.request(method, path)).status_code == 404, (method, path)
             assert 'CI synthetic news' in (await client.get('/api/news?q=CI')).text
-            for endpoint in ('events', 'packages'):
-                assert (await client.get('/api/risk/'+endpoint, params={'page': 0})).status_code == 422
+            for endpoint in ('reports', 'analyses'):
+                assert (await client.get('/api/briefings/'+endpoint, params={'page': 0})).status_code == 422
             item = (await client.get('/api/news?q=CI')).json()['data']['items'][0]
             selected = await client.get('/api/news', params=[('ids', item['id']), ('ids', 2147483647)])
             assert selected.status_code == 200 and [n['id'] for n in selected.json()['data']['items']] == [item['id']]

@@ -1,0 +1,931 @@
+{
+  "synthetic": true,
+  "note": "合成材料、固定上下游输入；不是实际机构结论或模型结果。D1含故意错误的早报以检验纠错，不作真实时序。",
+  "cases": [
+    {
+      "case_id": "C1",
+      "stage": "analysis",
+      "schema": "NewsAnalysisResult",
+      "input": {
+        "id": 1001,
+        "news_id": 1001,
+        "source_code": "citi_insights",
+        "title": "C1",
+        "summary": "",
+        "content_text": "Citi研究员林甲预计，若通胀连续两季下降，2027年消费增速可能为2%；工资停滞会削弱该判断。",
+        "url": "https://example.invalid/synthetic/C1",
+        "published_at": "2026-11-15T00:00:00+08:00",
+        "first_seen_at": "2026-11-15T02:00:00Z",
+        "extra": {
+          "published_date": "2026-11-15",
+          "published_at_precision": "date",
+          "research": {
+            "publisher_code": "citi_insights",
+            "publisher_name": "Citi",
+            "bylines": [
+              {
+                "name": "林甲",
+                "profile_url": null,
+                "organization": "Citi"
+              }
+            ],
+            "canonical_url": "https://example.invalid/synthetic/C1",
+            "original_url": "https://example.invalid/synthetic/C1",
+            "language": "zh",
+            "section": null,
+            "content_status": "full",
+            "access_status": "public",
+            "attachments": []
+          }
+        },
+        "research_context": {
+          "mode": "report",
+          "reason": "new_publication",
+          "activated_at": "2026-11-15T00:00:00Z",
+          "published_date": "2026-11-15"
+        }
+      },
+      "input_sha256": "a1fc539b037e9005958b6e01af83f2b64c54822949dba0f6847faef547bf1db5"
+    },
+    {
+      "case_id": "C2",
+      "stage": "analysis",
+      "schema": "NewsAnalysisResult",
+      "input": {
+        "id": 1002,
+        "news_id": 1002,
+        "source_code": "citi_insights",
+        "title": "C2",
+        "summary": "",
+        "content_text": "Citi本文引述丙大学丁教授称，投资可能在2027年回升；文章同时指出订单尚未改善。",
+        "url": "https://example.invalid/synthetic/C2",
+        "published_at": "2026-11-15T00:00:00+08:00",
+        "first_seen_at": "2026-11-15T02:00:00Z",
+        "extra": {
+          "published_date": "2026-11-15",
+          "published_at_precision": "date",
+          "research": {
+            "publisher_code": "citi_insights",
+            "publisher_name": "Citi",
+            "bylines": [],
+            "canonical_url": "https://example.invalid/synthetic/C2",
+            "original_url": "https://example.invalid/synthetic/C2",
+            "language": "zh",
+            "section": null,
+            "content_status": "full",
+            "access_status": "public",
+            "attachments": []
+          }
+        },
+        "research_context": {
+          "mode": "report",
+          "reason": "new_publication",
+          "activated_at": "2026-11-15T00:00:00Z",
+          "published_date": "2026-11-15"
+        }
+      },
+      "input_sha256": "5bcd5203097a70126160fb2679cac2bec443ecf56b1be7043de65dbaf28dec72"
+    },
+    {
+      "case_id": "J1",
+      "stage": "analysis",
+      "schema": "NewsAnalysisResult",
+      "input": {
+        "id": 1003,
+        "news_id": 1003,
+        "source_code": "jpmorgan_research",
+        "title": "J1",
+        "summary": "",
+        "content_text": "J.P. Morgan研究员周乙认为，只有融资成本下降，制造业订单才可能在2027年上半年回升。当前订单同比下降3%。",
+        "url": "https://example.invalid/synthetic/J1",
+        "published_at": "2026-11-15T00:00:00+08:00",
+        "first_seen_at": "2026-11-15T02:00:00Z",
+        "extra": {
+          "published_date": "2026-11-15",
+          "published_at_precision": "date",
+          "research": {
+            "publisher_code": "jpmorgan_research",
+            "publisher_name": "J.P. Morgan",
+            "bylines": [
+              {
+                "name": "周乙",
+                "profile_url": null,
+                "organization": "J.P. Morgan"
+              }
+            ],
+            "canonical_url": "https://example.invalid/synthetic/J1",
+            "original_url": "https://example.invalid/synthetic/J1",
+            "language": "zh",
+            "section": null,
+            "content_status": "full",
+            "access_status": "public",
+            "attachments": []
+          }
+        },
+        "research_context": {
+          "mode": "report",
+          "reason": "new_publication",
+          "activated_at": "2026-11-15T00:00:00Z",
+          "published_date": "2026-11-15"
+        }
+      },
+      "input_sha256": "c9bb79181daa32db52a5bc3c491da5df8634debb4eee4a055667e62cf5755ec9"
+    },
+    {
+      "case_id": "J2",
+      "stage": "analysis",
+      "schema": "NewsAnalysisResult",
+      "input": {
+        "id": 1004,
+        "news_id": 1004,
+        "source_code": "jpmorgan_research",
+        "title": "J2",
+        "summary": "",
+        "content_text": "J.P. Morgan于2025年1月提出需求复苏假设，该假设以库存正常化为前提。",
+        "url": "https://example.invalid/synthetic/J2",
+        "published_at": "2025-01-06T00:00:00+08:00",
+        "first_seen_at": "2026-11-15T02:00:00Z",
+        "extra": {
+          "published_date": "2025-01-06",
+          "published_at_precision": "date",
+          "research": {
+            "publisher_code": "jpmorgan_research",
+            "publisher_name": "J.P. Morgan",
+            "bylines": [
+              {
+                "name": "周乙",
+                "profile_url": null,
+                "organization": "J.P. Morgan"
+              }
+            ],
+            "canonical_url": "https://example.invalid/synthetic/J2",
+            "original_url": "https://example.invalid/synthetic/J2",
+            "language": "zh",
+            "section": null,
+            "content_status": "full",
+            "access_status": "public",
+            "attachments": []
+          }
+        },
+        "research_context": {
+          "mode": "archive",
+          "reason": "late_arrival",
+          "activated_at": "2026-11-15T00:00:00Z",
+          "published_date": "2025-01-06"
+        }
+      },
+      "input_sha256": "41fd4c8d203329dab6c8aa80061378765cf8ca06227d1ee1068c1b678413dffa"
+    },
+    {
+      "case_id": "G1",
+      "stage": "analysis",
+      "schema": "NewsAnalysisResult",
+      "input": {
+        "id": 1005,
+        "news_id": 1005,
+        "source_code": "goldman_insights",
+        "title": "G1",
+        "summary": "",
+        "content_text": "Goldman Sachs研究员陈丙预计，若电网扩建获批，铜需求可能于2027年增加；项目延期是主要风险。",
+        "url": "https://example.invalid/synthetic/G1",
+        "published_at": "2026-11-15T00:00:00+08:00",
+        "first_seen_at": "2026-11-15T02:00:00Z",
+        "extra": {
+          "published_date": "2026-11-15",
+          "published_at_precision": "date",
+          "research": {
+            "publisher_code": "goldman_insights",
+            "publisher_name": "Goldman Sachs",
+            "bylines": [
+              {
+                "name": "陈丙",
+                "profile_url": null,
+                "organization": "Goldman Sachs"
+              }
+            ],
+            "canonical_url": "https://example.invalid/synthetic/G1",
+            "original_url": "https://example.invalid/synthetic/G1",
+            "language": "zh",
+            "section": null,
+            "content_status": "full",
+            "access_status": "public",
+            "attachments": []
+          }
+        },
+        "research_context": {
+          "mode": "report",
+          "reason": "new_publication",
+          "activated_at": "2026-11-15T00:00:00Z",
+          "published_date": "2026-11-15"
+        }
+      },
+      "input_sha256": "eae1c8e2daf8b6c54e2ea69e939da3b8b521874e3c63ed96635417800e661ca8"
+    },
+    {
+      "case_id": "G2",
+      "stage": "analysis",
+      "schema": "NewsAnalysisResult",
+      "input": {
+        "id": 1006,
+        "news_id": 1006,
+        "source_code": "goldman_insights",
+        "title": "G2",
+        "summary": "",
+        "content_text": "Goldman Sachs本文讨论人工智能资本开支。甲公司已批准预算10亿元；乙公司仅提出预算20亿元，尚未获批。",
+        "url": "https://example.invalid/synthetic/G2",
+        "published_at": "2026-11-15T00:00:00+08:00",
+        "first_seen_at": "2026-11-15T02:00:00Z",
+        "extra": {
+          "published_date": "2026-11-15",
+          "published_at_precision": "date",
+          "research": {
+            "publisher_code": "goldman_insights",
+            "publisher_name": "Goldman Sachs",
+            "bylines": [],
+            "canonical_url": "https://example.invalid/synthetic/G2",
+            "original_url": "https://example.invalid/synthetic/G2",
+            "language": "zh",
+            "section": null,
+            "content_status": "full",
+            "access_status": "public",
+            "attachments": []
+          }
+        },
+        "research_context": {
+          "mode": "report",
+          "reason": "new_publication",
+          "activated_at": "2026-11-15T00:00:00Z",
+          "published_date": "2026-11-15"
+        }
+      },
+      "input_sha256": "af92afd35ad6d876499ea28c27a2fb8aad2f836ec90a0fba1c27174fca69c950"
+    },
+    {
+      "case_id": "M1",
+      "stage": "analysis",
+      "schema": "NewsAnalysisResult",
+      "input": {
+        "id": 1007,
+        "news_id": 1007,
+        "source_code": "synthetic_general",
+        "title": "M1",
+        "summary": "",
+        "content_text": "甲机构上月公告的许可将于明年到期。乙公司今日发布业绩，同比增幅5%。丙研究员认为利率下降可能改善融资；同期BTC上涨1%，材料未提供成交量。",
+        "url": "https://example.invalid/synthetic/M1",
+        "published_at": "2026-11-15T00:00:00+08:00",
+        "first_seen_at": "2026-11-15T02:00:00Z",
+        "extra": {
+          "published_date": "2026-11-15",
+          "published_at_precision": "date"
+        }
+      },
+      "input_sha256": "bd1b1cd102b009662e1cd05cfc7c2f9306057a654f18e1e059ce47d6055475a6"
+    },
+    {
+      "case_id": "T1",
+      "stage": "analysis",
+      "schema": "NewsAnalysisResult",
+      "input": {
+        "id": 1008,
+        "news_id": 1008,
+        "source_code": "citi_insights",
+        "title": "T1",
+        "summary": "",
+        "content_text": "Citi研究员林甲预计，若通胀连续两季下降，2027年消费增速可能为2%；工资停滞会削弱该判断。",
+        "url": "https://example.invalid/synthetic/T1",
+        "published_at": "2026-11-15T00:00:00+08:00",
+        "first_seen_at": "2026-11-15T16:01:00Z",
+        "extra": {
+          "published_date": "2026-11-15",
+          "published_at_precision": "date",
+          "research": {
+            "publisher_code": "citi_insights",
+            "publisher_name": "Citi",
+            "bylines": [
+              {
+                "name": "林甲",
+                "profile_url": null,
+                "organization": "Citi"
+              }
+            ],
+            "canonical_url": "https://example.invalid/synthetic/T1",
+            "original_url": "https://example.invalid/synthetic/T1",
+            "language": "zh",
+            "section": null,
+            "content_status": "full",
+            "access_status": "public",
+            "attachments": []
+          }
+        },
+        "research_context": {
+          "mode": "archive",
+          "reason": "late_arrival",
+          "activated_at": "2026-11-15T00:00:00Z",
+          "published_date": "2026-11-15"
+        }
+      },
+      "input_sha256": "c2f7eb485bea18fa9dbc5e8c7d4e21b7ac840bac09b15cf9e6750cad5a349a9a"
+    },
+    {
+      "case_id": "P1-map",
+      "stage": "period",
+      "schema": "ReportResult",
+      "input": {
+        "kind": "evening",
+        "report_date": "2026-11-15",
+        "window_start": "2026-11-15T01:00:00Z",
+        "window_end": "2026-11-15T10:00:00Z",
+        "cutoff_at": "2026-11-15T10:05:00Z",
+        "market": [],
+        "coverage": {
+          "total": 4,
+          "available": 4,
+          "missing": 0,
+          "missing_rate": 0
+        },
+        "historical_backfill": false,
+        "operation": "period_map",
+        "cards": [
+          {
+            "analysis_id": 1001,
+            "news_id": 1001,
+            "version_no": 1,
+            "effective_at": "2026-11-15T02:00:00Z",
+            "time_basis": "first_seen_at",
+            "source_revision": 1,
+            "source": {
+              "source_code": "citi_insights",
+              "url": "https://example.invalid/synthetic/C1",
+              "title": "C1",
+              "published_at": "2026-11-15T00:00:00+08:00",
+              "first_seen_at": "2026-11-15T02:00:00Z",
+              "research": {
+                "publisher_code": "citi_insights",
+                "publisher_name": "Citi",
+                "bylines": [
+                  {
+                    "name": "林甲",
+                    "profile_url": null,
+                    "organization": "Citi"
+                  }
+                ],
+                "canonical_url": "https://example.invalid/synthetic/C1",
+                "original_url": "https://example.invalid/synthetic/C1",
+                "language": "zh",
+                "section": null,
+                "content_status": "full",
+                "access_status": "public",
+                "attachments": [],
+                "published_date": "2026-11-15"
+              }
+            },
+            "research_context": {
+              "mode": "report",
+              "reason": "new_publication",
+              "activated_at": "2026-11-15T00:00:00Z",
+              "published_date": "2026-11-15"
+            },
+            "importance_stars": 2,
+            "result": {
+              "keywords": [
+                {
+                  "canonical": "Citi",
+                  "aliases": [
+                    "Citi"
+                  ],
+                  "kind": "entity",
+                  "quote": "Citi"
+                }
+              ],
+              "summary": "Citi研究员林甲预计，若通胀连续两季下降，2027年消费增速可能为2%；工资停滞会削弱该判断。",
+              "facts": [
+                {
+                  "text": "Citi研究员林甲预计，若通胀连续两季下降，2027年消费增速可能为2%；工资停滞会削弱该判断。",
+                  "quote": "Citi研究员林甲预计，若通胀连续两季下降，2027年消费增速可能为2%；工资停滞会削弱该判断。"
+                }
+              ],
+              "impact": "这是带条件的机构预测；实绩尚未提供。",
+              "importance_score": 35,
+              "importance_reason": "一般条件研究，尚无已落地广泛影响。",
+              "primary_region": {
+                "code": "GLOBAL",
+                "name": "全球"
+              },
+              "related_regions": [],
+              "assets": [],
+              "uncertainties": [
+                "实际结果尚待后续材料验证。"
+              ],
+              "scenarios": []
+            }
+          },
+          {
+            "analysis_id": 1003,
+            "news_id": 1003,
+            "version_no": 1,
+            "effective_at": "2026-11-15T02:00:00Z",
+            "time_basis": "first_seen_at",
+            "source_revision": 1,
+            "source": {
+              "source_code": "jpmorgan_research",
+              "url": "https://example.invalid/synthetic/J1",
+              "title": "J1",
+              "published_at": "2026-11-15T00:00:00+08:00",
+              "first_seen_at": "2026-11-15T02:00:00Z",
+              "research": {
+                "publisher_code": "jpmorgan_research",
+                "publisher_name": "J.P. Morgan",
+                "bylines": [
+                  {
+                    "name": "周乙",
+                    "profile_url": null,
+                    "organization": "J.P. Morgan"
+                  }
+                ],
+                "canonical_url": "https://example.invalid/synthetic/J1",
+                "original_url": "https://example.invalid/synthetic/J1",
+                "language": "zh",
+                "section": null,
+                "content_status": "full",
+                "access_status": "public",
+                "attachments": [],
+                "published_date": "2026-11-15"
+              }
+            },
+            "research_context": {
+              "mode": "report",
+              "reason": "new_publication",
+              "activated_at": "2026-11-15T00:00:00Z",
+              "published_date": "2026-11-15"
+            },
+            "importance_stars": 2,
+            "result": {
+              "keywords": [
+                {
+                  "canonical": "J.P. Morgan",
+                  "aliases": [
+                    "J.P. Morgan"
+                  ],
+                  "kind": "entity",
+                  "quote": "J.P. Morgan"
+                }
+              ],
+              "summary": "J.P. Morgan研究员周乙认为，只有融资成本下降，制造业订单才可能在2027年上半年回升。当前订单同比下降3%。",
+              "facts": [
+                {
+                  "text": "J.P. Morgan研究员周乙认为，只有融资成本下降，制造业订单才可能在2027年上半年回升。当前订单同比下降3%。",
+                  "quote": "J.P. Morgan研究员周乙认为，只有融资成本下降，制造业订单才可能在2027年上半年回升。当前订单同比下降3%。"
+                }
+              ],
+              "impact": "这是带条件的机构预测；实绩尚未提供。",
+              "importance_score": 35,
+              "importance_reason": "一般条件研究，尚无已落地广泛影响。",
+              "primary_region": {
+                "code": "GLOBAL",
+                "name": "全球"
+              },
+              "related_regions": [],
+              "assets": [],
+              "uncertainties": [
+                "实际结果尚待后续材料验证。"
+              ],
+              "scenarios": []
+            }
+          },
+          {
+            "analysis_id": 1005,
+            "news_id": 1005,
+            "version_no": 1,
+            "effective_at": "2026-11-15T02:00:00Z",
+            "time_basis": "first_seen_at",
+            "source_revision": 1,
+            "source": {
+              "source_code": "goldman_insights",
+              "url": "https://example.invalid/synthetic/G1",
+              "title": "G1",
+              "published_at": "2026-11-15T00:00:00+08:00",
+              "first_seen_at": "2026-11-15T02:00:00Z",
+              "research": {
+                "publisher_code": "goldman_insights",
+                "publisher_name": "Goldman Sachs",
+                "bylines": [
+                  {
+                    "name": "陈丙",
+                    "profile_url": null,
+                    "organization": "Goldman Sachs"
+                  }
+                ],
+                "canonical_url": "https://example.invalid/synthetic/G1",
+                "original_url": "https://example.invalid/synthetic/G1",
+                "language": "zh",
+                "section": null,
+                "content_status": "full",
+                "access_status": "public",
+                "attachments": [],
+                "published_date": "2026-11-15"
+              }
+            },
+            "research_context": {
+              "mode": "report",
+              "reason": "new_publication",
+              "activated_at": "2026-11-15T00:00:00Z",
+              "published_date": "2026-11-15"
+            },
+            "importance_stars": 2,
+            "result": {
+              "keywords": [
+                {
+                  "canonical": "Goldman Sachs",
+                  "aliases": [
+                    "Goldman Sachs"
+                  ],
+                  "kind": "entity",
+                  "quote": "Goldman Sachs"
+                }
+              ],
+              "summary": "Goldman Sachs研究员陈丙预计，若电网扩建获批，铜需求可能于2027年增加；项目延期是主要风险。",
+              "facts": [
+                {
+                  "text": "Goldman Sachs研究员陈丙预计，若电网扩建获批，铜需求可能于2027年增加；项目延期是主要风险。",
+                  "quote": "Goldman Sachs研究员陈丙预计，若电网扩建获批，铜需求可能于2027年增加；项目延期是主要风险。"
+                }
+              ],
+              "impact": "这是带条件的机构预测；实绩尚未提供。",
+              "importance_score": 35,
+              "importance_reason": "一般条件研究，尚无已落地广泛影响。",
+              "primary_region": {
+                "code": "GLOBAL",
+                "name": "全球"
+              },
+              "related_regions": [],
+              "assets": [],
+              "uncertainties": [
+                "实际结果尚待后续材料验证。"
+              ],
+              "scenarios": []
+            }
+          },
+          {
+            "analysis_id": 1101,
+            "news_id": 1101,
+            "version_no": 1,
+            "effective_at": "2026-11-15T02:00:00Z",
+            "time_basis": "first_seen_at",
+            "source_revision": 1,
+            "source": {
+              "source_code": "synthetic_reprint",
+              "url": "https://example.invalid/synthetic/reprint",
+              "title": "转载C1",
+              "published_at": "2026-11-15T00:00:00+08:00",
+              "first_seen_at": "2026-11-15T02:00:00Z",
+              "research": {
+                "publisher_code": "citi_insights",
+                "publisher_name": "Citi",
+                "bylines": [
+                  {
+                    "name": "林甲",
+                    "profile_url": null,
+                    "organization": "Citi"
+                  }
+                ],
+                "canonical_url": "https://example.invalid/synthetic/C1",
+                "original_url": "https://example.invalid/synthetic/C1",
+                "language": "zh",
+                "section": null,
+                "content_status": "full",
+                "access_status": "public",
+                "attachments": [],
+                "published_date": "2026-11-15"
+              }
+            },
+            "research_context": {
+              "mode": "report",
+              "reason": "new_publication",
+              "activated_at": "2026-11-15T00:00:00Z",
+              "published_date": "2026-11-15"
+            },
+            "importance_stars": 2,
+            "result": {
+              "keywords": [
+                {
+                  "canonical": "Citi",
+                  "aliases": [
+                    "Citi"
+                  ],
+                  "kind": "entity",
+                  "quote": "Citi"
+                }
+              ],
+              "summary": "转载Citi的C1观点：Citi研究员林甲预计，若通胀连续两季下降，2027年消费增速可能为2%；工资停滞会削弱该判断。",
+              "facts": [
+                {
+                  "text": "Citi研究员林甲预计，若通胀连续两季下降，2027年消费增速可能为2%；工资停滞会削弱该判断。",
+                  "quote": "Citi研究员林甲预计，若通胀连续两季下降，2027年消费增速可能为2%；工资停滞会削弱该判断。"
+                }
+              ],
+              "impact": "这是带条件的机构预测；实绩尚未提供。",
+              "importance_score": 35,
+              "importance_reason": "一般条件研究，尚无已落地广泛影响。",
+              "primary_region": {
+                "code": "GLOBAL",
+                "name": "全球"
+              },
+              "related_regions": [],
+              "assets": [],
+              "uncertainties": [
+                "实际结果尚待后续材料验证。"
+              ],
+              "scenarios": []
+            }
+          }
+        ]
+      },
+      "input_sha256": "b1f29b2639e57c26212ded6c0456926e7a45a84eff8ae1c2234f9b8d4dd006af"
+    },
+    {
+      "case_id": "P1-reduce",
+      "stage": "period",
+      "schema": "ReportResult",
+      "input": {
+        "kind": "evening",
+        "report_date": "2026-11-15",
+        "window_start": "2026-11-15T01:00:00Z",
+        "window_end": "2026-11-15T10:00:00Z",
+        "cutoff_at": "2026-11-15T10:05:00Z",
+        "market": [],
+        "coverage": {
+          "total": 4,
+          "available": 4,
+          "missing": 0,
+          "missing_rate": 0
+        },
+        "historical_backfill": false,
+        "operation": "period_reduce",
+        "parts": [
+          {
+            "title": "三家研究的条件预测",
+            "summary": "合成固定输入，非真实机构发布。",
+            "sections": [
+              {
+                "region": {
+                  "code": "GLOBAL",
+                  "name": "全球"
+                },
+                "summary": "条件研究与反证",
+                "events": [
+                  {
+                    "title": "三家研究的条件预测",
+                    "importance_score": 35,
+                    "facts": [
+                      "Citi研究员林甲预计，若通胀连续两季下降，2027年消费增速可能为2%；工资停滞会削弱该判断。",
+                      "J.P. Morgan研究员周乙认为，只有融资成本下降，制造业订单才可能在2027年上半年回升。当前订单同比下降3%。",
+                      "Goldman Sachs研究员陈丙预计，若电网扩建获批，铜需求可能于2027年增加；项目延期是主要风险。"
+                    ],
+                    "source_analysis_ids": [
+                      1001,
+                      1003,
+                      1005
+                    ],
+                    "market_changes": [],
+                    "impact": "仅条件判断，当前材料不足以确认实绩。",
+                    "suggestions": [],
+                    "watch_points": [],
+                    "scenarios": [],
+                    "uncertainties": [
+                      "实际结果尚待验证。"
+                    ]
+                  }
+                ]
+              }
+            ],
+            "highlight_analysis_ids": [
+              1001,
+              1003,
+              1005
+            ]
+          },
+          {
+            "title": "Citi转载",
+            "summary": "合成固定输入，非真实机构发布。",
+            "sections": [
+              {
+                "region": {
+                  "code": "GLOBAL",
+                  "name": "全球"
+                },
+                "summary": "条件研究与反证",
+                "events": [
+                  {
+                    "title": "Citi转载",
+                    "importance_score": 35,
+                    "facts": [
+                      "Citi研究员林甲预计，若通胀连续两季下降，2027年消费增速可能为2%；工资停滞会削弱该判断。"
+                    ],
+                    "source_analysis_ids": [
+                      1101
+                    ],
+                    "market_changes": [],
+                    "impact": "仅条件判断，当前材料不足以确认实绩。",
+                    "suggestions": [],
+                    "watch_points": [],
+                    "scenarios": [],
+                    "uncertainties": [
+                      "实际结果尚待验证。"
+                    ]
+                  }
+                ]
+              }
+            ],
+            "highlight_analysis_ids": [
+              1101
+            ]
+          }
+        ]
+      },
+      "input_sha256": "751e8ad060e9ea4ea10ae225c496ad1bb84c22f1fd840d498cb020dfcf208c2b"
+    },
+    {
+      "case_id": "D1-review",
+      "stage": "daily",
+      "schema": "HighlightReview",
+      "input": {
+        "operation": "highlight_review",
+        "analysis_id": 1001,
+        "news_id": 1001,
+        "source_revision": 1,
+        "article": {
+          "id": 1001,
+          "news_id": 1001,
+          "source_code": "citi_insights",
+          "title": "C1",
+          "summary": "",
+          "content_text": "Citi研究员林甲预计，若通胀连续两季下降，2027年消费增速可能为2%；工资停滞会削弱该判断。",
+          "url": "https://example.invalid/synthetic/C1",
+          "published_at": "2026-11-15T00:00:00+08:00",
+          "first_seen_at": "2026-11-15T02:00:00Z",
+          "extra": {
+            "published_date": "2026-11-15",
+            "published_at_precision": "date",
+            "research": {
+              "publisher_code": "citi_insights",
+              "publisher_name": "Citi",
+              "bylines": [
+                {
+                  "name": "林甲",
+                  "profile_url": null,
+                  "organization": "Citi"
+                }
+              ],
+              "canonical_url": "https://example.invalid/synthetic/C1",
+              "original_url": "https://example.invalid/synthetic/C1",
+              "language": "zh",
+              "section": null,
+              "content_status": "full",
+              "access_status": "public",
+              "attachments": []
+            }
+          },
+          "research_context": {
+            "mode": "report",
+            "reason": "new_publication",
+            "activated_at": "2026-11-15T00:00:00Z",
+            "published_date": "2026-11-15"
+          }
+        }
+      },
+      "input_sha256": "44f8df71becd212b30722e7d84640027eda2ab74f3ec6c4a99dee261a3eb9d84"
+    },
+    {
+      "case_id": "D1-daily",
+      "stage": "daily",
+      "schema": "ReportResult",
+      "input": {
+        "kind": "daily",
+        "report_date": "2026-11-15",
+        "window_start": "2026-11-14T16:00:00Z",
+        "window_end": "2026-11-15T16:00:00Z",
+        "cutoff_at": "2026-11-16T00:05:00Z",
+        "market": [],
+        "coverage": {
+          "total": 4,
+          "available": 4,
+          "missing": 0,
+          "missing_rate": 0
+        },
+        "historical_backfill": false,
+        "operation": "daily",
+        "dependencies": [
+          {
+            "report_id": 2001,
+            "kind": "morning",
+            "version_no": 1,
+            "output": {
+              "title": "合成误读早报",
+              "summary": "合成固定输入，非真实机构发布。",
+              "sections": [
+                {
+                  "region": {
+                    "code": "GLOBAL",
+                    "name": "全球"
+                  },
+                  "summary": "条件研究与反证",
+                  "events": [
+                    {
+                      "title": "合成误读早报",
+                      "importance_score": 35,
+                      "facts": [
+                        "Citi已确认消费增长2%。"
+                      ],
+                      "source_analysis_ids": [
+                        1001
+                      ],
+                      "market_changes": [],
+                      "impact": "仅条件判断，当前材料不足以确认实绩。",
+                      "suggestions": [],
+                      "watch_points": [],
+                      "scenarios": [],
+                      "uncertainties": [
+                        "实际结果尚待验证。"
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "highlight_analysis_ids": [
+                1001
+              ]
+            }
+          },
+          {
+            "report_id": 2002,
+            "kind": "evening",
+            "version_no": 1,
+            "output": {
+              "title": "合成晚报",
+              "summary": "合成固定输入，非真实机构发布。",
+              "sections": [
+                {
+                  "region": {
+                    "code": "GLOBAL",
+                    "name": "全球"
+                  },
+                  "summary": "条件研究与反证",
+                  "events": [
+                    {
+                      "title": "合成晚报",
+                      "importance_score": 35,
+                      "facts": [
+                        "Citi研究员林甲预计，若通胀连续两季下降，2027年消费增速可能为2%；工资停滞会削弱该判断。"
+                      ],
+                      "source_analysis_ids": [
+                        1001
+                      ],
+                      "market_changes": [],
+                      "impact": "仅条件判断，当前材料不足以确认实绩。",
+                      "suggestions": [],
+                      "watch_points": [],
+                      "scenarios": [],
+                      "uncertainties": [
+                        "实际结果尚待验证。"
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "highlight_analysis_ids": [
+                1001
+              ]
+            }
+          },
+          {
+            "report_id": 2003,
+            "kind": "intraday",
+            "version_no": 1,
+            "output": {
+              "title": "合成盘中报",
+              "summary": "无新增材料。",
+              "sections": [],
+              "highlight_analysis_ids": []
+            }
+          }
+        ],
+        "reviews": [
+          {
+            "analysis_id": 1001,
+            "facts": [
+              {
+                "text": "Citi研究员林甲预计，若通胀连续两季下降，2027年消费增速可能为2%；工资停滞会削弱该判断。",
+                "quote": "Citi研究员林甲预计，若通胀连续两季下降，2027年消费增速可能为2%；工资停滞会削弱该判断。"
+              }
+            ],
+            "impact": "机构条件预测，不是已发生的实绩。",
+            "uncertainties": [
+              "工资停滞可能削弱预测。"
+            ]
+          }
+        ]
+      },
+      "input_sha256": "ab6d79a7ec458b51ecfb82223d5bc99fc4e49c14c307dcc809838188339f5a6b"
+    }
+  ]
+}

@@ -6,7 +6,7 @@ from fastapi.responses import RedirectResponse
 from starlette.exceptions import HTTPException
 
 from alphapulse.api import auth, calendar, chat, crawler, market, news, settings, skills, jin10
-from alphapulse.news_research import api as risk
+from alphapulse.briefings import api as briefings
 from alphapulse.api.response import (
     ApiResponse, ValidationErrors, http_error, internal_error, success, validation_error,
 )
@@ -29,7 +29,7 @@ app.include_router(settings.router)
 app.include_router(skills.router)
 app.include_router(chat.router)
 app.include_router(calendar.router)
-app.include_router(risk.router)
+app.include_router(briefings.router)
 app.include_router(jin10.router)
 
 

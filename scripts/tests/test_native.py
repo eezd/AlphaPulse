@@ -11,6 +11,47 @@ import native
 
 
 class NativeTests(unittest.TestCase):
+    def test_build_copies_workflow_required_by_delivery_checks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for directory in ('backend', 'web', 'scripts', '.forgejo/workflows'):
+                (root/directory).mkdir(parents=True)
+            for name in ('release.yml', 'sync-github.yml'):
+                (root/'.forgejo/workflows'/name).write_text('on: workflow_dispatch\n')
+            for name in ('start.sh', 'stop.sh', 'status.sh'):
+                (root/name).write_text('#!/bin/sh\n')
+
+            def process(args, **kwargs):
+                if args == ['pnpm', 'build']:
+                    (kwargs['cwd']/'dist').mkdir()
+                if args[:3] == ['python3', '-m', 'unittest']:
+                    for name in ('release.yml', 'sync-github.yml'):
+                        self.assertEqual((kwargs['cwd']/'.forgejo/workflows'/name).read_bytes(),
+                                         (root/'.forgejo/workflows'/name).read_bytes())
+
+            with patch.object(native, 'ROOT', root), patch.object(native, 'RUNTIME', root/'runtime'), \
+                 patch.object(native, 'identity', return_value={'source_sha': 'a'*40, 'dirty': True}), \
+                 patch.object(native, 'run', return_value='1794224694'), \
+                 patch.object(native.subprocess, 'run', side_effect=process):
+                candidate = native.build()
+            for name in ('release.yml', 'sync-github.yml'):
+                self.assertEqual((candidate/'.forgejo/workflows'/name).read_bytes(),
+                                 (root/'.forgejo/workflows'/name).read_bytes())
+            for name in ('release.sh', 'sysnc-github.sh'):
+                self.assertFalse((candidate/name).exists())
+
+    def test_schema_compatibility_allows_only_explicit_predecessors(self):
+        import runpy
+        from types import SimpleNamespace
+        with patch.dict(sys.modules, {'dotenv': SimpleNamespace(dotenv_values=None)}):
+            compatible = runpy.run_path(str(Path(native.__file__).with_name('maintenance.py')))['schema_compatible']
+        for actual in ('f07890123456', 'a18901234567', 'b29012345678', 'c30123456789', 'd41234567890', 'e52345678901', 'f63456789012', 'unknown'):
+            for expected in ('f07890123456', 'a18901234567', 'b29012345678', 'c30123456789', 'd41234567890', 'e52345678901', 'f63456789012', 'unknown'):
+                self.assertEqual(compatible({actual}, {expected}), actual == expected)
+                self.assertEqual(compatible({actual}, {expected}, previous=True), actual == expected or
+                    (actual, expected) in {('a18901234567', 'f07890123456'), ('b29012345678', 'a18901234567'), ('c30123456789', 'b29012345678'), ('d41234567890', 'c30123456789'), ('e52345678901', 'd41234567890'), ('f63456789012', 'e52345678901')})
+        self.assertFalse(compatible({'b29012345678', 'unexpected'}, {'a18901234567'}, previous=True))
+
     def check_update(self, active, *, activation_error=None, drain_error=None):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -44,12 +85,12 @@ class NativeTests(unittest.TestCase):
 
     def test_start_after_stop_skips_unavailable_api_and_activates(self):
         actions, activations = self.check_update(())
-        self.assertEqual(actions, ['schema', 'schema', 'pause', 'assert-paused', 'restore'])
+        self.assertEqual(actions, ['schema', 'schema-previous', 'pause', 'assert-paused', 'restore'])
         self.assertEqual(activations, 1)
 
     def test_stopped_instance_activation_failure_restores_ai_without_api_health(self):
         actions, _ = self.check_update((), activation_error=RuntimeError('activation failure'))
-        self.assertEqual(actions[-1], 'restore')
+        self.assertEqual(actions[-1], 'restore-rollback')
 
     def test_worker_only_instance_drains_without_chat_api(self):
         actions, _ = self.check_update(('news-risk',))
@@ -58,7 +99,7 @@ class NativeTests(unittest.TestCase):
 
     def test_failed_drain_restores_settings_and_checks_only_original_active_roles(self):
         actions, activations = self.check_update(('api',), drain_error=RuntimeError('drain failure'))
-        self.assertEqual(actions[-1], 'restore')
+        self.assertEqual(actions[-1], 'restore-rollback')
         self.assertEqual(activations, 0)
 
     def test_start_rejects_transitional_services_before_pausing_ai(self):
@@ -84,11 +125,12 @@ class NativeTests(unittest.TestCase):
             root = Path(tmp)
             (root/'config').mkdir()
             (root/'config/app.env').write_text('')
-            with patch.object(native, 'RUNTIME', root), patch.object(native, 'run'), \
+            with patch.object(native, 'RUNTIME', root), patch.object(native, 'run') as run, \
                  patch.object(native, 'build', side_effect=RuntimeError('build failed')), \
                  patch.object(native, 'activate') as activate:
                 with self.assertRaisesRegex(RuntimeError, 'build failed'):
                     native.main()
+                run.assert_not_called()
                 activate.assert_not_called()
 
     def test_status_is_read_only_and_preserves_inactive_exit_code(self):
@@ -119,11 +161,40 @@ class NativeTests(unittest.TestCase):
         self.assertEqual(len(native.UNITS), 6)
         for role in native.ROLES:
             content = native.unit_text(role)
-            self.assertIn('User=alphapulse', content)
-            self.assertIn('WorkingDirectory=', content)
+            self.assertNotIn('User=', content)
+            self.assertNotIn('Group=', content)
+            self.assertIn('Environment=HOME=%h', content)
+            self.assertIn(f'Environment="PLAYWRIGHT_BROWSERS_PATH={native.RUNTIME}/ms-playwright"', content)
+            self.assertIn(f'ExecStart="{native.ROOT}/start.sh" --systemd {role}', content)
+            self.assertIn(f'ExecStop="{native.ROOT}/stop.sh" --systemd {role}', content)
+            self.assertIn('Type=exec', content)
             self.assertNotIn('ExecStartPre', content)
             self.assertIn('Restart=on-failure', content)
-        self.assertIn('--port 21005', native.unit_text('api'))
+
+    def test_systemd_entrypoints_run_foreground_without_service_management(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ('start.sh', 'stop.sh'):
+                script = root/name
+                script.write_text((native.ROOT/name).read_text())
+            backend = root/'runtime/current/backend'
+            interpreter = backend/'.venv/bin/python'
+            interpreter.parent.mkdir(parents=True)
+            interpreter.write_text('#!/bin/sh\nprintf "%s\\n" "$PWD" "$@"\n')
+            interpreter.chmod(0o755)
+            # These modes need only the foreground interpreter, not build or systemctl commands.
+            env = {'PATH': '/nonexistent'}
+            dirname = root/'dirname'
+            dirname.symlink_to('/usr/bin/dirname')
+            for role, module in native.ROLES.items():
+                with self.subTest(role=role):
+                    result = subprocess.check_output(['/bin/bash', str(root/'start.sh'), '--systemd', role],
+                                                     cwd='/', env={**env, 'PATH': tmp}, text=True).splitlines()
+                    expected = ['uvicorn', module, '--host', '127.0.0.1', '--port', '21005',
+                                '--proxy-headers', '--forwarded-allow-ips', '127.0.0.1'] if role == 'api' else [module]
+                    self.assertEqual(result, [str(backend), '-m', *expected])
+                    subprocess.run(['/bin/bash', str(root/'stop.sh'), '--systemd', role], cwd='/', env=env, check=True)
+            self.assertFalse((root/'runtime/.deploy.lock').exists())
 
     def test_activation_failure_restores_previous_link_and_unit_files(self):
         with tempfile.TemporaryDirectory() as tmp:

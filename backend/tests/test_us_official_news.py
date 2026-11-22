@@ -1401,6 +1401,41 @@ def test_selected_news_requests_have_one_retry_owner(app_env):
     assert req.meta['dont_retry'] is True
 
 
+@pytest.mark.parametrize(('url', 'kind'), [
+    ('https://api.congress.gov/v3/bill/111/hconres/135?format=json', 'bill'),
+    ('https://www.congress.gov/118/bills/s3658/BILLS-118s3658es.htm', 'text'),
+])
+def test_congress_official_timeout_retries_before_preserving_history_cursor(app_env, url, kind):
+    from scrapy.downloadermiddlewares.retry import RetryMiddleware
+    from scrapy.settings import Settings
+    from twisted.internet.error import TimeoutError
+
+    obj = spider(app_env, 'congress')
+    doc = {'url': url, 'kind': kind}
+    obj.cursor['history']['pending'] = [doc]
+    request = obj.request_for(url, obj.parse_document, 'history', document=doc)
+    listing = obj.request_for(SOURCES['congress'].entries[0], obj.parse_listing, 'history')
+    assert not request.meta.get('dont_retry')
+    assert not listing.meta.get('dont_retry')
+    assert obj.request_for('https://www.congress.gov/bill/111th-congress/house-concurrent-resolution/135',
+                           obj.parse_document, 'history', document={'kind': 'article'}).meta['dont_retry'] is True
+
+    settings = Settings({'RETRY_TIMES': 2, 'RETRY_EXCEPTIONS': ['twisted.internet.error.TimeoutError'],
+                         'RETRY_PRIORITY_ADJUST': -1, 'RETRY_GIVE_UP_LOG_LEVEL': 'ERROR'})
+    retry = RetryMiddleware(settings)
+    retry.crawler = obj.crawler = SimpleNamespace(spider=obj, settings=settings,
+                                                   stats=SimpleNamespace(inc_value=lambda *_: None))
+    for attempt in (1, 2):
+        request = retry.process_exception(request, TimeoutError())
+        assert request.meta['retry_times'] == attempt
+    assert retry.process_exception(request, TimeoutError()) is None
+    failure = Failure(TimeoutError('timeout'))
+    failure.request = request
+    obj.on_request_error(failure)
+    assert obj.cursor['history']['pending'] == [doc]
+    assert obj.run.errors and not obj.run.history_done
+
+
 def test_doj_captioned_photo_is_not_a_document_gap(app_env):
     obj = spider(app_env, 'doj')
     obj.run.history_deadline = time.monotonic() - 1
